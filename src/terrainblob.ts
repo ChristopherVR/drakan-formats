@@ -20,6 +20,13 @@ import type { TerrainLayer } from './terrain.ts';
 
 /** Largest chunk extent in cells: x is split into ceil(w/12) near-equal pieces, z likewise (98% of real layers). */
 const MAX_CHUNK = 12;
+/**
+ * Most textures one chunk may list. The engine's chunk record is 0x4c bytes with room for 10 texture refs (offsets 0x14..0x3b);
+ * the stream loader (FUN_00165840) does not bounds-check the count, so an 11th ref overwrites the weight-array descriptor and
+ * the heap allocator later loops forever (docs/journal/2026-11-01/ootf-texture-limit.md). Chunk rectangles are free-form in the
+ * file, so a crowded chunk is cut into smaller ones instead.
+ */
+export const MAX_CHUNK_TEXTURES = 10;
 /** Layer definition flag bit: flat layer, no per-vertex normals in the blob. */
 export const LAYER_FLAG_FLAT = 0x04;
 
@@ -37,6 +44,16 @@ export interface TerrainBlobOptions {
      * show), `none` = they never match (what flat layers show). Default: `none` for flat layers, `any` otherwise.
      */
     outside?: 'any' | 'none';
+    /** Most textures per chunk before the chunk is split in two (default {@link MAX_CHUNK_TEXTURES}; 0 = never split). */
+    maxChunkTextures?: number;
+}
+
+/** Cell rectangle of a chunk: x0..x1 and z0..z1 are vertex indices, so the chunk covers cells x0..x1-1 and z0..z1-1. */
+interface ChunkRect {
+    x0: number;
+    x1: number;
+    z0: number;
+    z1: number;
 }
 
 /** Chunk boundaries along one axis: ceil(n/12) pieces of ceil(n/pieces) cells, the last one shorter. */
@@ -95,23 +112,48 @@ export function buildPs2TerrainBlob(layer: TerrainLayer, opts: TerrainBlobOption
 
     const xs = ps2ChunkSplit(w);
     const zs = ps2ChunkSplit(h);
-    o.u32((xs.length - 1) * (zs.length - 1));
     const tex = (cx: number, cz: number): number => layer.cellTexLeft[cz * w + cx]!;
-    for (let a = 0; a < xs.length - 1; a++) {
-        for (let b = 0; b < zs.length - 1; b++) {
-            const x0 = xs[a]!;
-            const x1 = xs[a + 1]!;
-            const z0 = zs[b]!;
-            const z1 = zs[b + 1]!;
-            let refs: number[] = [];
-            // The chunk's vertices are x0..x1 / z0..z1 inclusive, so it also lists the textures of the cells that touch
-            // them from the neighbouring chunks (disc: a chunk of 90219 cells next to 90217 lists both).
-            for (let z = Math.max(0, z0 - 1); z <= Math.min(h - 1, z1); z++) {
-                for (let x = Math.max(0, x0 - 1); x <= Math.min(w - 1, x1); x++) {
-                    const t = tex(x, z);
-                    if (!isSpecial(t) && !refs.includes(t)) refs.push(t);
-                }
+    // The chunk's vertices are x0..x1 / z0..z1 inclusive, so it also lists the textures of the cells that touch
+    // them from the neighbouring chunks (disc: a chunk of 90219 cells next to 90217 lists both).
+    const refsOf = (r: ChunkRect): number[] => {
+        const refs: number[] = [];
+        for (let z = Math.max(0, r.z0 - 1); z <= Math.min(h - 1, r.z1); z++) {
+            for (let x = Math.max(0, r.x0 - 1); x <= Math.min(w - 1, r.x1); x++) {
+                const t = tex(x, z);
+                if (!isSpecial(t) && !refs.includes(t)) refs.push(t);
             }
+        }
+        return refs;
+    };
+    const maxTex = opts.maxChunkTextures ?? MAX_CHUNK_TEXTURES;
+    const rects: ChunkRect[] = [];
+    const add = (r: ChunkRect): void => {
+        // A 2x2 chunk sees at most 3x3 cells, so the split always ends under the limit.
+        const dx = r.x1 - r.x0;
+        const dz = r.z1 - r.z0;
+        if (maxTex > 0 && (dx > 2 || dz > 2 || (dx > 1 && dz > 1)) && refsOf(r).length > maxTex) {
+            if (dx >= dz) {
+                const m = r.x0 + (dx >> 1);
+                add({ ...r, x1: m });
+                add({ ...r, x0: m });
+            } else {
+                const m = r.z0 + (dz >> 1);
+                add({ ...r, z1: m });
+                add({ ...r, z0: m });
+            }
+            return;
+        }
+        rects.push(r);
+    };
+    for (let a = 0; a < xs.length - 1; a++) {
+        for (let b = 0; b < zs.length - 1; b++) add({ x0: xs[a]!, x1: xs[a + 1]!, z0: zs[b]!, z1: zs[b + 1]! });
+    }
+    rects.sort((p, q) => p.x0 - q.x0 || p.z0 - q.z0);
+    o.u32(rects.length);
+    for (const rect of rects) {
+        {
+            const { x0, x1, z0, z1 } = rect;
+            let refs = refsOf(rect);
             const key = opts.textureOrder;
             if (key) refs = refs.sort((p, q) => key(p) - key(q));
             const vw = x1 - x0 + 1;

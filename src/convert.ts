@@ -120,9 +120,9 @@ export interface ConvertOptions {
      */
     mapResource?: (kind: ResourceKind, pcRef: number, ctx: ResourceContext) => number | null;
     /**
-     * Most distinct textures one layer may use (default 8; 0 = unlimited). No layer on the PAL disc uses more than 8
-     * (LEVEL5NE, LEVEL8OS) and the engine does not survive a Ruined Village layer with 42 (docs/journal/2026-11-01). Cells
-     * of the surplus textures take the texture of the nearest cell of a kept one.
+     * Most distinct textures one layer may use (default 0 = unlimited; env DRAKAN_TERRAIN_LAYERTEX). The engine limit is
+     * per chunk (10 refs, see `MAX_CHUNK_TEXTURES`): the blob builder cuts crowded chunks, so a layer may use any number.
+     * With a limit, cells of the surplus textures take the texture of the nearest cell of a kept one.
      */
     maxTexturesPerLayer?: number;
 }
@@ -430,7 +430,7 @@ function convertLayer(L: TerrainLayer, pc: PcLevel, opt: ConvertOptions, report:
 }
 
 /** Default for `ConvertOptions.maxTexturesPerLayer`. */
-export const MAX_LAYER_TEXTURES = 8;
+export const MAX_LAYER_TEXTURES = 0;
 
 function layerTexEnv(): number | undefined {
     const v = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['DRAKAN_TERRAIN_LAYERTEX'];

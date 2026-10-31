@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { TEX_HOLE } from '../src/terrain.ts';
 import type { TerrainLayer } from '../src/terrain.ts';
 import { limitLayerTextures, ps2BlobBuilder, ps2BlobFor, ps2LevelTag, writePs2Terrain } from '../src/convert.ts';
-import { LAYER_FLAG_FLAT, buildPs2TerrainBlob, planTerrainSlots, ps2ChunkSplit } from '../src/terrainblob.ts';
+import { LAYER_FLAG_FLAT, MAX_CHUNK_TEXTURES, buildPs2TerrainBlob, planTerrainSlots, ps2ChunkSplit } from '../src/terrainblob.ts';
 
 function layer(w: number, h: number, flags: number, tex: (x: number, z: number) => number): TerrainLayer {
     const nv = (w + 1) * (h + 1);
@@ -96,6 +96,30 @@ describe('buildPs2TerrainBlob', () => {
         const at = (v: number): number => natural[arrA + v]!;
         expect(at(1 * 4 + 1) & 15).toBe(3);
         expect(at(1 * 4 + 1) & 0x10).toBe(0x10);
+    });
+
+    it('cuts a chunk with more than 10 textures into smaller chunks that cover the layer once', () => {
+        const L = layer(24, 24, 0, (x, z) => 0x90000 + ((x * 7 + z * 13) % 40));
+        const b = buildPs2TerrainBlob(L);
+        const n = u32(b, 24);
+        let p = 28;
+        const rects: number[][] = [];
+        for (let i = 0; i < n; i++) {
+            const [x0, x1, z0, z1, nt] = [0, 4, 8, 12, 16].map((k) => u32(b, p + k)) as [number, number, number, number, number];
+            expect(nt).toBeLessThanOrEqual(MAX_CHUNK_TEXTURES);
+            const vw = u32(b, p + 20 + 4 * nt);
+            const vh = u32(b, p + 24 + 4 * nt);
+            expect([vw, vh]).toEqual([x1 - x0 + 1, z1 - z0 + 1]);
+            expect(u32(b, p + 28 + 4 * nt)).toBe(nt);
+            rects.push([x0, x1, z0, z1]);
+            p += 32 + 4 * nt + nt * vw * vh;
+        }
+        expect(n).toBeGreaterThan(4);
+        const cover = new Uint8Array(24 * 24);
+        for (const [x0, x1, z0, z1] of rects as [number, number, number, number][])
+            for (let z = z0; z < z1; z++) for (let x = x0; x < x1; x++) cover[z * 24 + x]++;
+        expect(cover.every((c) => c === 1)).toBe(true);
+        expect(buildPs2TerrainBlob(L, { maxChunkTextures: 0 }).length).toBeLessThan(b.length);
     });
 
     it('does not mutate the layer and is deterministic', () => {
