@@ -188,6 +188,15 @@ describe('ootfclass', () => {
         expect(entries[0]!.id).toBe(s.classId);
     });
 
+    it('keepOwnModel skips the same-name mapping so the class is cloned instead', () => {
+        const pc = cls(1, 'Timer', 62, timerFields, [f32(2), 1, 0, 0]);
+        const mapped = planClassMapping([{ db: 1, id: 1, cls: pc }], [odb()]);
+        expect(mapped.mapped.has('1:1')).toBe(true);
+        const own = planClassMapping([{ db: 1, id: 1, cls: pc }], [odb()], { keepOwnModel: (c) => c === pc });
+        expect(own.mapped.has('1:1')).toBe(false);
+        expect(own.synthesized).toHaveLength(1);
+    });
+
     it('does not retarget kinds that need a model', () => {
         const pc = [{ db: 1, id: 1, cls: cls(1, 'Lever', 13, [], []) }];
         const ps2 = odb();

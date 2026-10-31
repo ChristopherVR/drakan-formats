@@ -361,12 +361,34 @@ export class OotfAssetBuilder {
         return nid;
     }
 
-    /** Convert the PC clips a skinned model lists (`<container>.adb`) and give them fresh ids; fills `animMaps`. */
-    private async convertClips(
+    /**
+     * Skeleton and clips of a PC skinned model (container + id as `addModel` takes them), without converting the model:
+     * the input of `retargetCreature`. Null when the model has no skeleton.
+     */
+    async creatureSource(
+        owner: string,
+        pcDb: number,
+        pcId: number,
+    ): Promise<{ skeleton: Skeleton; anims: Map<number, PcAnim> } | null> {
+        await this.registerOwner(owner);
+        const c = this.resolveContainer(owner, pcDb);
+        const mod = c ? await this.open(c, 'mod') : null;
+        const e = mod?.find(MOD_CHARACTER, pcId);
+        if (!c || !mod || !e) return null;
+        try {
+            const skeleton = parseSkeleton(await mod.readRaw(e), 'pc');
+            if (skeleton.joints.length === 0) return null;
+            return { skeleton, anims: (await this.loadClips(c, skeleton, `${lower(c)}#${pcId}`)).pcAnims };
+        } catch {
+            return null;
+        }
+    }
+
+    private async loadClips(
         container: string,
         sk: Skeleton,
         key: string,
-    ): Promise<{ ids: number[]; skipped: number }> {
+    ): Promise<{ pcAnims: Map<number, PcAnim>; skipped: number }> {
         const adb = await this.open(container, 'adb');
         const pcAnims = new Map<number, PcAnim>();
         let skipped = 0;
@@ -387,7 +409,18 @@ export class OotfAssetBuilder {
                 );
             }
         }
-        const r = convertCreatureAssets({ pcSkeleton: sk, pcAnims, ps2Skeleton: null, keepChannels: true });
+        return { pcAnims, skipped };
+    }
+
+    /** Convert the PC clips a skinned model lists (`<container>.adb`) and give them fresh ids; fills `animMaps`. */
+    private async convertClips(
+        container: string,
+        sk: Skeleton,
+        key: string,
+    ): Promise<{ ids: number[]; skipped: number }> {
+        const loaded = await this.loadClips(container, sk, key);
+        let skipped = loaded.skipped;
+        const r = convertCreatureAssets({ pcSkeleton: sk, pcAnims: loaded.pcAnims, ps2Skeleton: null, keepChannels: true });
         skipped += r.skipped.length;
         const map = new Map<number, number>();
         for (const a of r.anims) {

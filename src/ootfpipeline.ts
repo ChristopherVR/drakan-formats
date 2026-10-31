@@ -60,6 +60,8 @@ import { OotfAssetBuilder, type AssetReport } from './ootfassets.ts';
 import { loadPcLevel, pcLevelName, resolvePcPath, type PcFileSource, type PcLevel } from './pc.ts';
 import { CELL_SIZE, LVL_TYPE_LAYERS, parsePs2Terrain, terrainHeightAt } from './terrain.ts';
 import { odbStemForDependency } from './odb.ts';
+import { animName, parseSkeleton, writePs2Anim } from './ootfanim.ts';
+import { chooseRetargetTarget, retargetCreature } from './ootfretarget.ts';
 
 /**
  * One call from an Order of the Flame level to everything a PS2 mod pack needs: the converted LVL parts, the new
@@ -105,6 +107,12 @@ export interface OotfPs2Context {
     hostAdb?: SrscReader;
     /** The host ODB's SDB (RESOURES.SDB): converted sounds are added to it as `new/<HOST>.SDB/` entries with free ids. */
     hostSdb?: SrscReader;
+    /**
+     * PS2 MOD / ADB containers by upper-case stem (`NPCS`) beyond the host's: they tell which templates of ODBs that list the host are
+     * skinned (clones go into those ODBs, model refs use the host's `db` there) and which PS2 rig and clips a name-mapped creature has.
+     */
+    mods?: ReadonlyMap<string, SrscReader>;
+    adbs?: ReadonlyMap<string, SrscReader>;
     /** Upper-case names of the XDBs on the disc (`SYSTEM.XDB`). A class in an ODB without one (FX) gets no text ids: its string defaults are blanked. */
     xdbFiles?: ReadonlySet<string>;
 }
@@ -126,6 +134,11 @@ export interface OotfPipelineOptions {
     preferCreatures?: boolean;
     /** Convert skinned models with their skeletons and clips (default true). */
     skinned?: boolean;
+    /**
+     * Name-mapped creatures (PC class with a same-named PS2 class): retarget the PC clips onto the PS2 rig when it shares at least half
+     * of the PC joints (overrides the PS2 clips of the same name), else convert the PC model instead (default true).
+     */
+    retarget?: boolean;
     /** Stem of the host ODB (default RESOURES). */
     hostStem?: string;
     classes?: boolean;
@@ -274,10 +287,45 @@ export async function convertOotfLevels(
     const builder = new OotfAssetBuilder(src, {
         firstModelId: maxId(ps2.hostMod, 0x0200) + 1,
         firstTextureId: maxId(ps2.hostTxd, 0x0040) + 1,
-        firstAnimId: Math.max(maxId(ps2.hostAdb, 0x0501), 99) + 1,
+        // Past every clip id of the host ADB and of the ADBs of ODBs that may host clones (the clips ship to each of them).
+        firstAnimId:
+            Math.max(maxId(ps2.hostAdb, 0x0501), ...[...(ps2.adbs?.values() ?? [])].map((a) => maxId(a, 0x0501)), 99) + 1,
         skinned: opt.skinned,
     });
     const splatDb = findSplatDbIndex(tplHeader);
+    // `db` index the host has in the `.DB` of an ODB stem (0 for the host itself), null when it is not a dependency.
+    const hostDbForStem = (stem: string): number | null => {
+        if (stem === hostStem) return 0;
+        const text = ps2.dbFiles?.get(stem)?.text;
+        for (const m of text?.matchAll(/^(\d+)\s+(.+?)\s*$/gm) ?? []) {
+            if (odbStemForDependency(m[2]!) === hostStem) return Number(m[1]);
+        }
+        return null;
+    };
+    // MOD / ADB container behind a `db` index of the ODB `stem` (0 = its own).
+    const containerStem = (stem: string, db: number): string | null => {
+        if (db === 0) return stem;
+        const text = ps2.dbFiles?.get(stem)?.text;
+        for (const m of text?.matchAll(/^(\d+)\s+(.+?)\s*$/gm) ?? []) {
+            if (Number(m[1]) === db) return odbStemForDependency(m[2]!);
+        }
+        return null;
+    };
+    const modOf = (stem: string): SrscReader | undefined =>
+        (stem === hostStem ? ps2.hostMod : undefined) ?? ps2.mods?.get(stem);
+    const adbOf = (stem: string): SrscReader | undefined =>
+        (stem === hostStem ? ps2.hostAdb : undefined) ?? ps2.adbs?.get(stem);
+    /** Name-mapped creatures retargeted onto a PS2 rig (class, model container stem, model id, PC creature owner/ref, PS2 skeleton). */
+    const retargetTodo: {
+        pc: OdbClass;
+        ps2Stem: string;
+        modelId: number;
+        sk: ReturnType<typeof parseSkeleton>;
+        key: string;
+    }[] = [];
+    const retargetNotes: string[] = [];
+    /** PC classes whose converted model is cloned instead of name-mapping them to a PS2 class with a foreign rig. */
+    const convertOwn = new Set<OdbClass>();
 
     // ---- classes (+ models for the classes that need one)
     const used = new Map<string, PcClassIn & { pc: PcLevel }>();
@@ -321,7 +369,46 @@ export async function convertOotfLevels(
                 planKey.set(k, { db: planKey.size + 1, id: u.id });
                 input.push({ db: planKey.size, id: u.id, cls: u.cls });
             }
+            // Creatures with a same-named PS2 class: retarget onto its rig when it fits, else convert the PC model (PlanOptions.keepOwnModel).
+            if (opt.retarget !== false && opt.models !== false && hostOk) {
+                const norm = (c: OdbClass): string => `${c.rflClass}|${c.name.toLowerCase().replace(/[^a-z0-9]+/g, '')}`;
+                const byName = new Map<string, { odb: Ps2OdbIn; cls: OdbClass }>();
+                for (const odb of [...ps2Odbs].sort((a, b) => b.dbIndex - a.dbIndex))
+                    for (const cls of odb.classes.values()) byName.set(norm(cls), { odb, cls });
+                for (const i of input) {
+                    const ow = ownerOf.get(i.cls);
+                    const m = i.cls.model;
+                    const newId = ow && m ? builder.mapModelRef(m.db, m.id, ow) : null;
+                    if (!ow || !m || newId === null || !builder.report.creatures.some((c) => c.id === newId)) continue;
+                    const hit = byName.get(norm(i.cls));
+                    if (!hit?.cls.model) continue;
+                    const mStem = containerStem(hit.odb.file.replace(/\.ODB$/i, ''), hit.cls.model.db);
+                    const rec = mStem ? modOf(mStem)?.find(0x0208, hit.cls.model.id) : undefined;
+                    if (!mStem || !rec) continue; // the PS2 class is not skinned: nothing to retarget onto
+                    const src = await builder.creatureSource(ow, m.db, m.id);
+                    if (!src) continue;
+                    const sk = parseSkeleton(await modOf(mStem)!.readRaw(rec), 'ps2');
+                    const choice = chooseRetargetTarget(src.skeleton, [{ id: hit.cls.model.id, skeleton: sk }]);
+                    if (choice) {
+                        retargetTodo.push({ pc: i.cls, ps2Stem: mStem, modelId: hit.cls.model.id, sk, key: `${i.db}:${i.id}` });
+                        retargetNotes.push(
+                            `retarget ${i.cls.name}: PC ${src.skeleton.joints.length} joints -> PS2 model ${hit.cls.model.id} (${choice.match.matched} matched)`,
+                        );
+                    } else {
+                        convertOwn.add(i.cls);
+                        retargetNotes.push(`convert ${i.cls.name}: no PS2 rig above 50% (PS2 model ${hit.cls.model.id})`);
+                    }
+                }
+                res.warnings.push(...retargetNotes);
+            }
+            const modelFiles = new Set<string>();
+            for (const odb of ps2Odbs) {
+                const st = odb.file.replace(/\.ODB$/i, '');
+                if (st !== hostStem && hostDbForStem(st) !== null && ps2.mods?.has(st)) modelFiles.add(odb.file);
+            }
             const planOpts: PlanOptions = {
+                modelOdbFiles: modelFiles,
+                keepOwnModel: (cls) => convertOwn.has(cls),
                 rewriteText:
                     opt.texts === false
                         ? undefined
@@ -340,7 +427,10 @@ export async function convertOotfLevels(
                     const id = ow && cls.model ? builder.mapModelRef(cls.model.db, cls.model.id, ow) : null;
                     return id !== null && builder.report.creatures.some((c) => c.id === id);
                 },
-                templateSkinned: (c) => !!c.model && c.model.db === 0 && !!ps2.hostMod?.find(0x0208, c.model.id),
+                templateSkinned: (c, file) => {
+                    const st = c.model ? containerStem(file.replace(/\.ODB$/i, ''), c.model.db) : null;
+                    return !!c.model && !!st && !!modOf(st)?.find(0x0208, c.model.id);
+                },
                 mapAnimFor: (cls) => {
                     const ow = ownerOf.get(cls);
                     return ow && cls.model ? (builder.mapAnimRef(cls.model.db, cls.model.id, ow) ?? undefined) : undefined;
@@ -348,9 +438,10 @@ export async function convertOotfLevels(
                 modelFor: hostOk
                     ? (cls, file) => {
                           const ow = ownerOf.get(cls);
-                          if (!ow || !cls.model || file !== hostFile) return null;
+                          const db = ow && cls.model ? hostDbForStem(file.replace(/\.ODB$/i, '')) : null;
+                          if (!ow || !cls.model || db === null) return null;
                           const id = builder.mapModelRef(cls.model.db, cls.model.id, ow);
-                          return id === null ? null : { id, db: 0 };
+                          return id === null ? null : { id, db };
                       }
                     : undefined,
             };
@@ -385,7 +476,12 @@ export async function convertOotfLevels(
                         .flatMap((x) => x.pcKeys),
                 );
                 const mapped = new Set(result.mapped.keys());
-                const sub = input.filter((i) => keep.has(`${i.db}:${i.id}`) || mapped.has(`${i.db}:${i.id}`));
+                // Classes that were to be converted but lost their slot go back to their same-named PS2 class.
+                const sub = input.filter(
+                    (i) => keep.has(`${i.db}:${i.id}`) || mapped.has(`${i.db}:${i.id}`) || convertOwn.has(i.cls),
+                );
+                const dropped = [...convertOwn].filter((c) => !sub.some((i) => i.cls === c) || !keep.has(`${input.find((i) => i.cls === c)!.db}:${input.find((i) => i.cls === c)!.id}`));
+                for (const c of dropped) convertOwn.delete(c);
                 if (opt.preferCreatures)
                     res.warnings.push(
                         `classes: candidates ${result.synthesized.map((x) => `${x.name} (rfl ${x.rfl}${keep.has(x.pcKeys[0]!) ? ', kept' : ''}${isSkinned(x) ? ', SKINNED' : ''})`).join('; ')}`,
@@ -398,6 +494,43 @@ export async function convertOotfLevels(
             return result;
         });
         res.classPlan = plan;
+        if (plan) {
+            // PC clips retargeted onto the PS2 rig of a name-mapped creature replace the PS2 clips of the same name.
+            await stage('retarget', async () => {
+                const done = new Set<string>();
+                for (const t of retargetTodo) {
+                    const inp = [...used.values()].find((u) => u.cls === t.pc);
+                    const m = t.pc.model;
+                    const ow = ownerOf.get(t.pc);
+                    if (!inp || !m || !ow || !plan!.mapped.has(`${planKey.get(sig(t.pc))?.db}:${planKey.get(sig(t.pc))?.id}`))
+                        continue;
+                    const src = await builder.creatureSource(ow, m.db, m.id);
+                    const adb = adbOf(t.ps2Stem);
+                    if (!src || !adb) continue;
+                    const res2 = retargetCreature(src.skeleton, t.sk, src.anims);
+                    const own = new Map<string, number>();
+                    for (const id of [...t.sk.animIds].sort((a, b) => a - b)) {
+                        const e = adb.find(0x0501, id);
+                        if (e) own.set(animName(await adb.readRaw(e)).toLowerCase(), id);
+                    }
+                    let n = 0;
+                    for (const a of res2.anims) {
+                        const id = own.get(a.anim.name.toLowerCase());
+                        const k = `${t.ps2Stem}|${id}`;
+                        if (id === undefined || done.has(k)) continue;
+                        done.add(k);
+                        const w = writePs2Anim(a.anim);
+                        const e1 = adb.find(0x0501, id)!;
+                        const e2 = adb.find(0x0502, id);
+                        if (!e2) continue;
+                        res.files[`overrides/${t.ps2Stem}.ADB/0501_${id}_${e1.sub}.bin`] = w.info;
+                        res.files[`overrides/${t.ps2Stem}.ADB/0502_${id}_${e2.sub}.bin`] = w.data;
+                        n++;
+                    }
+                    res.warnings.push(`retarget ${t.pc.name}: ${n} PS2 clips of ${t.ps2Stem}.ADB replaced (${res2.anims.length} converted, ${res2.skipped.length} skipped)`);
+                }
+            });
+        }
         if (plan) {
             const used = new Set(plan.synthesized.flatMap((s) => (s.cls.model ? [s.cls.model.id] : [])));
             builder.pruneSkinned((id) => used.has(id));
@@ -685,6 +818,33 @@ export async function convertOotfLevels(
                 (!!dbgEnv['DRAKAN_DBG_PULL'] && new RegExp(dbgEnv['DRAKAN_DBG_PULL'], 'i').test(dbgName(o)));
             parts.objects = { ...parts.objects, objects: parts.objects.objects.filter(keep) };
         }
+        if (dbgEnv['DRAKAN_DBG_STOMP'] !== undefined) {
+            // Test aid: list the sequence players; DRAKAN_DBG_STOMP=<n> also sets their Initial State to n (-1 = list only).
+            const want = Number(dbgEnv['DRAKAN_DBG_STOMP']);
+            for (const o of parts.objects.objects) {
+                if (dbgName(o) !== 'Stomp Player') continue;
+                console.warn(`stomp obj ${o.id} pos ${o.pos.map(Math.round)} params ${o.params.map((p, i) => `${p.name}=${o.data[i]}`).join(' ')}`);
+                if (want >= 0) o.params.forEach((p, i) => { if (p.name.startsWith('Initial State')) o.data[i] = want; });
+            }
+        }
+        if (dbgEnv['DRAKAN_DBG_OBJSPLIT'] || dbgEnv['DRAKAN_DBG_DROPRFL'] || dbgEnv['DRAKAN_DBG_DROPNAME']) {
+            // Test aids for bisecting a level that breaks: OBJSPLIT=n,k keeps essentials (rfl 9/27/54, sky) plus objects with
+            // index % n == k; DROPRFL=a,b drops objects of those rfl classes; DROPNAME=<regex> drops objects by class name.
+            const [sn, sk] = (dbgEnv['DRAKAN_DBG_OBJSPLIT'] ?? '').split(',').map(Number);
+            const dropRfl = (dbgEnv['DRAKAN_DBG_DROPRFL'] ?? '').split(',').filter(Boolean).map(Number);
+            const dropRe = dbgEnv['DRAKAN_DBG_DROPNAME'] ? new RegExp(dbgEnv['DRAKAN_DBG_DROPNAME'], 'i') : null;
+            const rflOf2 = (o: LvlObject): number => classes.get(o.dbIndex)?.get(o.classId)?.rflClass ?? -1;
+            parts.objects = {
+                ...parts.objects,
+                objects: parts.objects.objects.filter((o, i) => {
+                    const essential = [9, 27, 54].includes(rflOf2(o)) || dbgName(o) === 'Procedural Sky';
+                    if (essential) return true;
+                    if (dropRfl.includes(rflOf2(o))) return false;
+                    if (dropRe?.test(dbgName(o))) return false;
+                    return sn ? i % sn === sk : true;
+                }),
+            };
+        }
         if (dbgEnv['DRAKAN_DBG_PULL']) {
             // Test aid: move up to 4 objects whose class name matches the regex next to the player start.
             const re = new RegExp(dbgEnv['DRAKAN_DBG_PULL'], 'i');
@@ -716,16 +876,25 @@ export async function convertOotfLevels(
             const dir = `files/${hostDir}`;
             const clips = builder.animEntries();
             if (clips.length) {
-                for (const r of clips) res.files[`new/${hostStem}.ADB/${hex4(r.type)}_${r.id}_${r.sub}.bin`] = r.data;
-                // 0x0500: u16 clip count, u16 ?, u16 highest id + 1 (NPCS.ADB 1861 clips / 5990, RESOURES.ADB 23).
-                const hc = ps2.hostAdb ? ps2.hostAdb.entries.find((e) => e.type === 0x0500) : undefined;
-                if (ps2.hostAdb && hc) {
-                    const c = (await ps2.hostAdb.readRaw(hc)).slice();
-                    const dv = new DataView(c.buffer);
-                    const top = Math.max(...clips.map((r) => r.id)) + 1;
-                    dv.setUint16(0, dv.getUint16(0, true) + clips.length / 2, true);
-                    dv.setUint16(4, Math.max(dv.getUint16(4, true), top), true);
-                    res.files[`overrides/${hostStem}.ADB/0500_${hc.id}_${hc.sub}.bin`] = c;
+                // The clips ship to the host ADB and to the ADB of every ODB that got a cloned creature class (ids are free in all of them).
+                const stems = new Set([hostStem]);
+                for (const s of plan?.synthesized ?? []) {
+                    const st = s.file.replace(/\.ODB$/i, '');
+                    if (s.cls.model && adbOf(st)) stems.add(st);
+                }
+                for (const stem of stems) {
+                    const adbR = adbOf(stem)!;
+                    for (const r of clips) res.files[`new/${stem}.ADB/${hex4(r.type)}_${r.id}_${r.sub}.bin`] = r.data;
+                    // 0x0500: u16 clip count, u16 ?, u16 highest id + 1 (NPCS.ADB 1861 clips / 5990, RESOURES.ADB 23).
+                    const hc = adbR ? adbR.entries.find((e) => e.type === 0x0500) : undefined;
+                    if (adbR && hc) {
+                        const c = (await adbR.readRaw(hc)).slice();
+                        const dv = new DataView(c.buffer);
+                        const top = Math.max(...clips.map((r) => r.id)) + 1;
+                        dv.setUint16(0, dv.getUint16(0, true) + clips.length / 2, true);
+                        dv.setUint16(4, Math.max(dv.getUint16(4, true), top), true);
+                        res.files[`overrides/${stem}.ADB/0500_${hc.id}_${hc.sub}.bin`] = c;
+                    }
                 }
             }
             const mod = ps2.hostMod!;

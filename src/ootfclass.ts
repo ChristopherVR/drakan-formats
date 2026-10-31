@@ -217,6 +217,13 @@ export interface PlanOptions {
     rewriteText?: (odbFile: string, fields: readonly ClassFieldDef[], data: number[]) => void;
     /** With `modelFor`: only clone model classes from this ODB file (`RESOURES.ODB`), the one whose own MOD / TXD gets the new models. */
     modelOdbFile?: string;
+    /**
+     * More ODB files whose classes may be cloned for a converted model: ODBs that list `modelOdbFile` in their `.DB`, so
+     * `modelFor` can name the model with that dependency's `db` index (NPCS.ODB lists Resources as dependency 2).
+     */
+    modelOdbFiles?: ReadonlySet<string>;
+    /** True for a PC class that must not be name-mapped to a same-named PS2 class (its converted skinned model is cloned instead). */
+    keepOwnModel?: (cls: OdbClass) => boolean;
     modelFor?: (cls: OdbClass, odbFile: string) => { id: number; db: number } | null;
     /**
      * Animation-typed defaults (type 9, scalar or array) of a class whose model was converted with its own clips: PC animation id
@@ -230,7 +237,7 @@ export interface PlanOptions {
      * With both, a skinned class is cloned from the skinned templates when there are any.
      */
     modelSkinned?: (cls: OdbClass) => boolean;
-    templateSkinned?: (cls: OdbClass) => boolean;
+    templateSkinned?: (cls: OdbClass, odbFile: string) => boolean;
 }
 
 // ---------------------------------------------------------------- plan
@@ -459,7 +466,14 @@ function freeIds(taken: ReadonlySet<number>, reserved?: ReadonlySet<number>): nu
         max = Math.max(max, id);
     }
     const out: number[] = [];
-    for (let id = max - 1; id > min; id--) if (!taken.has(id) && !reserved?.has(id)) out.push(id);
+    // Ids above the ODB maximum sort last, so file order, index order and id order agree and the appended 0x0103 field
+    // lists pair with their records whichever way the guest pairs them (ootf-odb-class-count.md). Below-max ids are the
+    // old behaviour, kept behind OOTF_IDS_BELOW_MAX=1 for comparison.
+    if ((globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_IDS_BELOW_MAX'] === '1') {
+        for (let id = max - 1; id > min; id--) if (!taken.has(id) && !reserved?.has(id)) out.push(id);
+        return out;
+    }
+    for (let id = max + 1; id <= 0xfffe; id++) if (!reserved?.has(id)) out.push(id);
     return out;
 }
 
@@ -510,9 +524,9 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
             cands = byRfl.get(opt.substituteEngineId.get(rfl)!) ?? [];
             substituted = cands.length > 0;
         }
-        // 1. same name and same engine class
+        // 1. same name and same engine class (unless the caller wants the PC model converted instead: `keepOwnModel`)
         const loose = squash(cls.name);
-        const named = cands
+        const named = opt.keepOwnModel?.(cls) ? undefined : cands
             .filter((c) => squash(c.cls.name) === loose)
             .sort((a, b) => a.odb.dbIndex - b.odb.dbIndex || a.id - b.id)[0];
         if (named) {
@@ -541,7 +555,14 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
             ? cands.filter((c) => c.cls.model && c.odb.raw?.(c.id) && (!opt.modelOdbFile || c.odb.file === opt.modelOdbFile))
             : cands;
         if (wantsModel && opt.modelSkinned?.(cls) && opt.templateSkinned) {
-            const sk = pool.filter((c) => opt.templateSkinned!(c.cls));
+            // Skinned templates also come from the ODBs that list the host (their `modelFor` names the host with its `db` there).
+            const sk = cands.filter(
+                (c) =>
+                    c.cls.model &&
+                    c.odb.raw?.(c.id) &&
+                    (!opt.modelOdbFile || c.odb.file === opt.modelOdbFile || opt.modelOdbFiles?.has(c.odb.file)) &&
+                    opt.templateSkinned!(c.cls, c.odb.file),
+            );
             if (sk.length) pool.splice(0, pool.length, ...sk);
         }
         if (!pool.length) {
