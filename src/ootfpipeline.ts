@@ -845,6 +845,11 @@ export async function convertOotfLevels(
                 }),
             };
         }
+        if (dbgEnv['DRAKAN_DBG_LIST']) {
+            const h = new Map<string, number>();
+            for (const o of parts.objects.objects) h.set(dbgName(o), (h.get(dbgName(o)) ?? 0) + 1);
+            console.warn(`objects: ${[...h].map(([k, v]) => `${k}x${v}`).join(', ')}`);
+        }
         if (dbgEnv['DRAKAN_DBG_PULL']) {
             // Test aid: move up to 4 objects whose class name matches the regex next to the player start.
             const re = new RegExp(dbgEnv['DRAKAN_DBG_PULL'], 'i');
@@ -855,7 +860,7 @@ export async function convertOotfLevels(
                 parts.objects = {
                     ...parts.objects,
                     objects: parts.objects.objects.map((o) =>
-                        n < 4 && re.test(dbgName(o))
+                        n < 4 && re.test(dbgName(o)) && (console.warn(`pull ${dbgName(o)} obj ${o.id} from ${o.pos.map(Math.round)}`), true)
                             ? { ...o, pos: [start.pos[0] + [1200, -1200, 0, 0][n]!, start.pos[1], start.pos[2] + [0, 0, 1200, -1200][n++]!] as typeof o.pos }
                             : o,
                     ),

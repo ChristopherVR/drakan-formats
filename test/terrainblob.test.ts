@@ -117,7 +117,7 @@ describe('buildPs2TerrainBlob', () => {
         expect(n).toBeGreaterThan(4);
         const cover = new Uint8Array(24 * 24);
         for (const [x0, x1, z0, z1] of rects as [number, number, number, number][])
-            for (let z = z0; z < z1; z++) for (let x = x0; x < x1; x++) cover[z * 24 + x]++;
+            for (let z = z0; z < z1; z++) for (let x = x0; x < x1; x++) cover[z * 24 + x] = (cover[z * 24 + x] ?? 0) + 1;
         expect(cover.every((c) => c === 1)).toBe(true);
         expect(buildPs2TerrainBlob(L, { maxChunkTextures: 0 }).length).toBeLessThan(b.length);
     });

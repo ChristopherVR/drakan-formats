@@ -174,8 +174,8 @@ describe('ootfclass', () => {
         expect(plan.synthesized).toHaveLength(1);
         const s = plan.synthesized[0]!;
         expect(s.pcKeys).toEqual(['1:2', '1:3']); // identical results share one record
-        expect(s.classId).toBeLessThan(900);
-        expect(s.classId).toBeGreaterThan(10);
+        // synthesized ids sit above the ODB maximum (900) so file, index and id order agree (ootf-odb-class-count.md)
+        expect(s.classId).toBeGreaterThan(900);
         expect(plan.resolve(1, 3)?.classId).toBe(s.classId);
         expect(plan.unsupported.get('1:4')?.reason).toBe('no-engine-class');
         expect(plan.unsupported.get('1:5')?.reason).toBe('no-engine-class');
