@@ -52,8 +52,8 @@ export function odbRuntimeClass(body: Uint8Array): number | null {
 /** ODB 0x0103: the field-definition lists, zlib compressed, one list per 0x0102 record in record order. */
 export const ODB_FIELDS_TYPE = 0x0103;
 /** Offset (after the name string) of the field count in a class record with / without a model. */
-const FIELD_COUNT_AT_MODEL = 86;
-const FIELD_COUNT_AT_PLAIN = 22;
+export const FIELD_COUNT_AT_MODEL = 86;
+export const FIELD_COUNT_AT_PLAIN = 22;
 
 /** Parse the inflated 0x0103 blob into per-class definition lists; null unless it is consumed exactly. */
 export function parseFieldLists(blob: Uint8Array): ClassFieldDef[][] | null {

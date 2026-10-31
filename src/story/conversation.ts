@@ -15,6 +15,7 @@
 
 import { decodeFieldValue, refParts, type ClassFieldDef } from '../fields.ts';
 import type { OdbClass } from '../odb.ts';
+import { patchClassData, renameClassRecord, setClassArray } from '../odbwrite.ts';
 
 export const RUNTIME_CONVERSATION_HANDLER = 0x100b4;
 export const RUNTIME_DIALOG_LINE = 0x100ba;
@@ -195,3 +196,35 @@ export function splitLineName(name: string): { speaker: string; sound: string } 
 }
 
 export type FieldDefs = readonly ClassFieldDef[];
+
+// ---- creating / rewiring dialogue --------------------------------------------------------------------------------------
+
+/**
+ * A new dialog line class: the record of an existing line (`template`, as stored) under a new name, with `soundRef`
+ * (`(db << 16) | id`) as its first sound. The class needs the field list of the template appended to the 0x0103 entry
+ * and an id that is free in the ODB (see `dialogLineChanges` in editor-core).
+ */
+export function newDialogLineRecord(
+    template: Uint8Array,
+    line: DialogLine,
+    name: string,
+    soundRef: number,
+): Uint8Array {
+    return patchClassData(renameClassRecord(template, name), dialogLineSoundEdit(line, 0, soundRef));
+}
+
+/**
+ * Handler class record with one phase's line array replaced by `lineRefs` (dialog line class refs). Any length: the new array is
+ * appended to the data area (`setClassArray`). `defs` are the handler's field definitions.
+ */
+export function handlerPhaseRecord(
+    record: Uint8Array,
+    defs: readonly ClassFieldDef[],
+    phase: HandlerPhaseKey,
+    lineRefs: readonly number[],
+): Uint8Array {
+    const field = HANDLER_PHASES.find((p) => p.key === phase)!.field;
+    const i = defs.findIndex((f) => f.name === field);
+    if (i < 0) throw new Error(`handler has no field '${field}'`);
+    return setClassArray(record, i, lineRefs);
+}

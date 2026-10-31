@@ -6,7 +6,7 @@
 // also needs its list appended to that entry (`appendFieldList`).
 
 import { view } from './bytes.ts';
-import { parseClassBody, parseFieldLists } from './odb.ts';
+import { FIELD_COUNT_AT_MODEL, FIELD_COUNT_AT_PLAIN, parseClassBody, parseFieldLists } from './odb.ts';
 import type { ClassFieldDef } from './fields.ts';
 
 export const ODB_GROUP_TYPE = 0x0101;
@@ -60,6 +60,32 @@ export function patchClassData(rec: Uint8Array, edits: ReadonlyMap<number, numbe
         if (i < 0 || i >= parsed.data.length) throw new Error(`class '${name}': no data dword ${i}`);
         dv.setUint32(at + i * 4, v >>> 0, true);
     }
+    return joinClassRecord(name, out);
+}
+
+/**
+ * Copy of a record where array field `index` (a field whose type has FIELD_ARRAY) holds `values`. The new elements are
+ * appended to the end of the data area and the field's word (`u16 offset, u16 length`, offset = dword index into the
+ * data area) points at them; the old elements stay as unused dwords, so the data area only grows. Changing the length
+ * is what the in-place `patchClassData` cannot do (phase arrays of a conversation handler, `Sequence List`).
+ */
+export function setClassArray(rec: Uint8Array, index: number, values: readonly number[]): Uint8Array {
+    const { name, body } = splitClassRecord(rec);
+    const parsed = parseClassBody(body);
+    if (!parsed) throw new Error(`class '${name}': body does not parse`);
+    if (index < 0 || index >= parsed.fieldCount || index >= parsed.data.length)
+        throw new Error(`class '${name}': no field ${index}`);
+    const offset = parsed.data.length;
+    if (offset > 0xffff || values.length > 0xffff) throw new Error(`class '${name}': array does not fit the data area`);
+    const out = new Uint8Array(body.length + values.length * 4);
+    out.set(body);
+    const dv = view(out);
+    const modelId = dv.getUint16(2, true);
+    const at = modelId ? FIELD_COUNT_AT_MODEL : FIELD_COUNT_AT_PLAIN;
+    dv.setUint32(at + 4, parsed.data.length + values.length, true);
+    const dataAt = at + 8;
+    dv.setUint32(dataAt + index * 4, ((values.length << 16) | offset) >>> 0, true);
+    values.forEach((v, i) => dv.setUint32(dataAt + (offset + i) * 4, v >>> 0, true));
     return joinClassRecord(name, out);
 }
 

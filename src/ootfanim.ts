@@ -15,7 +15,7 @@ import { latin1, view } from './bytes.ts';
 
 export class AnimError extends Error {}
 
-export type Mat12 = number[]; // 3 rows of the 3x3 then translation (PC order); PS2 stores translation first
+export type OotfMat12 = number[]; // 3 rows of the 3x3 then translation (PC order); PS2 stores translation first
 
 export interface SkelNode {
     name: string;
@@ -27,7 +27,7 @@ export interface SkelWeight {
 }
 export interface SkelJoint {
     /** Inverse model-relative transform, rotation rows then translation (PC order, already normalised). */
-    xform: Mat12;
+    xform: OotfMat12;
     mesh: number;
     firstChild: number;
     nextSibling: number;
@@ -376,7 +376,7 @@ export function writePs2Skeleton(s: Skeleton, positions: Float32Array | null, ch
 export interface PcKey {
     time: number;
     /** 3x3 rotation rows then translation. */
-    xform: Mat12;
+    xform: OotfMat12;
 }
 export interface PcAnim {
     name: string;
