@@ -850,6 +850,12 @@ export async function convertOotfLevels(
             for (const o of parts.objects.objects) h.set(dbgName(o), (h.get(dbgName(o)) ?? 0) + 1);
             console.warn(`objects: ${[...h].map(([k, v]) => `${k}x${v}`).join(', ')}`);
         }
+        if (dbgEnv['DRAKAN_DBG_LISTCLS']) {
+            // Test aid: histogram of the placed objects' class names (after the other filters), to compare passing and failing splits.
+            const h = new Map<string, number>();
+            for (const o of parts.objects.objects) h.set(dbgName(o), (h.get(dbgName(o)) ?? 0) + 1);
+            console.warn(`LISTCLS ${[...h].sort().map(([k, v]) => `${k}=${v}`).join('; ')}`);
+        }
         if (dbgEnv['DRAKAN_DBG_PULL']) {
             // Test aid: move up to 4 objects whose class name matches the regex next to the player start.
             const re = new RegExp(dbgEnv['DRAKAN_DBG_PULL'], 'i');
