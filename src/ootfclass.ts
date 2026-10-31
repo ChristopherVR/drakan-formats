@@ -155,6 +155,18 @@ export function engineClassInfo(rfl: number): EngineClassInfo | undefined {
 }
 
 /** Kinds whose PC classes can be re-targeted without any PC model (the clone keeps the PS2 template's model block). */
+/** Goblin 88 -> Orc 49, Succubus 100 / Queen 101 -> flying creature 30, Magic Crystal 91 -> mana power-up 171, ... */
+export const PS2_SUBSTITUTES: ReadonlyMap<number, number> = new Map([
+    [88, 49],
+    [100, 30],
+    [101, 30],
+    [91, 171],
+    [80, 71],
+    [123, 223],
+    [137, 224],
+    [130, 35],
+]);
+
 export const RETARGET_KINDS: ReadonlySet<ClassKind> = new Set(['logic', 'light', 'sound', 'waypoint', 'spawn']);
 
 // ---------------------------------------------------------------- inputs
@@ -190,6 +202,21 @@ export interface PlanOptions {
     mapClassRef?: (pcRef: number) => number | null;
     /** Class ids that must not be handed out, per ODB file (e.g. ids already used by other mods). */
     reservedIds?: ReadonlyMap<string, ReadonlySet<number>>;
+    /**
+     * Classes that need a model (scenery, mechanisms, creatures ...) are cloned from a PS2 class of the same engine id
+     * *with a model* and get the model this returns: `(PC class, target ODB file) -> {id, db}` (`db` = index in that ODB's
+     * `.DB`, `id` in the container it names), or null when the PC model was not converted.
+     */
+    /**
+     * Engine ids the PS2 engine lacks -> the PS2 engine id whose class is cloned instead (ootf-engine-gaps.md section 5).
+     * Substituted classes keep the PS2 template's model (a stand-in) and use the field-name merge; `PS2_SUBSTITUTES` is the table.
+     */
+    substituteEngineId?: ReadonlyMap<number, number>;
+    /** Called on the merged defaults of a clone: rewrite string defaults to XDB ids (`rewriteClassTextDefaults`). */
+    rewriteText?: (odbFile: string, fields: readonly ClassFieldDef[], data: number[]) => void;
+    /** With `modelFor`: only clone model classes from this ODB file (`RESOURES.ODB`), the one whose own MOD / TXD gets the new models. */
+    modelOdbFile?: string;
+    modelFor?: (cls: OdbClass, odbFile: string) => { id: number; db: number } | null;
 }
 
 // ---------------------------------------------------------------- plan
@@ -364,6 +391,17 @@ export function buildPlainClassRecord(opt: {
     return joinClassRecord(opt.name, body);
 }
 
+/** Point a model-carrying class record at another model (`u16 id` at body +2, `u16 db` at +4). */
+export function patchRecordModel(rec: Uint8Array, model: { id: number; db: number }): Uint8Array {
+    const { name, body } = splitClassRecord(rec);
+    const b = body.slice();
+    const dv = view(b);
+    if (!dv.getUint16(2, true)) throw new Error(`class '${name}': record has no model block`);
+    dv.setUint16(2, model.id, true);
+    dv.setUint16(4, model.db, true);
+    return joinClassRecord(name, b);
+}
+
 interface Cand {
     odb: Ps2OdbIn;
     id: number;
@@ -418,12 +456,18 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
         return list.shift();
     };
     const done = new Map<string, Synthesized>();
+    const usedTemplates = new Set<string>();
     const ordered = [...pc].sort((a, b) => a.db - b.db || a.id - b.id);
     for (const { db, id, cls } of ordered) {
         const key = pcClassKey(db, id);
         const rfl = cls.rflClass ?? -1;
         const info = ENGINE_CLASSES.get(rfl);
-        const cands = byRfl.get(rfl) ?? [];
+        let cands = byRfl.get(rfl) ?? [];
+        let substituted = false;
+        if (!cands.length && opt.substituteEngineId?.has(rfl)) {
+            cands = byRfl.get(opt.substituteEngineId.get(rfl)!) ?? [];
+            substituted = cands.length > 0;
+        }
         // 1. same name and same engine class
         const loose = squash(cls.name);
         const named = cands
@@ -441,7 +485,8 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
             continue;
         }
         const kind = info?.kind;
-        if (!kind || !(RETARGET_KINDS.has(kind) || opt.borrowModelKinds?.has(kind))) {
+        const wantsModel = !substituted && !!kind && !!opt.modelFor && !!cls.model && !RETARGET_KINDS.has(kind);
+        if (!kind || !(RETARGET_KINDS.has(kind) || substituted || opt.borrowModelKinds?.has(kind) || wantsModel)) {
             unsupported.set(key, {
                 reason: 'needs-model',
                 detail: `${info?.name ?? `engine class ${rfl}`} (${kind ?? 'unknown'}) needs a model; none can be taken from the PC data`,
@@ -450,13 +495,25 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
         }
         // 2. clone the PS2 class of the same engine id whose defaults are closest to the PC class
         let best: { c: Cand; m: Merge } | null = null;
-        for (const c of cands) {
+        const pool = wantsModel
+            ? cands.filter((c) => c.cls.model && c.odb.raw?.(c.id) && (!opt.modelOdbFile || c.odb.file === opt.modelOdbFile))
+            : cands;
+        if (!pool.length) {
+            unsupported.set(key, { reason: 'no-raw-record', detail: `no PS2 class of engine class ${rfl} carries a model` });
+            continue;
+        }
+        // Two new records cloned from the same template broke the ODB load in game (ootf-ingame.md bisect, K=3 vs K=2), so a
+        // template is reused only when no other candidate of that engine class is left.
+        const fresh = pool.filter((c) => !usedTemplates.has(`${c.odb.file}|${c.id}`));
+        for (const c of fresh.length ? fresh : pool) {
             const m = mergeDefaults(cls, c.cls, opt.mapClassRef);
             if (!best || m.coverage > best.m.coverage || (m.coverage === best.m.coverage && m.same > best.m.same))
                 best = { c, m };
         }
         const { c, m } = best!;
-        if (m.coverage < minCoverage) {
+        usedTemplates.add(`${c.odb.file}|${c.id}`);
+        if (opt.rewriteText && c.cls.fields) opt.rewriteText(c.odb.file, c.cls.fields, m.data);
+        if (m.coverage < (wantsModel ? 0 : minCoverage)) {
             unsupported.set(key, {
                 reason: 'low-coverage',
                 detail: `PS2 "${c.cls.name}" shares ${Math.round(m.coverage * 100)}% of the fields of "${cls.name}"`,
@@ -469,7 +526,15 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
             unsupported.set(key, { reason: 'no-raw-record', detail: `template "${c.cls.name}" has a model block` });
             continue;
         }
-        const sig = `${c.odb.file}|${c.id}|${m.data.join(',')}`;
+        let modelRef: { id: number; db: number } | null = null;
+        if (wantsModel) {
+            modelRef = opt.modelFor!(cls, c.odb.file);
+            if (!modelRef) {
+                unsupported.set(key, { reason: 'needs-model', detail: `the PC model of "${cls.name}" was not converted` });
+                continue;
+            }
+        }
+        const sig = `${c.odb.file}|${c.id}|${m.data.join(',')}|${modelRef ? `${modelRef.db}:${modelRef.id}` : ''}`;
         const prev = done.get(sig);
         if (prev) {
             prev.pcKeys.push(key);
@@ -482,23 +547,24 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
         }
         const group = c.odb.group?.(c.id) ?? c.cls.group;
         const name = cls.name.trim() || `OotF class ${rfl}`;
-        const record = raw
+        let record = raw
             ? cloneClassRecord(raw, name, m.data)
             : buildPlainClassRecord({
                   name,
                   group,
-                  rfl,
+                  rfl: c.cls.rflClass ?? rfl,
                   icon: c.cls.icon ?? 0,
                   fieldCount: c.cls.fields!.length,
                   data: m.data,
               });
+        if (modelRef && raw) record = patchRecordModel(record, modelRef);
         const out: OdbClass = {
             id: newId,
             name,
             group,
             runtimeClass: c.cls.runtimeClass,
-            model: c.cls.model ?? null,
-            rflClass: rfl,
+            model: modelRef ?? c.cls.model ?? null,
+            rflClass: c.cls.rflClass ?? rfl,
             icon: c.cls.icon,
             fields: c.cls.fields,
             data: m.data,
@@ -510,7 +576,7 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
             dbIndex: c.odb.dbIndex,
             classId: newId,
             group,
-            rfl,
+            rfl: c.cls.rflClass ?? rfl,
             template: { dbIndex: c.odb.dbIndex, classId: c.id, name: c.cls.name },
             record,
             cls: out,

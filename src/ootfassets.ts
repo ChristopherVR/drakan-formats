@@ -1,7 +1,7 @@
 import { strToU8 } from 'fflate';
 import { type ModelTextureRef, ModelError } from './model.ts';
 import { buildDbText, parseDbText } from './ootfcontainer.ts';
-import { type NeutralModel, buildPs2Mod, parsePcModel, pcToNeutral, type PcToPs2Options } from './ootfmodel.ts';
+import { type NeutralModel, buildPs2Mod, writePs2ModelRecords, parsePcModel, pcToNeutral, type PcToPs2Options } from './ootfmodel.ts';
 import {
     PC_TEX_NEXT_FRAME,
     type Ps2TextureOptions,
@@ -12,6 +12,7 @@ import {
 } from './ootftex.ts';
 import { type PcFileSource, type PcLevel, resolvePcPath } from './pc.ts';
 import { SrscReader } from './srsc.ts';
+import { TXD_ENTRY_TYPE } from './txd.ts';
 
 /**
  * Packaging of converted Order of the Flame assets for a mod pack: one PS2 MOD + TXD + DB for a converted level (or for
@@ -35,6 +36,9 @@ export interface AssetBuilderOptions {
     doubleSidedAlpha?: boolean;
     /** Group name inside the MOD (default "OotF"). */
     group?: string;
+    /** First model id / texture id handed out (defaults 2 and 1); use ids past a host container's maxima. */
+    firstModelId?: number;
+    firstTextureId?: number;
 }
 
 export interface AssetReport {
@@ -68,13 +72,16 @@ export class OotfAssetBuilder {
     private readonly texBodies: { id: number; body: Uint8Array }[] = [];
     private readonly modelIds = new Map<string, number>();
     private readonly models: { id: number; model: NeutralModel }[] = [];
-    private nextTex = 1;
-    private nextModel = 2;
+    private nextTex: number;
+    private nextModel: number;
 
     constructor(
         readonly src: PcFileSource,
         readonly options: AssetBuilderOptions = {},
-    ) {}
+    ) {
+        this.nextTex = options.firstTextureId ?? 1;
+        this.nextModel = options.firstModelId ?? 2;
+    }
 
     private async open(base: string, ext: string): Promise<SrscReader | null> {
         const path = `${base}.${ext}`;
@@ -253,6 +260,23 @@ export class OotfAssetBuilder {
     }
 
     // ------------------------------------------------------------------------------------------------ output
+
+    /**
+     * The converted records as container entries, for appending to an existing PS2 MOD / TXD (a host container whose own
+     * `db 0` the class model refs resolve to): `models` = the 0x0200 / 0x0203 / 0x0204 / 0x0207 records with `sub` = `groupId`,
+     * `textures` = the 0x0040 records.
+     */
+    entries(groupId: number): {
+        models: { type: number; id: number; sub: number; data: Uint8Array }[];
+        textures: { type: number; id: number; sub: number; data: Uint8Array }[];
+        lastModelId: number;
+    } {
+        const models = this.models.flatMap(({ id, model }) =>
+            writePs2ModelRecords(model).map((r) => ({ type: r.type, id, sub: groupId, data: r.data })),
+        );
+        const textures = this.texBodies.map((t) => ({ type: TXD_ENTRY_TYPE, id: t.id, sub: 0, data: t.body }));
+        return { models, textures, lastModelId: this.models.reduce((m, x) => Math.max(m, x.id), 0) };
+    }
 
     /** Write `<dir>/<STEM>.MOD`, `.TXD` and `.DB` (the stem is upper case, 8.3 style). */
     build(dir: string, stem: string): BuiltAssets {

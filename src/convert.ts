@@ -111,6 +111,25 @@ export interface ConvertOptions {
     textureFallback: number;
     /** Level name written to the header (default: the PC level's own name). */
     name?: string;
+    /** PC class (level dependency index, class id) -> PS2 class; when given it replaces `classOverrides` and name matching. */
+    resolveClass?: (db: number, id: number) => ClassTarget | null;
+    /**
+     * PC resource reference (model, sound, animation, sequence, texture, channel; `(db << 16) | id`) of an object parameter
+     * -> PS2 reference word, or null to zero it. `ownerDb` is the level dependency index of the object's class (its ODB
+     * resolves `db`). Called once per array element.
+     */
+    mapResource?: (kind: ResourceKind, pcRef: number, ctx: ResourceContext) => number | null;
+}
+
+export type ResourceKind = 'model' | 'sound' | 'animation' | 'sequence' | 'texture' | 'channel';
+
+export interface ResourceContext {
+    pc: PcLevel;
+    ownerDb: number;
+    classId: number;
+    field: string;
+    /** The PS2 class the object was mapped to. */
+    target: ClassTarget;
 }
 
 export interface ConversionReport {
@@ -134,6 +153,8 @@ export interface ConversionReport {
 }
 
 export interface Ps2LevelParts {
+    /** PC object id -> PS2 object id for the objects that were kept (sequence actors, links). */
+    objectIdMap: Map<number, number>;
     header: LvlHeader;
     objects: LvlObjectList;
     terrain: TerrainLayer[];
@@ -147,7 +168,7 @@ function text(raw: Uint8Array): { raw: Uint8Array; text: string } {
     return { raw, text: String.fromCharCode(...raw.subarray(0, z < 0 ? raw.length : z)) };
 }
 
-function encodeString(s: string): { raw: Uint8Array; text: string } {
+export function encodeString(s: string): { raw: Uint8Array; text: string } {
     const n = s.length + 1;
     const raw = new Uint8Array(n + (n % 2));
     for (let i = 0; i < s.length; i++) raw[i] = s.charCodeAt(i) & 0xff;
@@ -155,6 +176,25 @@ function encodeString(s: string): { raw: Uint8Array; text: string } {
 }
 
 /** Resource kinds whose ids live in PC containers and cannot be carried over by number. */
+export function resourceKind(type: number): ResourceKind | null {
+    switch (fieldBase(type)) {
+        case FIELD_MODEL:
+            return 'model';
+        case FIELD_SOUND:
+            return 'sound';
+        case FIELD_ANIMATION:
+            return 'animation';
+        case FIELD_SEQUENCE:
+            return 'sequence';
+        case FIELD_TEXTURE:
+            return 'texture';
+        case FIELD_CHANNEL:
+            return 'channel';
+        default:
+            return null;
+    }
+}
+
 function isResourceField(type: number): boolean {
     const b = fieldBase(type);
     return (
@@ -192,7 +232,10 @@ export function convertPcLevel(pc: PcLevel, opt: ConvertOptions): Ps2LevelParts 
         if (targets.has(key)) return targets.get(key)!;
         const cls = pc.classes.get(db)?.get(id);
         let t: ClassTarget | null = null;
-        if (cls) {
+        if (opt.resolveClass) {
+            t = cls ? opt.resolveClass(db, id) : null;
+            if (t && cls) report.mappedClasses.set(cls.name, t.cls.name);
+        } else if (cls) {
             const ov = opt.classOverrides?.get(cls.name.trim().toLowerCase());
             t = ov !== undefined ? ov : matchClass(cls, ps2);
             if (t) report.mappedClasses.set(cls.name, t.cls.name);
@@ -214,7 +257,7 @@ export function convertPcLevel(pc: PcLevel, opt: ConvertOptions): Ps2LevelParts 
     let nextId = pc.list.objects.reduce((m, o) => Math.max(m, o.id), 0) + 1;
     const idMap = new Map<number, number>();
     const out: LvlObject[] = [];
-    const keep: { src: LvlObject; dst: LvlObject; fields: ClassFieldDef[] | undefined }[] = [];
+    const keep: { src: LvlObject; dst: LvlObject; fields: ClassFieldDef[] | undefined; t: ClassTarget }[] = [];
     for (const src of pc.list.objects) {
         let t = targetOf(src.dbIndex, src.classId);
         const name = pc.classes.get(src.dbIndex)?.get(src.classId)?.name ?? `class ${src.classId}/${src.dbIndex}`;
@@ -262,7 +305,7 @@ export function convertPcLevel(pc: PcLevel, opt: ConvertOptions): Ps2LevelParts 
             if (Number.isFinite(g)) dst.pos[1] = g + 400;
         }
         out.push(dst);
-        if (!placeholder) keep.push({ src, dst, fields: t.cls.fields });
+        if (!placeholder) keep.push({ src, dst, fields: t.cls.fields, t });
     }
     out.sort((a, b) => a.id - b.id);
 
@@ -278,7 +321,7 @@ export function convertPcLevel(pc: PcLevel, opt: ConvertOptions): Ps2LevelParts 
 
     // ---- parameters, by field name
     const list: LvlObjectList = { objects: out, warnings: [] };
-    for (const { src, dst, fields } of keep) {
+    for (const { src, dst, fields, t } of keep) {
         if (!src.params.length) continue;
         const byName = new Map<string, number>();
         fields?.forEach((f, i) => {
@@ -303,8 +346,14 @@ export function convertPcLevel(pc: PcLevel, opt: ConvertOptions): Ps2LevelParts 
             if (fieldBase(f.type) === FIELD_CLASS) {
                 value = Array.isArray(value) ? value.map(mapClassRef) : mapClassRef(value as number);
             } else if (isResourceField(f.type)) {
-                report.zeroedResourceParams++;
-                value = Array.isArray(value) ? value.map(() => 0) : fieldIsIndirect(f.type) ? '' : 0;
+                const kind = resourceKind(f.type)!;
+                const ctx: ResourceContext = { pc, ownerDb: src.dbIndex, classId: src.classId, field: f.name, target: t };
+                const one = (v: number): number => {
+                    const m = v ? (opt.mapResource?.(kind, v, ctx) ?? null) : null;
+                    if (m === null) report.zeroedResourceParams++;
+                    return m ?? 0;
+                };
+                value = Array.isArray(value) ? value.map(one) : fieldIsIndirect(f.type) ? '' : one(value as number);
             }
             specs.push({ fieldIndex: i, type: f.type, name: f.name, value });
         }
@@ -326,7 +375,7 @@ export function convertPcLevel(pc: PcLevel, opt: ConvertOptions): Ps2LevelParts 
     for (const [n, c] of report.unmappedClasses) {
         report.warnings.push(`no PS2 class for "${n}": ${c} object${c === 1 ? '' : 's'} dropped`);
     }
-    return { header, objects: list, terrain, report };
+    return { header, objects: list, terrain, report, objectIdMap: idMap };
 }
 
 function convertLayer(L: TerrainLayer, pc: PcLevel, opt: ConvertOptions, report: ConversionReport): TerrainLayer {

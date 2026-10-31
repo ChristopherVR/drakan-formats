@@ -1,4 +1,6 @@
+import { view } from './bytes.ts';
 import { type Ps2Anim, parsePs2Anim } from './ootfanim.ts';
+import { lengthString } from './resources.ts';
 import { type Rig, quatToMat12 } from './skeleton.ts';
 
 /**
@@ -17,6 +19,29 @@ export type { Ps2Anim } from './ootfanim.ts';
 
 export function parseClip(info: Uint8Array, data: Uint8Array): Ps2Anim {
     return parsePs2Anim(info, data);
+}
+
+export interface ClipHeader {
+    name: string;
+    /** Seconds. */
+    duration: number;
+    /** Bit 0 = does not loop. */
+    flags: number;
+    /** Track count (= joint count of the model the clip fits). */
+    tracks: number;
+}
+
+/** The 0x0501 record alone (cheap enough to read for every clip of a list): `pstr name, f32 duration, u32 flags, u32 tracks, ...`. */
+export function parseClipHeader(info: Uint8Array): ClipHeader {
+    const { text: name, end } = lengthString(info);
+    if (end + 12 > info.length) return { name, duration: 0, flags: 0, tracks: 0 };
+    const dv = view(info);
+    return {
+        name,
+        duration: dv.getFloat32(end, true),
+        flags: dv.getUint32(end + 4, true),
+        tracks: dv.getUint32(end + 8, true),
+    };
 }
 
 /** True when the clip has one track per joint of the rig (the engine pairs clips with models by joint count). */

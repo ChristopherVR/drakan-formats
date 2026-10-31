@@ -20,8 +20,9 @@ import type { SrscReader } from './srsc.ts';
  * Both sides go through one neutral form (`NeutralModel`): a PS2 model read into it and written back reproduces the
  * 0x0200 / 0x0203 / 0x0204 / 0x0207 records byte for byte (checked on the PAL disc, see the journal).
  *
- * NOT produced: the PS2 display-list copy 0x0211 (GS packets; layout only partly understood). Whether the engine draws
- * a model without it is untested; see the journal.
+ * NOT produced: the PS2 display-list copy 0x0211. Tested in game (docs/journal/2026-10-31/ootf-displaylist.md): ordinary
+ * static props (level pieces, camp props) draw from 0x0203/0x0204 alone, a converted PC model without 0x0211 renders
+ * textured and upright. Exceptions: skinned models and the Birch tree class vanish without 0x0211.
  */
 
 export const MOD_GROUP = 0x0201;

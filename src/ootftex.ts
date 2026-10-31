@@ -237,6 +237,8 @@ export interface Ps2TextureOptions {
     maxSize?: number;
     /** Animation fps byte (disc: 10). */
     fps?: number;
+    /** u32 at header +40 (disc: a per-container counter, 0 in splat textures; meaning unknown). */
+    slot?: number;
 }
 
 export interface Ps2Texture {
@@ -257,7 +259,7 @@ function ps2Alpha(a: number): number {
     return a >= 255 ? PS2_OPAQUE : Math.round((a * PS2_OPAQUE) / 255);
 }
 
-function header(w: number, h: number, bpp: number, flagsWord: number, alpha: boolean, fps: number): Uint8Array {
+function header(w: number, h: number, bpp: number, flagsWord: number, alpha: boolean, fps: number, slot = 0): Uint8Array {
     const out = new Uint8Array(0x40);
     const dv = view(out);
     dv.setUint32(0, w, true);
@@ -269,6 +271,7 @@ function header(w: number, h: number, bpp: number, flagsWord: number, alpha: boo
     out[36] = fps;
     out[37] = alpha ? 0x02 : 0;
     out[38] = bpp > 8 ? 0x80 : 0;
+    dv.setUint32(40, slot, true);
     dv.setFloat32(44, 4, true);
     dv.setUint32(56, 1, true);
     return out;
@@ -318,7 +321,7 @@ export function encodePs2Texture(src: RgbaImage, opt: Ps2TextureOptions = {}): P
             lookup = (i) => q.map.get(img.rgba[i * 4 + 3] === 0 ? 0 : keyOf(i))!;
         }
         const body = new Uint8Array(0x40 + 16 + 1024 + px);
-        body.set(header(w, h, 8, translucent > 0 ? 8 : 0, hasAlpha, fps), 0);
+        body.set(header(w, h, 8, translucent > 0 ? 8 : 0, hasAlpha, fps, opt.slot), 0);
         const dv = view(body);
         dv.setUint32(0x40, 1, true);
         dv.setUint32(0x44, 256, true);
@@ -335,7 +338,7 @@ export function encodePs2Texture(src: RgbaImage, opt: Ps2TextureOptions = {}): P
     }
     // More than 256 colours, no graded alpha: 16 bpp 1:5:5:5 (R in the low bits, A in bit 15), as the disc's 16 bpp textures.
     const body = new Uint8Array(0x40 + px * 2);
-    body.set(header(w, h, 16, 1, hasAlpha, fps), 0);
+    body.set(header(w, h, 16, 1, hasAlpha, fps, opt.slot), 0);
     const dv = view(body);
     for (let i = 0; i < px; i++) {
         const r = img.rgba[i * 4]! >> 3;

@@ -155,3 +155,18 @@ describe('clip sampling', () => {
         expect(rootMotion(clip(), rig).delta).toEqual([4, 0, 0]);
     });
 });
+
+describe('clip header', () => {
+    it('reads name, duration, flags and track count', async () => {
+        const { parseClipHeader } = await import('../src/index.ts');
+        const name = [...'walk'].map((c) => c.charCodeAt(0));
+        const b = new Uint8Array(2 + 4 + 12 + 8);
+        const dv = new DataView(b.buffer);
+        dv.setUint16(0, 4, true);
+        b.set(name, 2);
+        dv.setFloat32(6, 1.5, true);
+        dv.setUint32(10, 1, true);
+        dv.setUint32(14, 65, true);
+        expect(parseClipHeader(b)).toEqual({ name: 'walk', duration: 1.5, flags: 1, tracks: 65 });
+    });
+});

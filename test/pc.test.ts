@@ -119,13 +119,7 @@ function pcObject(o: PcObj, w: W): void {
     p.forEach((x) => w.u32(x.type).str(x.name));
 }
 
-function pcClass(
-    name: string,
-    group: number,
-    model: [number, number],
-    rfl: number,
-    fields: [number, string, number][],
-): Uint8Array {
+function pcClass(name: string, group: number, model: [number, number], rfl: number, fields: [number, string, number][]): Uint8Array {
     const w = new W().str(name).u16(group).u16(model[0]).u16(model[1]).u16(rfl).u16(0);
     w.u32(fields.length).u32(fields.length);
     fields.forEach((f) => w.u32(f[2]));
@@ -183,20 +177,8 @@ describe('PC SRSC container', () => {
 describe('PC object list', () => {
     it('parses links, unsigned rotations, scale and parameters', () => {
         const w = new W().u16(2);
-        pcObject(
-            { id: 10, cls: 5, db: 2, pos: [1, 2, 3], flags: 0x101, links: [11], rot: [270, 90, 0], scale: [1, 2, 3] },
-            w,
-        );
-        pcObject(
-            {
-                id: 11,
-                cls: 6,
-                db: 2,
-                pos: [4, 5, 6],
-                params: [{ index: 3, type: 2, name: 'Speed', dword: 0x40000000 }],
-            },
-            w,
-        );
+        pcObject({ id: 10, cls: 5, db: 2, pos: [1, 2, 3], flags: 0x101, links: [11], rot: [270, 90, 0], scale: [1, 2, 3] }, w);
+        pcObject({ id: 11, cls: 6, db: 2, pos: [4, 5, 6], params: [{ index: 3, type: 2, name: 'Speed', dword: 0x40000000 }] }, w);
         const list = parsePcObjectList(w.bytes());
         expect(list.objects).toHaveLength(2);
         const a = list.objects[0]!;
@@ -212,9 +194,7 @@ describe('PC object list', () => {
         expect(() => parsePcObjectList(w.bytes())).toThrow();
     });
     it('folds angles into -180..180', () => {
-        expect([signedDegrees(0), signedDegrees(180), signedDegrees(181), signedDegrees(359)]).toEqual([
-            0, 180, -179, -1,
-        ]);
+        expect([signedDegrees(0), signedDegrees(180), signedDegrees(181), signedDegrees(359)]).toEqual([0, 180, -179, -1]);
     });
 });
 
@@ -256,15 +236,8 @@ function ps2ClassRecord(name: string, rfl: number, fields: [number, string, numb
     return Uint8Array.from([...new W().str(name).bytes(), ...body.bytes()]);
 }
 
-async function ps2Odb(
-    classes: { id: number; name: string; rfl: number; fields: [number, string, number][] }[],
-): Promise<SrscReader> {
-    const specs: Spec[] = classes.map((c) => ({
-        type: 0x0102,
-        id: c.id,
-        sub: 1,
-        data: ps2ClassRecord(c.name, c.rfl, c.fields),
-    }));
+async function ps2Odb(classes: { id: number; name: string; rfl: number; fields: [number, string, number][] }[]): Promise<SrscReader> {
+    const specs: Spec[] = classes.map((c) => ({ type: 0x0102, id: c.id, sub: 1, data: ps2ClassRecord(c.name, c.rfl, c.fields) }));
     const lists = new W();
     for (const c of classes) {
         lists.u32(c.fields.length);
@@ -316,15 +289,7 @@ async function fixture() {
             type: 0,
             id: 0,
             sub: 0,
-            data: new W()
-                .str('<0x0123> Test Level')
-                .u32(64)
-                .u32(64)
-                .u32(1)
-                .u16(1)
-                .u16(0)
-                .str('..\\Common\\Stuff\\Stuff')
-                .bytes(),
+            data: new W().str('<0x0123> Test Level').u32(64).u32(64).u32(1).u16(1).u16(0).str('..\\Common\\Stuff\\Stuff').bytes(),
         },
         { type: 1, id: 0, sub: 0, data: pcTerrain(3, 2, 'layer 1') },
         { type: 0x20, id: 0, sub: 0, data: objects },
@@ -388,11 +353,7 @@ describe('PC -> PS2 conversion', () => {
 
     it('converts objects, params, links and terrain to a readable PS2 layout', async () => {
         const { pc, h, classes } = await fixture();
-        const r = convertPcLevel(pc, {
-            template: { header: h, classes },
-            textureFallback: 0x00090042,
-            name: 'OotF Test',
-        });
+        const r = convertPcLevel(pc, { template: { header: h, classes }, textureFallback: 0x00090042, name: 'OotF Test' });
         const R = r.report;
         expect(R.objectsIn).toBe(4);
         expect(R.objectsOut).toBe(3);

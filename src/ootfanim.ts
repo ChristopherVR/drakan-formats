@@ -8,8 +8,8 @@
  *    instead of `R(3x3), t(3)`, channels without the two matrices, and one flat sphere list of 24-byte spheres with
  *    the centre stored directly (PC: per-LOD lists of 16-byte spheres naming a vertex).
  *  - PS2 ADB = per joint track (`first key offset, key count, flags, base translation`), keys are quaternions.
- *  - NOT solved (so no animation writer here): the exact rotation basis change between PC keys (delta against the bind
- *    pose, in a joint frame) and PS2 keys (absolute parent-relative quaternion). See the journal.
+ *  - The PC key to PS2 key rotation basis is solved in ootfcreature.ts (`Q = B * Wp * K * Wp^T`); the PC to PS2 animation
+ *    writer and the retarget strategy live there too. See the journal.
  */
 import { latin1, view } from './bytes.ts';
 
