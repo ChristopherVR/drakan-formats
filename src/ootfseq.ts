@@ -142,7 +142,8 @@ export interface SequenceConvertOptions {
     cameraObjectId?: number;
     /** Field of view (degrees) of the camera-setup action (type 9) inserted at time 0 of camera actors. Default 40. */
     cameraFov?: number;
-    /** Keep PC run/stop-AI values of 1 (default false: write 0 like every PS2 action of that type). */
+    /** Keep PC run/stop-AI values (default true: 0 at the start, 1 at the end like the disc's scenes; false writes 0 everywhere,
+     * which leaves the camera and the player held after the scene). */
     keepAiResume?: boolean;
     /** Messages 1..4095 are numeric payloads (fader times...), not engine ids. Default keep. */
     smallMessages?: 'keep' | 'drop';
@@ -405,7 +406,7 @@ export function convertAction(x: PcAction, opts: SequenceConvertOptions, report:
         }
         case 5: {
             const out = pcBytes(5, x.time, 4);
-            view(out).setUint32(6, opts.keepAiResume ? p.getUint32(0, true) : 0, true);
+            view(out).setUint32(6, opts.keepAiResume === false ? 0 : p.getUint32(0, true), true);
             return out;
         }
         case 6: {

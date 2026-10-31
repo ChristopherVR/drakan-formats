@@ -86,7 +86,7 @@ describe('ootfseq', () => {
         const ca = parseActions(cam!)!;
         expect(ca.map((a) => a.type)).toEqual([5, 9, 0, 8, 5]);
         expect(ca[1]!.fields.find((f) => f.name === 'b')!.value).toBe(55);
-        expect(ca[4]!.fields[0]!.value).toBe(0); // AI resume zeroed
+        expect(ca[4]!.fields[0]!.value).toBe(1); // AI resume kept (the scene releases the actor at its end)
         const tr = ca[2]!;
         expect(tr.size).toBe(54);
         expect(tr.fields.find((f) => f.name === 'z')!.value).toBe(30);
