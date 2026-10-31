@@ -2,8 +2,8 @@
 import { describe, expect, it } from 'vitest';
 import { TEX_HOLE } from '../src/terrain.ts';
 import type { TerrainLayer } from '../src/terrain.ts';
-import { ps2BlobBuilder, ps2BlobFor, ps2LevelTag, writePs2Terrain } from '../src/convert.ts';
-import { LAYER_FLAG_FLAT, buildPs2TerrainBlob, ps2ChunkSplit } from '../src/terrainblob.ts';
+import { limitLayerTextures, ps2BlobBuilder, ps2BlobFor, ps2LevelTag, writePs2Terrain } from '../src/convert.ts';
+import { LAYER_FLAG_FLAT, buildPs2TerrainBlob, planTerrainSlots, ps2ChunkSplit } from '../src/terrainblob.ts';
 
 function layer(w: number, h: number, flags: number, tex: (x: number, z: number) => number): TerrainLayer {
     const nv = (w + 1) * (h + 1);
@@ -106,7 +106,7 @@ describe('buildPs2TerrainBlob', () => {
         expect(L.cellTexLeft).toEqual(before);
     });
 
-    it('converted layers share one seq and the template level tag (engine requirement, in-game test)', () => {
+    it('a lone converted layer gets group 1 and the template level tag', () => {
         const A = layer(3, 3, 0, () => 0x90001);
         const B = { ...layer(2, 2, 0, () => 0x90001), index: 5 };
         for (const L of [A, B]) {
@@ -116,6 +116,32 @@ describe('buildPs2TerrainBlob', () => {
         }
         const c = ps2BlobBuilder(0x0c)(B);
         expect(c[2]).toBe(0x0c);
+    });
+
+    it('planTerrainSlots packs layers into groups of one pool without overlap', () => {
+        const layers = Array.from({ length: 40 }, (_, i) => ({ ...layer(12, 12, 0, () => 0x90001), index: i, originX: i % 8, originZ: (i / 8) | 0 }));
+        const plan = planTerrainSlots(layers);
+        const bySeq = new Map<number, { x0: number; x1: number; z0: number; z1: number }[]>();
+        for (const L of layers) {
+            const s = plan.get(L.index)!;
+            expect(s.xLo + 48).toBeLessThanOrEqual(s.pool);
+            expect(s.zLo + 48).toBeLessThanOrEqual(s.pool);
+            const list = bySeq.get(s.seq) ?? [];
+            for (const r of list) expect(s.xLo >= r.x1 || s.xLo + 48 <= r.x0 || s.zLo >= r.z1 || s.zLo + 48 <= r.z0).toBe(true);
+            list.push({ x0: s.xLo, x1: s.xLo + 48, z0: s.zLo, z1: s.zLo + 48 });
+            bySeq.set(s.seq, list);
+        }
+        expect(bySeq.size).toBeGreaterThan(1);
+        expect(Math.max(...[...bySeq.values()].map((l) => l.length))).toBeLessThanOrEqual(25);
+    });
+
+    it('limitLayerTextures keeps the most used textures and fills the rest from the nearest kept cell', () => {
+        const t = new Uint32Array(100);
+        for (let i = 0; i < 100; i++) t[i] = 0x90000 + (i % 10) + (i < 50 ? 0 : 0);
+        t[3] = TEX_HOLE;
+        limitLayerTextures(t, 10, 10, 4);
+        expect(new Set([...t].filter((x) => x !== TEX_HOLE)).size).toBeLessThanOrEqual(4);
+        expect(t[3]).toBe(TEX_HOLE);
     });
 
     it('reads the level tag back out of a written layer table', () => {

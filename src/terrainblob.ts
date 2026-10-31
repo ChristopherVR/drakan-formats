@@ -26,6 +26,8 @@ export const LAYER_FLAG_FLAT = 0x04;
 export interface TerrainBlobOptions {
     /** Streaming group id; real layers that coexist share one. Default 1. */
     seq?: number;
+    /** Slot rectangle of this layer inside its group's pool (`planTerrainSlots`); default 0,0 with pool sized to the layer. */
+    slot?: { xLo: number; zLo: number; pool: number };
     /** Level-wide constant at bytes 2..3 (0x0c in LEVEL0RO, 0x16 in LEVEL5NE). Default 0x16. */
     levelTag?: number;
     /** Sort key for the texture list of a chunk. The real order is a per-texture property that is not in the layer. */
@@ -84,11 +86,12 @@ export function buildPs2TerrainBlob(layer: TerrainLayer, opts: TerrainBlobOption
     const zHi = 4 * h - 1;
     o.u16(opts.seq ?? 1);
     o.u16(opts.levelTag ?? 0x16);
-    o.u32(poolSize(Math.max(xHi, zHi)));
-    o.u32(0);
-    o.u32(xHi);
-    o.u32(0);
-    o.u32(zHi);
+    const slot = opts.slot;
+    o.u32(slot ? slot.pool : poolSize(Math.max(xHi, zHi)));
+    o.u32(slot?.xLo ?? 0);
+    o.u32((slot?.xLo ?? 0) + xHi);
+    o.u32(slot?.zLo ?? 0);
+    o.u32((slot?.zLo ?? 0) + zHi);
 
     const xs = ps2ChunkSplit(w);
     const zs = ps2ChunkSplit(h);
@@ -101,8 +104,10 @@ export function buildPs2TerrainBlob(layer: TerrainLayer, opts: TerrainBlobOption
             const z0 = zs[b]!;
             const z1 = zs[b + 1]!;
             let refs: number[] = [];
-            for (let z = z0; z < z1; z++) {
-                for (let x = x0; x < x1; x++) {
+            // The chunk's vertices are x0..x1 / z0..z1 inclusive, so it also lists the textures of the cells that touch
+            // them from the neighbouring chunks (disc: a chunk of 90219 cells next to 90217 lists both).
+            for (let z = Math.max(0, z0 - 1); z <= Math.min(h - 1, z1); z++) {
+                for (let x = Math.max(0, x0 - 1); x <= Math.min(w - 1, x1); x++) {
                     const t = tex(x, z);
                     if (!isSpecial(t) && !refs.includes(t)) refs.push(t);
                 }
@@ -186,3 +191,75 @@ const CORNERS: readonly (readonly [number, number])[] = [
     [-1, 0],
     [0, 0],
 ];
+
+/** Group and slot assignment of one layer. */
+export interface TerrainSlot {
+    seq: number;
+    xLo: number;
+    zLo: number;
+    pool: number;
+}
+
+/**
+ * Assign every layer a streaming group (`seq`) and a `4w x 4h` slot rectangle inside the group's pool, the way the disc
+ * does it (LEVEL1NA seq 1: twelve layers with ranges x 0..11, 12..15, 16..31 / z 0..15, 0..3, ... in a 64 pool; groups hold
+ * 1..20 layers and the pool is 64 / 128 / 256). A converted level with 346 layers all in one group on the same
+ * rectangle (what `seq` 1 + origin 0 gave) hangs the engine's level load; here neighbouring layers (tiles of 32 cells)
+ * share a group until the 256 pool is full (shelf packing), and a layer wider than the pool gets a group of its own.
+ * Returns a map from `TerrainLayer.index`.
+ */
+export function planTerrainSlots(layers: readonly TerrainLayer[], maxPool = 256): Map<number, TerrainSlot> {
+    const order = [...layers].sort(
+        (a, b) =>
+            Math.floor(a.originZ / 32) - Math.floor(b.originZ / 32) ||
+            Math.floor(a.originX / 32) - Math.floor(b.originX / 32) ||
+            a.index - b.index,
+    );
+    const out = new Map<number, TerrainSlot>();
+    let seq = 0;
+    let shelfX = 0;
+    let shelfZ = 0;
+    let shelfH = 0;
+    let open = false;
+    const startGroup = (): void => {
+        seq++;
+        shelfX = 0;
+        shelfZ = 0;
+        shelfH = 0;
+        open = true;
+    };
+    for (const L of order) {
+        const w = 4 * L.width;
+        const h = 4 * L.height;
+        if (w > maxPool || h > maxPool) {
+            seq++;
+            open = false;
+            out.set(L.index, { seq, xLo: 0, zLo: 0, pool: poolSize(Math.max(w, h) - 1) });
+            continue;
+        }
+        if (!open) startGroup();
+        if (shelfX + w > maxPool) {
+            shelfZ += shelfH;
+            shelfX = 0;
+            shelfH = 0;
+        }
+        if (shelfZ + h > maxPool) {
+            startGroup();
+        }
+        out.set(L.index, { seq, xLo: shelfX, zLo: shelfZ, pool: maxPool });
+        shelfX += w;
+        shelfH = Math.max(shelfH, h);
+    }
+    // The pool of a group is the smallest of 64 / 128 / 256 that holds its largest extent.
+    const need = new Map<number, number>();
+    for (const L of layers) {
+        const s = out.get(L.index)!;
+        if (s.pool > maxPool) continue;
+        need.set(s.seq, Math.max(need.get(s.seq) ?? 0, s.xLo + 4 * L.width, s.zLo + 4 * L.height));
+    }
+    for (const L of layers) {
+        const s = out.get(L.index)!;
+        if (s.pool <= maxPool) s.pool = poolSize(need.get(s.seq)! - 1);
+    }
+    return out;
+}

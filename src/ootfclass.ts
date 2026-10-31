@@ -774,10 +774,30 @@ export function levelPropertiesParams(pc: OdbClass, ps2: OdbClass): { specs: Par
             left.push(rule.pc);
             continue;
         }
-        const value: ClassFieldValue = decodeFieldValue(pt.type, pc.data?.[i] ?? 0, pc.data ?? []);
+        let value: ClassFieldValue = decodeFieldValue(pt.type, pc.data?.[i] ?? 0, pc.data ?? []);
         const current = decodeFieldValue(st.type, ps2.data?.[j] ?? 0, ps2.data ?? []);
         if (JSON.stringify(value) === JSON.stringify(current)) continue;
         specs.push({ fieldIndex: j, type: st.type, name: st.name, value });
     }
     return { specs, left };
 }
+        // PC draw distances (12 / 30 lu) are shorter than anything the PS2 levels use (8 / 65-160): never shorten the template's.
+        if (/^M(in|ax) Fog Depth/.test(rule.pc) && typeof value === 'number' && typeof current === 'number')
+            value = Math.max(value, current);
+    // PS2 sky and distance fog come from the day/night cycle (`Level Time`), not from a fog colour: a dark PC fog colour
+    // (Ruined Village, Rift, Mines, Volcano: black; Alwarren, Islands Night: dark green / brown) means a night level, so run the
+    // template's cycle at night instead of its noon (white sky and fog over unlit ground).
+    const timeIdx = sf.findIndex((f) => f.name === 'Level Time (0-24hrs)');
+    const fogIdx = pf.findIndex((f) => f.name === 'Fog Color');
+    if (timeIdx >= 0 && fogIdx >= 0) {
+        const fog = Number(decodeFieldValue(pf[fogIdx]!.type, pc.data?.[fogIdx] ?? 0, pc.data ?? []));
+        const lum = ((fog & 255) + ((fog >> 8) & 255) + ((fog >> 16) & 255)) / 3;
+        const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['DRAKAN_LEVEL_TIME'];
+        const hour = env !== undefined && env !== '' ? Number(env) : lum < NIGHT_FOG_LUMINANCE ? NIGHT_HOUR : undefined;
+        if (hour !== undefined) specs.push({ fieldIndex: timeIdx, type: sf[timeIdx]!.type, name: sf[timeIdx]!.name, value: hour });
+    }
+
+/** PC fog colours darker than this (mean of R, G, B, 0-255) make a converted level a night level. */
+export const NIGHT_FOG_LUMINANCE = 64;
+/** `Level Time (0-24hrs)` of a night level. */
+export const NIGHT_HOUR = 0;

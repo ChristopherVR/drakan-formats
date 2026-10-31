@@ -288,11 +288,19 @@ export async function convertTerrainTextures(
 }
 
 /**
- * PS2 cell flags for a converted layer: bit 0 (diagonal) comes from the PC flags; the high byte is 0xff (opaque), the
- * value of 95 % of the cells in the disc's levels (lower values fade the border of a layer into the layer below).
+ * PS2 cell flags for a converted layer: bit 0 (diagonal) and bits 2 / 3 come from the PC flags; the high byte is 0xff
+ * (opaque), the value of 95 % of the cells in the disc's levels (lower values fade the border of a layer into the layer
+ * below). Bits 2 and 3 occur in the same combinations and proportions on both platforms (d : c : 9 : 5 : 8 : 4 =
+ * 253k : 141k : 16k : 16k : 15k : 15k on the PAL discs, 7.0k : 1.4k : 0.7k : 0.7k : 0.8k : 0.8k in Ruined Village), so they are
+ * carried over. PC bit 1 (12 % of PC cells, 0.4 % on PS2) is dropped. `DRAKAN_TERRAIN_CELLBITS` (mask, default 0x0d)
+ * overrides the carried bits for in-game A/B tests.
  */
-export function ps2CellFlags(L: TerrainLayer): Uint16Array {
+export function ps2CellFlags(L: TerrainLayer, mask = cellBitsMask()): Uint16Array {
     const out = new Uint16Array(L.cellFlags.length);
-    for (let c = 0; c < out.length; c++) out[c] = 0xff00 | (L.cellFlags[c]! & 1);
+    for (let c = 0; c < out.length; c++) out[c] = 0xff00 | (L.cellFlags[c]! & mask);
     return out;
+}
+
+function cellBitsMask(): number {
+    return (env('DRAKAN_TERRAIN_CELLBITS') ?? 0x0d) & 0xff;
 }

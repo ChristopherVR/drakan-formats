@@ -32,7 +32,7 @@ import {
 import { odbStemForDependency, type OdbClass, type OdbIndex } from './odb.ts';
 import { pcLevelName, type PcLevel } from './pc.ts';
 import { writeSrsc, type SrscReader } from './srsc.ts';
-import { buildPs2TerrainBlob } from './terrainblob.ts';
+import { buildPs2TerrainBlob, planTerrainSlots, type TerrainSlot } from './terrainblob.ts';
 import {
     LVL_TYPE_LAYERS,
     TEX_HOLE,
@@ -119,6 +119,12 @@ export interface ConvertOptions {
      * resolves `db`). Called once per array element.
      */
     mapResource?: (kind: ResourceKind, pcRef: number, ctx: ResourceContext) => number | null;
+    /**
+     * Most distinct textures one layer may use (default 8; 0 = unlimited). No layer on the PAL disc uses more than 8
+     * (LEVEL5NE, LEVEL8OS) and the engine does not survive a Ruined Village layer with 42 (docs/journal/2026-11-01). Cells
+     * of the surplus textures take the texture of the nearest cell of a kept one.
+     */
+    maxTexturesPerLayer?: number;
 }
 
 export type ResourceKind = 'model' | 'sound' | 'animation' | 'sequence' | 'texture' | 'channel';
@@ -411,6 +417,8 @@ function convertLayer(L: TerrainLayer, pc: PcLevel, opt: ConvertOptions, report:
             report.cellsMapped++;
         }
     }
+    const lim = opt.maxTexturesPerLayer ?? layerTexEnv() ?? MAX_LAYER_TEXTURES;
+    if (lim > 0) limitLayerTextures(cellTexLeft, L.width, L.height, lim);
     return {
         ...L,
         cellTexLeft,
@@ -419,6 +427,55 @@ function convertLayer(L: TerrainLayer, pc: PcLevel, opt: ConvertOptions, report:
         vertexMask: ps2VertexMask(L.width, L.height),
         source: 'ps2',
     };
+}
+
+/** Default for `ConvertOptions.maxTexturesPerLayer`. */
+export const MAX_LAYER_TEXTURES = 8;
+
+function layerTexEnv(): number | undefined {
+    const v = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['DRAKAN_TERRAIN_LAYERTEX'];
+    return v ? Number(v) : undefined;
+}
+
+/**
+ * Reduce a layer to at most `max` distinct textures in place: keep the `max` most used, give every other cell the
+ * texture of the nearest kept cell (4-neighbour flood fill). Hole / invisible cells are left alone.
+ */
+export function limitLayerTextures(tex: Uint32Array, w: number, h: number, max: number): void {
+    const count = new Map<number, number>();
+    for (const t of tex) if (t !== TEX_HOLE && t !== TEX_INVISIBLE) count.set(t, (count.get(t) ?? 0) + 1);
+    if (count.size <= max) return;
+    const keep = new Set([...count].sort((a, b) => b[1] - a[1] || a[0] - b[0]).slice(0, max).map((x) => x[0]));
+    const done = new Uint8Array(tex.length);
+    let queue: number[] = [];
+    for (let i = 0; i < tex.length; i++) {
+        if (tex[i] === TEX_HOLE || tex[i] === TEX_INVISIBLE || keep.has(tex[i]!)) {
+            done[i] = 1;
+            if (tex[i] !== TEX_HOLE && tex[i] !== TEX_INVISIBLE) queue.push(i);
+        }
+    }
+    while (queue.length) {
+        const next: number[] = [];
+        for (const i of queue) {
+            const x = i % w;
+            const z = (i / w) | 0;
+            for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+                const nx = x + dx;
+                const nz = z + dz;
+                if (nx < 0 || nz < 0 || nx >= w || nz >= h) continue;
+                const j = nz * w + nx;
+                if (done[j]) continue;
+                done[j] = 1;
+                tex[j] = tex[i]!;
+                next.push(j);
+            }
+        }
+        queue = next;
+    }
+    const any = [...keep][0]!;
+    for (let i = 0; i < tex.length; i++) {
+        if (tex[i] !== TEX_HOLE && tex[i] !== TEX_INVISIBLE && !keep.has(tex[i]!)) tex[i] = any;
+    }
 }
 
 /** Per-vertex adjacency mask: one bit for each of the four surrounding cells that exist (15 = all, level-format.md s10). */
@@ -440,7 +497,8 @@ export function ps2VertexMask(w: number, h: number): Uint8Array {
 
 // ---------------------------------------------------------------- PS2 serialisation
 
-export type BlobBuilder = (layer: TerrainLayer) => Uint8Array;
+/** `all` is the whole layer list (for builders that assign groups and slots across layers). */
+export type BlobBuilder = (layer: TerrainLayer, all?: readonly TerrainLayer[]) => Uint8Array;
 
 function layerDef(L: TerrainLayer): Uint8Array {
     const name = encodeString(L.name);
@@ -496,7 +554,7 @@ export function writePs2Terrain(layers: readonly TerrainLayer[], blob: BlobBuild
     view(head).setUint32(0, layers.length, true);
     parts.push(head);
     for (const L of layers) {
-        parts.push(layerDef(L), blob(L));
+        parts.push(layerDef(L), blob(L, layers));
     }
     const one = new Uint8Array(4);
     view(one).setUint32(0, 1, true);
@@ -577,10 +635,16 @@ export function dominantTexture(layers: readonly TerrainLayer[]): number {
  * draws regenerated blobs only when `levelTag` equals the template level's (0x18 for LEVEL1NA; 0x16 drew just some
  * layers, flat) and when every layer has the same `seq` (a unique seq per layer froze the world on converted terrain).
  */
-export const ps2BlobBuilder =
-    (levelTag: number): BlobBuilder =>
-    (L) =>
-        buildPs2TerrainBlob(L, { seq: 1, levelTag });
+export const ps2BlobBuilder = (levelTag: number): BlobBuilder => {
+    const plans = new WeakMap<readonly TerrainLayer[], Map<number, TerrainSlot>>();
+    return (L, all) => {
+        const list = all ?? [L];
+        let plan = plans.get(list);
+        if (!plan) plans.set(list, (plan = planTerrainSlots(list)));
+        const s = plan.get(L.index);
+        return buildPs2TerrainBlob(L, { seq: s?.seq ?? 1, levelTag, slot: s });
+    };
+};
 
 /** The `level_tag` of a PS2 LVL 0x0001 payload (bytes 2..3 of the first layer's blob); undefined if it cannot be found. */
 export function ps2LevelTag(layersPayload: Uint8Array): number | undefined {

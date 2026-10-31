@@ -667,6 +667,15 @@ export async function convertOotfLevels(
                 modEntries.push({ type: e.type, id: e.id, sub: e.sub, data });
             }
             res.files[`${dir}/${hostStem}.MOD`] = writePs2Srsc([...modEntries, ...add.models]);
+        const dbgEnv = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {};
+        if (dbgEnv['DRAKAN_DBG_MAXLAYERS']) parts.terrain = parts.terrain.slice(0, Number(dbgEnv['DRAKAN_DBG_MAXLAYERS']));
+        if (dbgEnv['DRAKAN_DBG_NOOBJ']) {
+            const keep = (o: LvlObject): boolean =>
+                [9, 27, 54].includes(classes.get(o.dbIndex)?.get(o.classId)?.rflClass ?? -1) || classes.get(o.dbIndex)?.get(o.classId)?.name === 'Procedural Sky';
+            parts.objects = { ...parts.objects, objects: parts.objects.objects.filter(keep) };
+        }
+        const lf = Number((globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['DRAKAN_TERRAIN_LAYERFLAGS'] ?? 0);
+        if (lf) parts.terrain = parts.terrain.map((L) => ({ ...L, flags: L.flags | lf }));
             const txd = ps2.hostTxd!;
             const txdEntries: Ps2Entry[] = [];
             for (const e of txd.entries)
@@ -755,3 +764,10 @@ async function loadRrcStrings(src: PcFileSource): Promise<Map<number, string>> {
         return new Map();
     }
 }
+    // The sky is an object too (class 26 "Procedural Sky", db 11 in every PS2 level): without one the world has a plain
+    // white backdrop and white distance fog. Every PC level has a "Sky" object, so clone the template's.
+    const nameOf = (o: LvlObject): string | undefined => classes.get(o.dbIndex)?.get(o.classId)?.name;
+    if (!list.objects.some((o) => nameOf(o) === 'Procedural Sky')) {
+        const t = tpl.find((o) => nameOf(o) === 'Procedural Sky');
+        if (t) list.objects.push(cloneObject(t, nextId++));
+    }
