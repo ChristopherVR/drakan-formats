@@ -10,3 +10,4 @@ export * from './lvl.ts';
 export * from './discprofile.ts';
 export * from './terrain.ts';
 export * from './model.ts';
+export * from './resources.ts';
