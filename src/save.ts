@@ -405,13 +405,25 @@ FIELDS.quest = {
     confidence: 'low',
     note:
         'Row N of the quest / map marker table (quest.N, last word of the 0x20-byte row). Row layout ' +
-        '{x, y, float, icon, enabled, region, quest id, state} matches RAM 0x4fbb70; the meaning of state is unverified.',
+        '{x, y, float, done, enabled, region, quest class, seen} matches RAM 0x4fbb70. The word is two "seen" bits ' +
+        'the journal page (2) and the map page (4) set when they draw the row; it does not say whether a quest is done.',
+};
+FIELDS['quest.done'] = {
+    key: 'quest.done',
+    label: 'Quest done flag',
+    locator: { type: 'quest' },
+    offset: 0x0c,
+    kind: 'u32',
+    confidence: 'medium',
+    note:
+        'Done flag of quest row N (quest.N.done, 0 or 1, row word +0x0c, set by the quest message 0x116e). The journal ' +
+        'draws a ticked box for a done row (checked in game on edited saves).',
 };
 
 const SKILL_FIELD = /^skill\.(\d+)(\.max)?$/;
 const PROGRESS_FIELD = /^progress\.(\d+)$/;
 const INV_FIELD = /^inv\.(\d+)\.(equipped|hot|durability|max)$/;
-const QUEST_FIELD = /^quest\.(\d+)$/;
+const QUEST_FIELD = /^quest\.(\d+)(\.done)?$/;
 
 export function resolveField(name: string): { def: FieldDef; rowId: number | null } {
     const m = SKILL_FIELD.exec(name);
@@ -421,11 +433,11 @@ export function resolveField(name: string): { def: FieldDef; rowId: number | nul
     const im = INV_FIELD.exec(name);
     if (im) return { def: FIELDS[`inv.${im[2]}`]!, rowId: Number(im[1]) };
     const qm = QUEST_FIELD.exec(name);
-    if (qm) return { def: FIELDS.quest!, rowId: Number(qm[1]) };
+    if (qm) return { def: FIELDS[qm[2] ? 'quest.done' : 'quest']!, rowId: Number(qm[1]) };
     const def = FIELDS[name];
     if (def && (def.locator.type === 'record' || def.locator.type === 'stats')) return { def, rowId: null };
     throw new SaveFieldError(
-        `unknown field "${name}" (skill.N, skill.N.max, progress.KEY, stat.NAME, inv.CELL.equipped|hot|durability|max, quest.ROW)`,
+        `unknown field "${name}" (skill.N, skill.N.max, progress.KEY, stat.NAME, inv.CELL.equipped|hot|durability|max, quest.ROW, quest.ROW.done)`,
     );
 }
 
@@ -658,6 +670,7 @@ export interface QuestRow {
     index: number;
     x: number;
     y: number;
+    /** Row word +0x0c: the done flag (0 or 1). Named `icon` in the first layout guess. */
     icon: number;
     enabled: number;
     region: number;

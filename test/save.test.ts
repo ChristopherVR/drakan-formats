@@ -7,6 +7,7 @@ import {
     SaveFieldError,
     SaveFormatError,
     applyFieldEdits,
+    listQuests,
     assembleSave,
     decodeScreenshot,
     describeRecords,
@@ -326,5 +327,16 @@ describe('Live-memory fields (stats block, inventory cells, quest rows)', () => 
         expect(getField(save, 'quest.0')).toBe(4);
         expect(getField(save, 'quest.1')).toBe(2);
         expect(() => getField(save, 'quest.2')).toThrow(SaveFieldError);
+    });
+
+    it('edits the quest done flag without touching the seen word', () => {
+        const save = live();
+        expect(getField(save, 'quest.1.done')).toBe(0);
+        const edited = applyFieldEdits(save, [{ name: 'quest.1.done', value: 1 }]);
+        expect(getField(edited, 'quest.1.done')).toBe(1);
+        expect(getField(edited, 'quest.1')).toBe(2);
+        expect(listQuests(edited)[1]!.icon).toBe(1);
+        expect(listQuests(edited)[0]!.icon).toBe(0);
+        expect(() => getField(save, 'quest.2.done')).toThrow(SaveFieldError);
     });
 });

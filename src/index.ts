@@ -11,3 +11,5 @@ export * from './discprofile.ts';
 export * from './terrain.ts';
 export * from './model.ts';
 export * from './resources.ts';
+export * from './xdb.ts';
+export * from './quests.ts';
