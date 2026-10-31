@@ -1,6 +1,13 @@
 // Synthetic data only; no game bytes.
 import { describe, expect, it } from 'vitest';
-import { buildAnimMap, jointParents, parsePs2Anim, parseSkeleton, writePs2Anim, writePs2Skeleton } from '../src/ootfanim.ts';
+import {
+    buildAnimMap,
+    jointParents,
+    parsePs2Anim,
+    parseSkeleton,
+    writePs2Anim,
+    writePs2Skeleton,
+} from '../src/ootfanim.ts';
 
 function f32(v: number[]): number[] {
     const d = new DataView(new ArrayBuffer(4 * v.length));
@@ -44,6 +51,14 @@ describe('ootfanim skeleton', () => {
         expect(back.spheres[0]!.centre).toEqual([4, 5, 6]);
         expect(back.animIds).toEqual([7]);
     });
+
+    it('pads odd-length LOD names to an even length like the disc', () => {
+        const pc = parseSkeleton(pcSkeleton(), 'pc');
+        const two = { ...pc, lodNames: ['Rynn(L)', 'ab'], lods: [pc.lods[0]!, pc.lods[0]!, pc.lods[0]!] };
+        const dv = new DataView(writePs2Skeleton(two, null).buffer);
+        expect(dv.getUint16(66, true)).toBe(8); // 7 characters + NUL
+        expect(dv.getUint16(66 + 2 + 8, true)).toBe(2);
+    });
 });
 
 describe('ootfanim ps2 animation', () => {
@@ -56,13 +71,27 @@ describe('ootfanim ps2 animation', () => {
             channels: 1,
             thresholds: { rotation: 0.25, scale: 1, translation: 1 },
             tracks: [
-                { base: [0, 0, 0] as [number, number, number], hasPos: true, keys: [
-                    { time: 0, q: [0, 0, 0, 1] as [number, number, number, number], pos: [0, 0, 0] as [number, number, number] },
-                    { time: 0.5, q: [0, 0, 0, 1] as [number, number, number, number], pos: [0, 0.5, 0] as [number, number, number] },
-                ] },
-                { base: [0.5, 0, 0] as [number, number, number], hasPos: false, keys: [
-                    { time: 0, q: [0, 0, 0, 1] as [number, number, number, number], pos: null },
-                ] },
+                {
+                    base: [0, 0, 0] as [number, number, number],
+                    hasPos: true,
+                    keys: [
+                        {
+                            time: 0,
+                            q: [0, 0, 0, 1] as [number, number, number, number],
+                            pos: [0, 0, 0] as [number, number, number],
+                        },
+                        {
+                            time: 0.5,
+                            q: [0, 0, 0, 1] as [number, number, number, number],
+                            pos: [0, 0.5, 0] as [number, number, number],
+                        },
+                    ],
+                },
+                {
+                    base: [0.5, 0, 0] as [number, number, number],
+                    hasPos: false,
+                    keys: [{ time: 0, q: [0, 0, 0, 1] as [number, number, number, number], pos: null }],
+                },
             ],
         };
         const { info, data } = writePs2Anim(a);
@@ -73,8 +102,14 @@ describe('ootfanim ps2 animation', () => {
 describe('ootfanim id map', () => {
     it('maps by name, case-insensitively, lowest id wins', () => {
         const m = buildAnimMap(
-            [{ id: 1, name: 'Walk' }, { id: 2, name: 'Fly' }],
-            [{ id: 9, name: 'walk' }, { id: 5, name: 'WALK' }],
+            [
+                { id: 1, name: 'Walk' },
+                { id: 2, name: 'Fly' },
+            ],
+            [
+                { id: 9, name: 'walk' },
+                { id: 5, name: 'WALK' },
+            ],
         );
         expect(m.get(1)).toBe(5);
         expect(m.has(2)).toBe(false);

@@ -10,6 +10,7 @@
 // Added records ship as `new/<FILE>.ODB/0102_<id>_<sub>.bin` plus a replaced 0x0103 field-list entry (modding.md).
 
 import {
+    FIELD_ANIMATION,
     FIELD_COLOUR,
     FIELD_ENUM,
     FIELD_FLOAT,
@@ -217,6 +218,19 @@ export interface PlanOptions {
     /** With `modelFor`: only clone model classes from this ODB file (`RESOURES.ODB`), the one whose own MOD / TXD gets the new models. */
     modelOdbFile?: string;
     modelFor?: (cls: OdbClass, odbFile: string) => { id: number; db: number } | null;
+    /**
+     * Animation-typed defaults (type 9, scalar or array) of a class whose model was converted with its own clips: PC animation id
+     * -> the clip's id in the host ADB (`OotfAssetBuilder.mapAnimRef`), or null/undefined to keep the template's value.
+     * Returns undefined for classes without converted clips.
+     */
+    mapAnimFor?: (cls: OdbClass) => ReadonlyMap<number, number> | undefined;
+    /**
+     * Skinned models need a skinned template: a class whose model has no skeleton fails the level load (-6, ootf-skinned-creatures.md).
+     * `modelSkinned(pcClass)` says the PC class's converted model is skinned, `templateSkinned(ps2Class)` that a PS2 class's model is.
+     * With both, a skinned class is cloned from the skinned templates when there are any.
+     */
+    modelSkinned?: (cls: OdbClass) => boolean;
+    templateSkinned?: (cls: OdbClass) => boolean;
 }
 
 // ---------------------------------------------------------------- plan
@@ -298,7 +312,12 @@ interface Merge {
  * Overwrite the template's defaults with the PC class's, by field name and type. Strings and arrays append their new
  * payload at the end of the data area (the old payload stays, unused). Class-typed fields go through `mapClassRef`.
  */
-export function mergeDefaults(pc: OdbClass, tpl: OdbClass, mapClassRef?: PlanOptions['mapClassRef']): Merge {
+export function mergeDefaults(
+    pc: OdbClass,
+    tpl: OdbClass,
+    mapClassRef?: PlanOptions['mapClassRef'],
+    animMap?: ReadonlyMap<number, number>,
+): Merge {
     const pf = pc.fields ?? [];
     const tf = tpl.fields ?? [];
     const out = [...(tpl.data ?? [])];
@@ -329,6 +348,29 @@ export function mergeDefaults(pc: OdbClass, tpl: OdbClass, mapClassRef?: PlanOpt
                 return;
             }
             out[j] = mapped >>> 0;
+            copied.push(f.name);
+            return;
+        }
+        if (animMap && fieldBase(f.type) === FIELD_ANIMATION) {
+            // The converted clips live in the host ADB under new ids; clips that did not convert keep the template's value.
+            if (fieldIsIndirect(f.type)) {
+                const words = (decodeFieldValue(f.type, dword, pc.data ?? []) as number[])
+                    .map((w) => animMap.get(w & 0xffff))
+                    .filter((w): w is number => w !== undefined);
+                if (words.length === 0) {
+                    skipped.push(f.name);
+                    return;
+                }
+                out[j] = ((words.length << 16) | out.length) >>> 0;
+                out.push(...words);
+            } else {
+                const n = animMap.get(dword & 0xffff);
+                if (n === undefined) {
+                    skipped.push(f.name);
+                    return;
+                }
+                out[j] = n;
+            }
             copied.push(f.name);
             return;
         }
@@ -498,6 +540,10 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
         const pool = wantsModel
             ? cands.filter((c) => c.cls.model && c.odb.raw?.(c.id) && (!opt.modelOdbFile || c.odb.file === opt.modelOdbFile))
             : cands;
+        if (wantsModel && opt.modelSkinned?.(cls) && opt.templateSkinned) {
+            const sk = pool.filter((c) => opt.templateSkinned!(c.cls));
+            if (sk.length) pool.splice(0, pool.length, ...sk);
+        }
         if (!pool.length) {
             unsupported.set(key, { reason: 'no-raw-record', detail: `no PS2 class of engine class ${rfl} carries a model` });
             continue;
@@ -506,7 +552,7 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
         // template is reused only when no other candidate of that engine class is left.
         const fresh = pool.filter((c) => !usedTemplates.has(`${c.odb.file}|${c.id}`));
         for (const c of fresh.length ? fresh : pool) {
-            const m = mergeDefaults(cls, c.cls, opt.mapClassRef);
+            const m = mergeDefaults(cls, c.cls, opt.mapClassRef, opt.mapAnimFor?.(cls));
             if (!best || m.coverage > best.m.coverage || (m.coverage === best.m.coverage && m.same > best.m.same))
                 best = { c, m };
         }
@@ -776,14 +822,12 @@ export function levelPropertiesParams(pc: OdbClass, ps2: OdbClass): { specs: Par
         }
         let value: ClassFieldValue = decodeFieldValue(pt.type, pc.data?.[i] ?? 0, pc.data ?? []);
         const current = decodeFieldValue(st.type, ps2.data?.[j] ?? 0, ps2.data ?? []);
-        if (JSON.stringify(value) === JSON.stringify(current)) continue;
-        specs.push({ fieldIndex: j, type: st.type, name: st.name, value });
-    }
-    return { specs, left };
-}
         // PC draw distances (12 / 30 lu) are shorter than anything the PS2 levels use (8 / 65-160): never shorten the template's.
         if (/^M(in|ax) Fog Depth/.test(rule.pc) && typeof value === 'number' && typeof current === 'number')
             value = Math.max(value, current);
+        if (JSON.stringify(value) === JSON.stringify(current)) continue;
+        specs.push({ fieldIndex: j, type: st.type, name: st.name, value });
+    }
     // PS2 sky and distance fog come from the day/night cycle (`Level Time`), not from a fog colour: a dark PC fog colour
     // (Ruined Village, Rift, Mines, Volcano: black; Alwarren, Islands Night: dark green / brown) means a night level, so run the
     // template's cycle at night instead of its noon (white sky and fog over unlit ground).
@@ -796,6 +840,8 @@ export function levelPropertiesParams(pc: OdbClass, ps2: OdbClass): { specs: Par
         const hour = env !== undefined && env !== '' ? Number(env) : lum < NIGHT_FOG_LUMINANCE ? NIGHT_HOUR : undefined;
         if (hour !== undefined) specs.push({ fieldIndex: timeIdx, type: sf[timeIdx]!.type, name: sf[timeIdx]!.name, value: hour });
     }
+    return { specs, left };
+}
 
 /** PC fog colours darker than this (mean of R, G, B, 0-255) make a converted level a night level. */
 export const NIGHT_FOG_LUMINANCE = 64;

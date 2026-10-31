@@ -263,7 +263,7 @@ export interface Ps2ModOptions {
  * (same SRSC id, `sub` = group id). Model ids must be unique and >= 2.
  */
 export function buildPs2Mod(
-    models: readonly { id: number; model: NeutralModel }[],
+    models: readonly { id: number; model: NeutralModel; records?: { type: number; data: Uint8Array }[] }[],
     opt: Ps2ModOptions = {},
 ): Uint8Array {
     const groupId = 1;
@@ -286,8 +286,8 @@ export function buildPs2Mod(
         { type: MOD_VERSION, id: 0, sub: 0, data: version },
         { type: MOD_GROUP, id: groupId, sub: 0, data: ps2String(opt.group ?? 'OotF') },
     ];
-    for (const { id, model } of models)
-        for (const r of writePs2ModelRecords(model)) entries.push({ type: r.type, id, sub: groupId, data: r.data });
+    for (const { id, model, records } of models)
+        for (const r of records ?? writePs2ModelRecords(model)) entries.push({ type: r.type, id, sub: groupId, data: r.data });
     return writePs2Srsc(entries);
 }
 

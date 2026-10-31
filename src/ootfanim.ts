@@ -152,6 +152,12 @@ class Wr {
         this.u16(s.length); // PS2 0x0501 names carry no terminator
         for (let i = 0; i < s.length; i++) this.u8(s.charCodeAt(i));
     }
+    /** 0x0208 LOD names: odd lengths are padded with one NUL (the length counts it), as on the disc. */
+    pstrPadded(s: string): void {
+        const n = s.length + (s.length & 1);
+        this.u16(n);
+        for (let i = 0; i < n; i++) this.u8(i < s.length ? s.charCodeAt(i) : 0);
+    }
     fixed(s: string, n: number): void {
         for (let i = 0; i < n; i++) this.u8(i < s.length && i < n - 1 ? s.charCodeAt(i) : 0);
     }
@@ -316,7 +322,7 @@ export function writePs2Skeleton(s: Skeleton, positions: Float32Array | null, ch
     const w = new Wr();
     w.raw(s.bounds);
     w.u16(s.lods.length);
-    for (const n of s.lodNames) w.pstr(n);
+    for (const n of s.lodNames) w.pstrPadded(n);
     w.u16(s.nodes.length);
     for (const n of s.nodes) {
         w.fixed(n.name, 32);

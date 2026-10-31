@@ -97,6 +97,50 @@ describe('ootfclass', () => {
         expect(m.data[3]! & 0xffff).toBe(ps2Timer.data!.length);
     });
 
+    it('maps animation-typed defaults (scalar and array) through the converted clip ids', () => {
+        const T_ANIM = 9;
+        const T_ANIMS = 0x1009;
+        const pc = cls(
+            1,
+            'x',
+            62,
+            [
+                [T_ANIM, 'Idle'],
+                [T_ANIMS, 'Attacks'],
+                [T_ANIM, 'Gone'],
+            ],
+            [577, (2 << 16) | 3, 99, 10, 11],
+        );
+        const tpl = cls(
+            2,
+            'x',
+            62,
+            [
+                [T_ANIM, 'Idle'],
+                [T_ANIMS, 'Attacks'],
+                [T_ANIM, 'Gone'],
+            ],
+            [1, (1 << 16) | 3, 7, 5],
+        );
+        const m = mergeDefaults(
+            pc,
+            tpl,
+            undefined,
+            new Map([
+                [577, 100],
+                [10, 101],
+                [11, 102],
+            ]),
+        );
+        expect(m.data[0]).toBe(100);
+        expect(m.data[1]! >>> 16).toBe(2);
+        const at = m.data[1]! & 0xffff;
+        expect(m.data.slice(at, at + 2)).toEqual([101, 102]);
+        expect(m.data[2]).toBe(7); // no converted clip: the template's value stays
+        expect(m.skipped).toEqual(['Gone']);
+        expect(mergeDefaults(pc, tpl).data[0]).toBe(1); // without a map animations stay the template's
+    });
+
     it('clones a record keeping the head and replacing name and data', () => {
         const raw = buildPlainClassRecord({
             name: 'Timer',

@@ -101,6 +101,8 @@ export interface OotfPs2Context {
      */
     hostMod?: SrscReader;
     hostTxd?: SrscReader;
+    /** The host ODB's ADB (`RESOURES.ADB`): converted creature clips are added as `new/<HOST>.ADB/` entries past its ids. */
+    hostAdb?: SrscReader;
     /** The host ODB's SDB (RESOURES.SDB): converted sounds are added to it as `new/<HOST>.SDB/` entries with free ids. */
     hostSdb?: SrscReader;
     /** Upper-case names of the XDBs on the disc (`SYSTEM.XDB`). A class in an ODB without one (FX) gets no text ids: its string defaults are blanked. */
@@ -120,6 +122,10 @@ export interface OotfPipelineOptions {
     models?: boolean;
     /** Cap on new ODB class records (see the plan stage). */
     maxNewClasses?: number;
+    /** With `maxNewClasses`: keep classes whose model is a converted skinned model before the classes with the most objects. */
+    preferCreatures?: boolean;
+    /** Convert skinned models with their skeletons and clips (default true). */
+    skinned?: boolean;
     /** Stem of the host ODB (default RESOURES). */
     hostStem?: string;
     classes?: boolean;
@@ -268,6 +274,8 @@ export async function convertOotfLevels(
     const builder = new OotfAssetBuilder(src, {
         firstModelId: maxId(ps2.hostMod, 0x0200) + 1,
         firstTextureId: maxId(ps2.hostTxd, 0x0040) + 1,
+        firstAnimId: Math.max(maxId(ps2.hostAdb, 0x0501), 99) + 1,
+        skinned: opt.skinned,
     });
     const splatDb = findSplatDbIndex(tplHeader);
 
@@ -327,6 +335,16 @@ export async function convertOotfLevels(
                           },
                 substituteEngineId: PS2_SUBSTITUTES,
                 modelOdbFile: hostFile,
+                modelSkinned: (cls) => {
+                    const ow = ownerOf.get(cls);
+                    const id = ow && cls.model ? builder.mapModelRef(cls.model.db, cls.model.id, ow) : null;
+                    return id !== null && builder.report.creatures.some((c) => c.id === id);
+                },
+                templateSkinned: (c) => !!c.model && c.model.db === 0 && !!ps2.hostMod?.find(0x0208, c.model.id),
+                mapAnimFor: (cls) => {
+                    const ow = ownerOf.get(cls);
+                    return ow && cls.model ? (builder.mapAnimRef(cls.model.db, cls.model.id, ow) ?? undefined) : undefined;
+                },
                 modelFor: hostOk
                     ? (cls, file) => {
                           const ow = ownerOf.get(cls);
@@ -349,6 +367,8 @@ export async function convertOotfLevels(
                             u.pc.list.objects.filter((o) => o.dbIndex === u.db && o.classId === u.id).length,
                     );
                 }
+                const isSkinned = (s: { cls: OdbClass }): boolean =>
+                    builder.report.creatures.some((c) => c.id === s.cls.model?.id);
                 const objs = (s: { pcKeys: string[] }): number =>
                     s.pcKeys.reduce((n, key) => {
                         const e = [...planKey].find(([, v]) => `${v.db}:${v.id}` === key);
@@ -356,12 +376,20 @@ export async function convertOotfLevels(
                     }, 0);
                 const keep = new Set(
                     [...result.synthesized]
-                        .sort((x, y) => objs(y) - objs(x))
+                        .sort(
+                            (x, y) =>
+                                (opt.preferCreatures ? Number(isSkinned(y)) - Number(isSkinned(x)) : 0) ||
+                                objs(y) - objs(x),
+                        )
                         .slice(0, opt.maxNewClasses)
                         .flatMap((x) => x.pcKeys),
                 );
                 const mapped = new Set(result.mapped.keys());
                 const sub = input.filter((i) => keep.has(`${i.db}:${i.id}`) || mapped.has(`${i.db}:${i.id}`));
+                if (opt.preferCreatures)
+                    res.warnings.push(
+                        `classes: candidates ${result.synthesized.map((x) => `${x.name} (rfl ${x.rfl}${keep.has(x.pcKeys[0]!) ? ', kept' : ''}${isSkinned(x) ? ', SKINNED' : ''})`).join('; ')}`,
+                    );
                 result = planClassMapping(sub, ps2Odbs, planOpts);
                 res.warnings.push(
                     `classes: limited to ${opt.maxNewClasses} new class records (engine limit under investigation)`,
@@ -370,6 +398,10 @@ export async function convertOotfLevels(
             return result;
         });
         res.classPlan = plan;
+        if (plan) {
+            const used = new Set(plan.synthesized.flatMap((s) => (s.cls.model ? [s.cls.model.id] : [])));
+            builder.pruneSkinned((id) => used.has(id));
+        }
     }
 
     const findPs2Class = (pred: (c: OdbClass) => boolean): { t: ClassTarget; cls: OdbClass } | null => {
@@ -641,6 +673,36 @@ export async function convertOotfLevels(
             await stage(`texts ${pc.path}`, async () => void rewriteObjectTexts(lvl.objects, textPlan, xdbOf));
         if (opt.terrainShading !== false)
             parts.terrain = parts.terrain.map((L) => ({ ...L, cellFlags: ps2CellFlags(L) }));
+        const dbgEnv = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {};
+        if (dbgEnv['DRAKAN_DBG_MAXLAYERS']) parts.terrain = parts.terrain.slice(0, Number(dbgEnv['DRAKAN_DBG_MAXLAYERS']));
+        const dbgName = (o: LvlObject): string =>
+            classes.get(o.dbIndex)?.get(o.classId)?.name ??
+            plan?.synthesized.find((x) => x.dbIndex === o.dbIndex && x.classId === o.classId)?.name ??
+            '';
+        if (dbgEnv['DRAKAN_DBG_NOOBJ']) {
+            const keep = (o: LvlObject): boolean =>
+                [9, 27, 54].includes(classes.get(o.dbIndex)?.get(o.classId)?.rflClass ?? -1) || classes.get(o.dbIndex)?.get(o.classId)?.name === 'Procedural Sky' ||
+                (!!dbgEnv['DRAKAN_DBG_PULL'] && new RegExp(dbgEnv['DRAKAN_DBG_PULL'], 'i').test(dbgName(o)));
+            parts.objects = { ...parts.objects, objects: parts.objects.objects.filter(keep) };
+        }
+        if (dbgEnv['DRAKAN_DBG_PULL']) {
+            // Test aid: move up to 4 objects whose class name matches the regex next to the player start.
+            const re = new RegExp(dbgEnv['DRAKAN_DBG_PULL'], 'i');
+            const rflOf = (o: LvlObject): number => classes.get(o.dbIndex)?.get(o.classId)?.rflClass ?? -1;
+            const start = parts.objects.objects.find((o) => rflOf(o) === 9);
+            let n = 0;
+            if (start)
+                parts.objects = {
+                    ...parts.objects,
+                    objects: parts.objects.objects.map((o) =>
+                        n < 4 && re.test(dbgName(o))
+                            ? { ...o, pos: [start.pos[0] + [1200, -1200, 0, 0][n]!, start.pos[1], start.pos[2] + [0, 0, 1200, -1200][n++]!] as typeof o.pos }
+                            : o,
+                    ),
+                };
+        }
+        const lf = Number((globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['DRAKAN_TERRAIN_LAYERFLAGS'] ?? 0);
+        if (lf) parts.terrain = parts.terrain.map((L) => ({ ...L, flags: L.flags | lf }));
         res.levels.push({ pcPath: pc.path, title, parts, splats: tex ? { TXD: tex.txd } : {} });
     }
 
@@ -652,6 +714,20 @@ export async function convertOotfLevels(
             const add = builder.entries(hostGroup);
             if (!add.models.length && !add.textures.length) return;
             const dir = `files/${hostDir}`;
+            const clips = builder.animEntries();
+            if (clips.length) {
+                for (const r of clips) res.files[`new/${hostStem}.ADB/${hex4(r.type)}_${r.id}_${r.sub}.bin`] = r.data;
+                // 0x0500: u16 clip count, u16 ?, u16 highest id + 1 (NPCS.ADB 1861 clips / 5990, RESOURES.ADB 23).
+                const hc = ps2.hostAdb ? ps2.hostAdb.entries.find((e) => e.type === 0x0500) : undefined;
+                if (ps2.hostAdb && hc) {
+                    const c = (await ps2.hostAdb.readRaw(hc)).slice();
+                    const dv = new DataView(c.buffer);
+                    const top = Math.max(...clips.map((r) => r.id)) + 1;
+                    dv.setUint16(0, dv.getUint16(0, true) + clips.length / 2, true);
+                    dv.setUint16(4, Math.max(dv.getUint16(4, true), top), true);
+                    res.files[`overrides/${hostStem}.ADB/0500_${hc.id}_${hc.sub}.bin`] = c;
+                }
+            }
             const mod = ps2.hostMod!;
             const modEntries: Ps2Entry[] = [];
             for (const e of mod.entries) {
@@ -667,15 +743,6 @@ export async function convertOotfLevels(
                 modEntries.push({ type: e.type, id: e.id, sub: e.sub, data });
             }
             res.files[`${dir}/${hostStem}.MOD`] = writePs2Srsc([...modEntries, ...add.models]);
-        const dbgEnv = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {};
-        if (dbgEnv['DRAKAN_DBG_MAXLAYERS']) parts.terrain = parts.terrain.slice(0, Number(dbgEnv['DRAKAN_DBG_MAXLAYERS']));
-        if (dbgEnv['DRAKAN_DBG_NOOBJ']) {
-            const keep = (o: LvlObject): boolean =>
-                [9, 27, 54].includes(classes.get(o.dbIndex)?.get(o.classId)?.rflClass ?? -1) || classes.get(o.dbIndex)?.get(o.classId)?.name === 'Procedural Sky';
-            parts.objects = { ...parts.objects, objects: parts.objects.objects.filter(keep) };
-        }
-        const lf = Number((globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['DRAKAN_TERRAIN_LAYERFLAGS'] ?? 0);
-        if (lf) parts.terrain = parts.terrain.map((L) => ({ ...L, flags: L.flags | lf }));
             const txd = ps2.hostTxd!;
             const txdEntries: Ps2Entry[] = [];
             for (const e of txd.entries)
@@ -750,6 +817,13 @@ function ensureSingletons(
             }
         }
     }
+    // The sky is an object too (class 26 "Procedural Sky", db 11 in every PS2 level): without one the world has a plain
+    // white backdrop and white distance fog. Every PC level has a "Sky" object, so clone the template's.
+    const nameOf = (o: LvlObject): string | undefined => classes.get(o.dbIndex)?.get(o.classId)?.name;
+    if (!list.objects.some((o) => nameOf(o) === 'Procedural Sky')) {
+        const t = tpl.find((o) => nameOf(o) === 'Procedural Sky');
+        if (t) list.objects.push(cloneObject(t, nextId++));
+    }
 }
 
 export type { ConversionReport };
@@ -764,10 +838,3 @@ async function loadRrcStrings(src: PcFileSource): Promise<Map<number, string>> {
         return new Map();
     }
 }
-    // The sky is an object too (class 26 "Procedural Sky", db 11 in every PS2 level): without one the world has a plain
-    // white backdrop and white distance fog. Every PC level has a "Sky" object, so clone the template's.
-    const nameOf = (o: LvlObject): string | undefined => classes.get(o.dbIndex)?.get(o.classId)?.name;
-    if (!list.objects.some((o) => nameOf(o) === 'Procedural Sky')) {
-        const t = tpl.find((o) => nameOf(o) === 'Procedural Sky');
-        if (t) list.objects.push(cloneObject(t, nextId++));
-    }

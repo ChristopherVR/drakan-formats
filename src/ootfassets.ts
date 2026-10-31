@@ -1,7 +1,17 @@
 import { strToU8 } from 'fflate';
-import { type ModelTextureRef, ModelError } from './model.ts';
+import { type ModelTextureRef, ModelError, MOD_BOUNDS, MOD_CHARACTER } from './model.ts';
+import { type Skeleton, type PcAnim, parseSkeleton, parsePcAnim, writePs2Skeleton } from './ootfanim.ts';
+import { convertCreatureAssets } from './ootfcreature.ts';
+import { remapSkeletonVertices, withDisplayList } from './ootfdisplaylist.ts';
 import { buildDbText, parseDbText } from './ootfcontainer.ts';
-import { type NeutralModel, buildPs2Mod, writePs2ModelRecords, parsePcModel, pcToNeutral, type PcToPs2Options } from './ootfmodel.ts';
+import {
+    type NeutralModel,
+    buildPs2Mod,
+    writePs2ModelRecords,
+    parsePcModel,
+    pcToNeutral,
+    type PcToPs2Options,
+} from './ootfmodel.ts';
 import {
     PC_TEX_NEXT_FRAME,
     type Ps2TextureOptions,
@@ -26,7 +36,10 @@ import { TXD_ENTRY_TYPE } from './txd.ts';
  *   await b.addModel('Common/NPC/NPCs', 1234);     // or: await b.addModelRef(owner, pcDb, pcId)
  *   convertPcLevel(pc, { ..., mapTexture: b.mapTexture });
  *   const files = b.build('files/ENGLISH/LEVELS/LEVEL9AP', 'LEVEL9AP');
- * Skinned (0x0208) models are reported in `report.skipped` and get no PS2 ref.
+ * Skinned (0x0208) models: LOD 0 only (the PC weights of a LOD are numbered inside that LOD; cap vertices are dropped), converted
+ * to the PS2 vertex layout with the strip display list 0x0211, the skeleton is written as 0x0208 (no 0x0207) and the model's
+ * animations are converted to PS2 clips under new ids of the host ADB (`animEntries`, `mapAnimRef`).
+ * Trees (model name matching `displayList`) get a 0x0211 too: without it the tree class draws nothing.
  */
 
 export interface AssetBuilderOptions {
@@ -39,6 +52,12 @@ export interface AssetBuilderOptions {
     /** First model id / texture id handed out (defaults 2 and 1); use ids past a host container's maxima. */
     firstModelId?: number;
     firstTextureId?: number;
+    /** First animation id handed out to converted creature clips (default 100; RESOURES.ADB uses 1..65). */
+    firstAnimId?: number;
+    /** Static models whose name matches get a regenerated 0x0211 (default trees). */
+    displayList?: RegExp;
+    /** Convert skinned models (default true); false skips them like before. */
+    skinned?: boolean;
 }
 
 export interface AssetReport {
@@ -46,6 +65,8 @@ export interface AssetReport {
     textures: { converted: number; bytes: number; byBpp: Record<string, number>; lossy: number };
     /** `container#id` -> why there is no PS2 counterpart. */
     skipped: Map<string, string>;
+    /** Skinned models converted, with the number of clips written and skipped. */
+    creatures: { key: string; id: number; joints: number; groups: number; anims: number; animsSkipped: number }[];
     warnings: string[];
 }
 
@@ -56,12 +77,15 @@ export interface BuiltAssets {
 }
 
 const lower = (s: string): string => s.toLowerCase();
+const MOD_DISPLAY_LIST = 0x0211;
+const DEFAULT_DISPLAY_LIST = /tree|birch/i;
 
 export class OotfAssetBuilder {
     readonly report: AssetReport = {
         models: { converted: 0, triangles: 0, polygonsDropped: 0, flatToSmooth: 0 },
         textures: { converted: 0, bytes: 0, byBpp: {}, lossy: 0 },
         skipped: new Map(),
+        creatures: [],
         warnings: [],
     };
     private readonly containers = new Map<string, SrscReader | null>();
@@ -69,9 +93,25 @@ export class OotfAssetBuilder {
     /** `container#id` (lower case) -> new PS2 texture id. */
     private readonly texIds = new Map<string, number>();
     private readonly texAlpha = new Map<number, boolean>();
+    /** Texture (base id) -> the models that use it; `'level'` marks the terrain's. Lets `pruneSkinned` drop what only dropped models used. */
+    private readonly texUse = new Map<number, Set<string>>();
+    /** Texture base id -> number of animation frames (ids base .. base + n - 1). */
+    private readonly texFrames = new Map<number, number>();
     private readonly texBodies: { id: number; body: Uint8Array }[] = [];
     private readonly modelIds = new Map<string, number>();
-    private readonly models: { id: number; model: NeutralModel }[] = [];
+    private readonly models: {
+        id: number;
+        model: NeutralModel;
+        records?: { type: number; data: Uint8Array }[];
+        /** Skinned: the model's clips in `anims`. */
+        clips?: number[];
+        key: string;
+    }[] = [];
+    /** Converted creature clips for the host ADB. */
+    private readonly anims: { id: number; info: Uint8Array; data: Uint8Array }[] = [];
+    /** `container#id` -> (PC animation id -> new id). */
+    private readonly animMaps = new Map<string, Map<number, number>>();
+    private nextAnim: number;
     private nextTex: number;
     private nextModel: number;
 
@@ -81,6 +121,7 @@ export class OotfAssetBuilder {
     ) {
         this.nextTex = options.firstTextureId ?? 1;
         this.nextModel = options.firstModelId ?? 2;
+        this.nextAnim = options.firstAnimId ?? 100;
     }
 
     private async open(base: string, ext: string): Promise<SrscReader | null> {
@@ -112,6 +153,11 @@ export class OotfAssetBuilder {
     }
 
     // -------------------------------------------------------------------------------------------- textures
+
+    private useTexture(id: number, user: string): void {
+        const s = this.texUse.get(id) ?? this.texUse.set(id, new Set()).get(id)!;
+        s.add(user);
+    }
 
     /** Convert PC texture `id` of `<container>.txd` (and the frames that follow it). Returns the new PS2 id or null. */
     async addTexture(container: string, id: number): Promise<number | null> {
@@ -156,6 +202,7 @@ export class OotfAssetBuilder {
             if (t.lossy) this.report.textures.lossy++;
         });
         this.nextTex += frames.length;
+        this.texFrames.set(base, frames.length);
         return base;
     }
 
@@ -165,7 +212,8 @@ export class OotfAssetBuilder {
         for (const L of pc.terrain) for (const r of L.cellTexLeft) if (r < 0xfffffffe) refs.add(r);
         for (const r of refs) {
             const c = this.levelContainer(r >>> 16, pc);
-            if (c) await this.addTexture(c, r & 0xffff);
+            const t = c ? await this.addTexture(c, r & 0xffff) : null;
+            if (t !== null) this.useTexture(t, 'level');
         }
     }
 
@@ -210,14 +258,29 @@ export class OotfAssetBuilder {
             return fail(e instanceof ModelError ? e.message : String(e));
         }
         if (!pc) return fail('no such model');
-        if (pc.character) return fail('skinned model (0x0208), see ootfanim');
         if (this.nextModel > 0xffff) return fail('model id space exhausted');
+        if (pc.character && this.options.skinned === false) return fail('skinned model (conversion off)');
+        let skin: { sk: Skeleton; positions: Float32Array } | null = null;
+        if (pc.character) {
+            try {
+                const sk = parseSkeleton(await mod.readRaw(mod.find(MOD_CHARACTER, id)!), 'pc');
+                const L = sk.lods[0];
+                if (!L || sk.joints.length === 0) return fail('skinned model without LOD or joints');
+                // Weights, polygon indices and sphere vertices of a LOD count from that LOD's first vertex.
+                const positions = pc.positions.slice(L.firstVertex * 3, (L.firstVertex + L.vertexCount) * 3);
+                skin = { sk, positions };
+                pc = { ...pc, positions, polygons: pc.polygons.slice(L.firstPoly, L.firstPoly + L.polyCount) };
+            } catch (e) {
+                return fail(`skeleton: ${e instanceof Error ? e.message : String(e)}`);
+            }
+        }
         const map = new Map<string, ModelTextureRef | null>();
         const used = new Set(pc.polygons.map((p) => p.texture));
         for (const [ti, t] of pc.textures.entries()) {
             if (!used.has(ti)) continue; // unused list entries are not converted
             const tc = this.resolveContainer(container, t.db);
             const nid = tc ? await this.addTexture(tc, t.id) : null;
+            if (nid !== null) this.useTexture(nid, key);
             map.set(`${t.db}/${t.id}`, nid === null ? null : { id: nid, db: 0 });
         }
         const { model, stats } = pcToNeutral(pc, {
@@ -227,15 +290,162 @@ export class OotfAssetBuilder {
         });
         if (model.polygons.length === 0 && pc.polygons.length > 0) return fail('no polygon left (textures missing)');
         if (model.positions.length / 3 > 0xffff) return fail('too many vertices');
+        let out = model;
+        let records: { type: number; data: Uint8Array }[] | undefined;
+        if (skin) {
+            const sk = skin.sk;
+            const L = sk.lods[0]!;
+            const nv = model.positions.length / 3;
+            const per: { j: number; w: number }[][] = Array.from({ length: nv }, () => []);
+            sk.joints.forEach((j, ji) => {
+                for (const w of j.weights[0] ?? []) if (w.vertex < nv) per[w.vertex]!.push({ j: ji, w: w.weight });
+            });
+            const vertexJoints = per.map((l) => l.sort((a, b) => b.w - a.w).map((x) => x.j));
+            let dl;
+            try {
+                dl = withDisplayList(model, { vertexJoints: (v) => vertexJoints[v] ?? [] });
+            } catch (e) {
+                return fail(`display list: ${e instanceof Error ? e.message : String(e)}`);
+            }
+            const anims = await this.convertClips(container, sk, key);
+            const base: Skeleton = {
+                ...sk,
+                lodNames: [],
+                lods: [{ ...L, firstVertex: 0, firstPoly: 0, vertexCount: nv }],
+                joints: sk.joints.map((j) => ({ ...j, weights: [(j.weights[0] ?? []).filter((w) => w.vertex < nv)] })),
+                channels: sk.channels.map((c) => ({ ...c, caps: [] })),
+                spheresPerLod: [sk.spheresPerLod[0] ?? []],
+                animIds: anims.ids,
+            };
+            const ps2sk = remapSkeletonVertices(base, dl.layout.source, dl.model.polygons.length);
+            out = dl.model;
+            records = [
+                ...writePs2ModelRecords(out).filter((r) => r.type !== MOD_BOUNDS),
+                { type: MOD_CHARACTER, data: writePs2Skeleton(ps2sk, skin.positions, Infinity) },
+                { type: MOD_DISPLAY_LIST, data: dl.record },
+            ];
+            this.report.creatures.push({
+                key,
+                id: 0,
+                joints: sk.joints.length,
+                groups: dl.layout.groups,
+                anims: anims.ids.length,
+                animsSkipped: anims.skipped,
+            });
+        } else if ((this.options.displayList ?? DEFAULT_DISPLAY_LIST).test(pc.name)) {
+            try {
+                const dl = withDisplayList(model);
+                out = dl.model;
+                records = [...writePs2ModelRecords(out), { type: MOD_DISPLAY_LIST, data: dl.record }];
+            } catch (e) {
+                this.report.warnings.push(
+                    `model ${key}: display list failed (${e instanceof Error ? e.message : String(e)})`,
+                );
+            }
+        }
         const nid = this.nextModel++;
         this.modelIds.set(key, nid);
-        this.models.push({ id: nid, model });
+        if (skin) this.report.creatures[this.report.creatures.length - 1]!.id = nid;
+        this.models.push({
+            id: nid,
+            model: out,
+            records,
+            key,
+            clips: skin ? [...(this.animMaps.get(key)?.values() ?? [])] : undefined,
+        });
         const m = this.report.models;
         m.converted++;
         m.triangles += stats.trianglesOut;
         m.polygonsDropped += stats.polygonsDropped;
         if (stats.flatToSmooth) m.flatToSmooth++;
         return nid;
+    }
+
+    /** Convert the PC clips a skinned model lists (`<container>.adb`) and give them fresh ids; fills `animMaps`. */
+    private async convertClips(
+        container: string,
+        sk: Skeleton,
+        key: string,
+    ): Promise<{ ids: number[]; skipped: number }> {
+        const adb = await this.open(container, 'adb');
+        const pcAnims = new Map<number, PcAnim>();
+        let skipped = 0;
+        for (const aid of sk.animIds) {
+            const gi = adb?.find(0x0501, aid);
+            const gd = adb?.find(0x0502, aid);
+            const gl = adb?.find(0x0503, aid);
+            if (!adb || !gi || !gd || !gl) {
+                skipped++;
+                continue;
+            }
+            try {
+                pcAnims.set(aid, parsePcAnim(await adb.readRaw(gi), await adb.readRaw(gd), await adb.readRaw(gl)));
+            } catch (e) {
+                skipped++;
+                this.report.warnings.push(
+                    `creature ${key}: clip ${aid}: ${e instanceof Error ? e.message : String(e)}`,
+                );
+            }
+        }
+        const r = convertCreatureAssets({ pcSkeleton: sk, pcAnims, ps2Skeleton: null, keepChannels: true });
+        skipped += r.skipped.length;
+        const map = new Map<number, number>();
+        for (const a of r.anims) {
+            if (this.nextAnim > 0xffff) {
+                skipped++;
+                continue;
+            }
+            const nid = this.nextAnim++;
+            map.set(a.id, nid);
+            this.anims.push({ id: nid, info: a.info, data: a.data });
+        }
+        this.animMaps.set(key, map);
+        return { ids: [...map.values()].sort((x, y) => x - y), skipped };
+    }
+
+    /**
+     * Drop the skinned models (and their clips) that `keep` rejects: the classes are planned after the models are converted,
+     * and only the models of the classes that survive need to ship (a whole level's creatures are 1800+ clips, 7 MB of ADB).
+     */
+    pruneSkinned(keep: (modelId: number) => boolean): void {
+        const drop = new Set<number>();
+        for (let i = this.models.length - 1; i >= 0; i--) {
+            const m = this.models[i]!;
+            if (!m.clips || keep(m.id)) continue;
+            m.clips.forEach((c) => drop.add(c));
+            this.models.splice(i, 1);
+            this.modelIds.delete(m.key);
+            this.animMaps.delete(m.key);
+            for (const [tex, users] of this.texUse) {
+                if (!users.delete(m.key) || users.size > 0) continue;
+                const n = this.texFrames.get(tex) ?? 1;
+                this.texUse.delete(tex);
+                this.texBodies.splice(
+                    0,
+                    this.texBodies.length,
+                    ...this.texBodies.filter((t) => t.id < tex || t.id >= tex + n),
+                );
+                for (const [k, v] of this.texIds) if (v >= tex && v < tex + n) this.texIds.delete(k);
+                this.report.textures.converted -= n;
+            }
+            const k = this.report.creatures.findIndex((c) => c.id === m.id);
+            if (k >= 0) this.report.creatures.splice(k, 1);
+        }
+        for (let i = this.anims.length - 1; i >= 0; i--) if (drop.has(this.anims[i]!.id)) this.anims.splice(i, 1);
+    }
+
+    /** PC animation id -> id in the host ADB for a converted creature model (see `mapModelRef`); null when none. */
+    mapAnimRef(pcDb: number, pcId: number, owner: string): Map<number, number> | null {
+        const c = this.resolveContainer(owner, pcDb);
+        return c ? (this.animMaps.get(`${lower(c)}#${pcId}`) ?? null) : null;
+    }
+
+    /** Converted clips as ADB entries (0x0501 info, 0x0502 keys) for the host ADB; empty when there are no creatures. */
+    animEntries(): { type: number; id: number; sub: number; data: Uint8Array }[] {
+        return this.anims.flatMap((a) => [
+            { type: 0x0501, id: a.id, sub: 0, data: a.info },
+            { type: 0x0502, id: a.id, sub: 0, data: a.data },
+        ]);
     }
 
     /** Model reference as stored in a class of `owner`'s ODB (`db` indexes `owner.db`): convert and return the PS2 ref. */
@@ -271,8 +481,8 @@ export class OotfAssetBuilder {
         textures: { type: number; id: number; sub: number; data: Uint8Array }[];
         lastModelId: number;
     } {
-        const models = this.models.flatMap(({ id, model }) =>
-            writePs2ModelRecords(model).map((r) => ({ type: r.type, id, sub: groupId, data: r.data })),
+        const models = this.models.flatMap(({ id, model, records }) =>
+            (records ?? writePs2ModelRecords(model)).map((r) => ({ type: r.type, id, sub: groupId, data: r.data })),
         );
         const textures = this.texBodies.map((t) => ({ type: TXD_ENTRY_TYPE, id: t.id, sub: 0, data: t.body }));
         return { models, textures, lastModelId: this.models.reduce((m, x) => Math.max(m, x.id), 0) };

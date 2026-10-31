@@ -246,7 +246,7 @@ describe('containers and the asset builder', () => {
         expect(b.mapModelRef(0, 6, 'Lvl/Lvl')).toBeNull();
         // skinned models are reported, not converted
         expect(await b.addModelRef('Lvl/Lvl', 1, 9)).toBeNull();
-        expect([...b.report.skipped.values()].some((v) => /skinned/.test(v))).toBe(true);
+        expect([...b.report.skipped.values()].some((v) => /skeleton|skinned/.test(v))).toBe(true);
         expect(await b.addModelRef('Lvl/Lvl', 7, 9)).toBeNull(); // db not in the .db
         const out = b.build('files/ENGLISH/LEVELS/LEVEL9AB', 'level9ab');
         expect(Object.keys(out.files).sort()).toEqual([
