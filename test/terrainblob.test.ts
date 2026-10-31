@@ -2,6 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import { TEX_HOLE } from '../src/terrain.ts';
 import type { TerrainLayer } from '../src/terrain.ts';
+import { ps2BlobBuilder, ps2BlobFor, ps2LevelTag, writePs2Terrain } from '../src/convert.ts';
 import { LAYER_FLAG_FLAT, buildPs2TerrainBlob, ps2ChunkSplit } from '../src/terrainblob.ts';
 
 function layer(w: number, h: number, flags: number, tex: (x: number, z: number) => number): TerrainLayer {
@@ -103,5 +104,22 @@ describe('buildPs2TerrainBlob', () => {
         const a = buildPs2TerrainBlob(L);
         expect(buildPs2TerrainBlob(L)).toEqual(a);
         expect(L.cellTexLeft).toEqual(before);
+    });
+
+    it('converted layers share one seq and the template level tag (engine requirement, in-game test)', () => {
+        const A = layer(3, 3, 0, () => 0x90001);
+        const B = { ...layer(2, 2, 0, () => 0x90001), index: 5 };
+        for (const L of [A, B]) {
+            const b = ps2BlobFor(L);
+            expect(b[0]! | (b[1]! << 8)).toBe(1);
+            expect(b[2]! | (b[3]! << 8)).toBe(0x18);
+        }
+        const c = ps2BlobBuilder(0x0c)(B);
+        expect(c[2]).toBe(0x0c);
+    });
+
+    it('reads the level tag back out of a written layer table', () => {
+        const payload = writePs2Terrain([layer(3, 3, 0, () => 0x90001)], ps2BlobBuilder(0x21));
+        expect(ps2LevelTag(payload)).toBe(0x21);
     });
 });

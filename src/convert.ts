@@ -37,7 +37,9 @@ import {
     LVL_TYPE_LAYERS,
     TEX_HOLE,
     TEX_INVISIBLE,
+    parsePs2Terrain,
     ps2TerrainBlockSize,
+    terrainHeightAt,
     type TerrainLayer,
 } from './terrain.ts';
 
@@ -253,6 +255,12 @@ export function convertPcLevel(pc: PcLevel, opt: ConvertOptions): Ps2LevelParts 
             data: [],
             params: [],
         };
+        if (t.cls.name === 'Rynn') {
+            // The PC start can hang well above the ground (Relic: 17000 units); the PS2 engine lets Rynn fall and the
+            // fall kills her (in-game test), so she starts just over the terrain.
+            const g = terrainHeightAt(pc.terrain, dst.pos[0], dst.pos[2]);
+            if (Number.isFinite(g)) dst.pos[1] = g + 400;
+        }
         out.push(dst);
         if (!placeholder) keep.push({ src, dst, fields: t.cls.fields });
     }
@@ -282,7 +290,12 @@ export function convertPcLevel(pc: PcLevel, opt: ConvertOptions): Ps2LevelParts 
         for (const s of pcSpecs) {
             const i = byName.get(s.name.trim().toLowerCase());
             const f = i === undefined ? undefined : fields![i]!;
-            if (i === undefined || !f || fieldBase(f.type) !== fieldBase(s.type) || fieldIsArray(f.type) !== fieldIsArray(s.type)) {
+            if (
+                i === undefined ||
+                !f ||
+                fieldBase(f.type) !== fieldBase(s.type) ||
+                fieldIsArray(f.type) !== fieldIsArray(s.type)
+            ) {
                 bump(report.droppedParams, s.name);
                 continue;
             }
@@ -503,5 +516,36 @@ export function dominantTexture(layers: readonly TerrainLayer[]): number {
     return best;
 }
 
-/** Inline-blob builder for converted layers: a unique `seq` per layer, the other fields at the generator's defaults. */
-export const ps2BlobFor: BlobBuilder = (L) => buildPs2TerrainBlob(L, { seq: L.index + 1 });
+/**
+ * Inline-blob builder for converted layers. Verified in the game (docs/journal/2026-10-31/ootf-ingame.md): the engine
+ * draws regenerated blobs only when `levelTag` equals the template level's (0x18 for LEVEL1NA; 0x16 drew just some
+ * layers, flat) and when every layer has the same `seq` (a unique seq per layer froze the world on converted terrain).
+ */
+export const ps2BlobBuilder =
+    (levelTag: number): BlobBuilder =>
+    (L) =>
+        buildPs2TerrainBlob(L, { seq: 1, levelTag });
+
+/** The `level_tag` of a PS2 LVL 0x0001 payload (bytes 2..3 of the first layer's blob); undefined if it cannot be found. */
+export function ps2LevelTag(layersPayload: Uint8Array): number | undefined {
+    const layers = parsePs2Terrain(layersPayload);
+    const L = layers[0];
+    if (!L) return undefined;
+    const dv = view(layersPayload);
+    for (let p = 4; p + 34 < layersPayload.length; p++) {
+        if (
+            dv.getUint32(p, true) === L.id &&
+            dv.getUint32(p + 4, true) === L.width &&
+            dv.getUint32(p + 8, true) === L.height
+        ) {
+            const sl = dv.getUint16(p + 28, true);
+            const nvis = dv.getUint32(p + 30 + sl + 24, true);
+            const b = p + 30 + sl + 28 + nvis * 4;
+            return dv.getUint16(b + 2, true);
+        }
+    }
+    return undefined;
+}
+
+/** LEVEL1NA's tag (the default template). */
+export const ps2BlobFor: BlobBuilder = ps2BlobBuilder(0x18);
