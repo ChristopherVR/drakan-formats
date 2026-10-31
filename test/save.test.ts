@@ -1,14 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import {
     FIELDS,
+    ITEM_PTR_GAP,
+    STATS_KEY,
+    STAT_OFFSETS,
     SaveFieldError,
     SaveFormatError,
     applyFieldEdits,
     assembleSave,
     decodeScreenshot,
     describeRecords,
+    dec,
     diffSaves,
+    enc,
     getField,
+    listInventory,
     levelNameOf,
     listSkills,
     nextBackupName,
@@ -17,9 +23,10 @@ import {
     probeField,
     sameBytes,
     slotNumber,
+    statsBase,
     summarizeSave,
 } from '../src/index.ts';
-import { buildSave, saveEntries } from './savefixture.ts';
+import { buildSave, saveEntries, skillTable } from './savefixture.ts';
 
 describe('Save container', () => {
     it('round-trips byte for byte, keeping gaps, pad and compressed bytes', () => {
@@ -200,5 +207,124 @@ describe('Save compare and files', () => {
         expect(nextBackupName(['a.rsg', 'a.rsg.bak', 'a.rsg.bak.1'], 'a.rsg')).toBe('a.rsg.bak.2');
         expect(slotNumber('BESCES-50006Slot12')).toBe(12);
         expect(slotNumber('mc0')).toBeNull();
+    });
+});
+
+describe('Live-memory fields (stats block, inventory cells, quest rows)', () => {
+    const CELL_BASE = 0x302; // 2-byte phase like the real layouts
+    const HANDLES = [0xa59e30, 0x9edd30];
+
+    function liveText(maxhp = 100): Uint8Array {
+        const d = skillTable([
+            [1, 8],
+            [1, 8],
+            [1, 8],
+        ]).slice();
+        const dv = new DataView(d.buffer);
+        dv.setUint32(0x80, 2, true);
+        [110, 100, 0, 0, 1, 0, 0x10c7, 4].forEach((v, i) => dv.setUint32(0x84 + 4 * i, v, true));
+        [0, 0, 0, 0, 1, 0, 0x1047, 2].forEach((v, i) => dv.setUint32(0xa4 + 4 * i, v, true));
+        dv.setUint32(0x100, 0xbb6050, true);
+        dv.setUint32(0x104, 6, true);
+        dv.setUint32(0x108, 3, true);
+        const vals: Record<string, number> = {
+            hp: 84,
+            maxhp: maxhp,
+            gold: 646,
+            mana: 100,
+            maxmana: 100,
+            xp: 250,
+            level: 1,
+            skillpoints: 0,
+        };
+        for (const [name, off] of Object.entries(STAT_OFFSETS)) dv.setUint32(0x100 + off, enc(vals[name]!), true);
+        return d;
+    }
+
+    function rynnWithCells(equipped: number): Uint8Array {
+        const b = new Uint8Array(0x800);
+        const dv = new DataView(b.buffer);
+        dv.setUint32(0, 0xa50, true);
+        dv.setUint32(8, 0x17081069, true);
+        dv.setInt32(CELL_BASE - 4, -1, true);
+        dv.setInt32(CELL_BASE - 0x14, -1, true);
+        dv.setUint32(CELL_BASE - 0x10, 1, true);
+        [equipped, 0, HANDLES[0]!, 0].forEach((v, i) => dv.setUint32(CELL_BASE + 4 * i, v, true));
+        [0, 0, HANDLES[1]!, 0].forEach((v, i) => dv.setUint32(CELL_BASE + 16 + 4 * i, v, true));
+        [0, 0, 1, 0].forEach((v, i) => dv.setUint32(CELL_BASE + 16 * 8 + 4 * i, v, true));
+        return b;
+    }
+
+    function itemEntry(handle: number, resource: number, cur: number, max: number, extra = 0): Uint8Array {
+        const b = new Uint8Array(0x300);
+        const dv = new DataView(b.buffer);
+        dv.setUint32(0, resource - 0x20000, true);
+        dv.setUint32(8, 0x19001041, true);
+        const at = 0x40 + extra;
+        dv.setUint32(at, handle, true);
+        dv.setUint32(at + 8, enc(cur), true);
+        dv.setUint32(at + 12, enc(max), true);
+        dv.setUint32(at + ITEM_PTR_GAP, handle, true);
+        return b;
+    }
+
+    const live = () =>
+        parseSave(
+            buildSave([
+                { type: 0x401, id: 893, data: liveText() },
+                { type: 0x102, id: 56, data: rynnWithCells(1) },
+                { type: 0x102, id: 301, data: itemEntry(HANDLES[0]!, 0x31bc9, 181, 200) },
+                { type: 0x102, id: 361, data: itemEntry(HANDLES[1]!, 0x3217b, 144, 150, 0x46) },
+            ]),
+        );
+
+    it('obfuscation matches the game (enc(0) is the key, round trip)', () => {
+        expect(enc(0)).toBe(STATS_KEY);
+        expect(dec(enc(0xdeadbeef))).toBe(0xdeadbeef);
+        expect(dec(0x739a9945)).toBe(84); // HP word seen in RAM and in a real save
+    });
+
+    it('reads and edits the stats block', () => {
+        const save = live();
+        expect(getField(save, 'stat.maxhp')).toBe(100);
+        expect(getField(save, 'stat.gold')).toBe(646);
+        const edited = applyFieldEdits(save, [
+            { name: 'stat.maxhp', value: 333 },
+            { name: 'stat.level', value: 5 },
+        ]);
+        expect(getField(edited, 'stat.maxhp')).toBe(333);
+        expect(getField(edited, 'stat.level')).toBe(5);
+        expect(getField(edited, 'stat.hp')).toBe(84);
+        const { entry, base } = statsBase(edited);
+        expect(new DataView(entry.data.buffer, entry.data.byteOffset).getUint32(base + 0x10, true)).toBe(enc(333));
+    });
+
+    it('lists the inventory and edits cells and items', () => {
+        const save = live();
+        const rows = listInventory(save);
+        expect(rows.map((r) => r.cell)).toEqual([0, 1, 8]);
+        expect([rows[0]!.resource, rows[0]!.durability, rows[0]!.max, rows[0]!.equipped]).toEqual([
+            0x31bc9, 181, 200, 1,
+        ]);
+        expect(rows[1]!.durability).toBe(144); // pointer at another offset
+        expect(rows[2]).toEqual({ cell: 8, marker: 1 });
+        const edited = applyFieldEdits(save, [
+            { name: 'inv.0.durability', value: 77 },
+            { name: 'inv.1.hot', value: 1 },
+            { name: 'inv.0.equipped', value: 0 },
+        ]);
+        expect(getField(edited, 'inv.0.durability')).toBe(77);
+        expect(getField(edited, 'inv.0.max')).toBe(200);
+        expect(getField(edited, 'inv.1.hot')).toBe(1);
+        expect(getField(edited, 'inv.0.equipped')).toBe(0);
+        expect(() => applyFieldEdits(save, [{ name: 'inv.0.hot', value: 2 }])).toThrow(SaveFieldError);
+        expect(() => getField(save, 'inv.5.durability')).toThrow(/no item/);
+    });
+
+    it('reads quest rows', () => {
+        const save = live();
+        expect(getField(save, 'quest.0')).toBe(4);
+        expect(getField(save, 'quest.1')).toBe(2);
+        expect(() => getField(save, 'quest.2')).toThrow(SaveFieldError);
     });
 });

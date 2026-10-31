@@ -28,6 +28,31 @@ export const POS_OFFSET = 12;
 /** Resource id (u32 at +0) of Arokh's record; Rynn's is 0xa50. */
 export const AROKH_RESOURCE = 0xa60;
 export const PROGRESS_ROW_SIZE = 12;
+/** Key of the RAM stats block (`*(0x4fe86c)`); the same key is baked into every save. */
+export const STATS_KEY = 0x739acd45;
+export const INV_CELL_COUNT = 24;
+export const INV_CELL_SIZE = 16;
+/** An item record stores its own handle pointer twice, this far apart. */
+export const ITEM_PTR_GAP = 0xe0;
+export const QUEST_ROW_SIZE = 0x20;
+/** Offsets from the stats block start S; every value is stored as enc(v). */
+export const STAT_OFFSETS: Record<string, number> = {
+    hp: 0xc,
+    maxhp: 0x10,
+    gold: 0x18,
+    mana: 0x1c,
+    maxmana: 0x20,
+    xp: 0x24,
+    level: 0x28,
+    skillpoints: 0x2c,
+};
+
+/** rotl32(v, 8) ^ key, the RAM obfuscation. */
+export const enc = (v: number): number => ((((v << 8) | (v >>> 24)) >>> 0) ^ STATS_KEY) >>> 0;
+export const dec = (w: number): number => {
+    const x = (w ^ STATS_KEY) >>> 0;
+    return ((x >>> 8) | (x << 24)) >>> 0;
+};
 /** `kind` values seen in the progress table rows (see `listProgress`). */
 export const PROGRESS_KINDS: readonly number[] = [20, 50, 68, 75, 100];
 
@@ -191,7 +216,15 @@ export type FieldValue = number | [number, number, number];
 export type FieldLocator =
     | { type: 'record'; classId?: number; resourceId?: number; entryId?: number }
     | { type: 'skill' }
-    | { type: 'progress' };
+    | { type: 'progress' }
+    /** Stats block (RAM 0x4fbac8) dumped raw into type 0x401 id 893. */
+    | { type: 'stats' }
+    /** Cell N of the inventory grid in Rynn's record: {u32 equipped, u32 hot, u32 handle, u32 icon}. */
+    | { type: 'cell' }
+    /** The item record whose own handle pointer sits in cell N. */
+    | { type: 'item' }
+    /** Row N of the quest / map marker table in type 0x401 id 893. */
+    | { type: 'quest' };
 
 export interface FieldDef {
     key: string;
@@ -203,6 +236,8 @@ export interface FieldDef {
     confidence: Confidence;
     note: string;
     minimum?: number;
+    /** u32 stored as rotl32(v, 8) ^ STATS_KEY. */
+    encoded?: boolean;
     /** Checked inside the same skill row: `skill` (level) must be <= `skill.max`, `skill.max` >= `skill`. */
     bound?: { sibling: string; op: '<=' | '>=' };
 }
@@ -292,17 +327,106 @@ export const FIELDS: Record<string, FieldDef> = {
     },
 };
 
+const statNote = (off: number): string =>
+    `Stats block S (RAM 0x4fbac8) written raw into type 0x401 id 893; found as the u32 pair (6, 3) = S+4, S+8 before ` +
+    `the skill table. Value at S+0x${off.toString(16)}, stored as rotl32(v, 8) ^ 0x739acd45. Proven in game: an ` +
+    `edited save loaded, RAM and the Tab screen show the edit.`;
+const STAT_LABELS: Record<string, string> = {
+    hp: 'Health (stats block)',
+    maxhp: 'Max health',
+    gold: 'Gold (stats block)',
+    mana: 'Mana',
+    maxmana: 'Max mana',
+    xp: 'Experience',
+    level: 'Character level',
+    skillpoints: 'Unspent skill points',
+};
+for (const [name, off] of Object.entries(STAT_OFFSETS)) {
+    FIELDS[`stat.${name}`] = {
+        key: `stat.${name}`,
+        label: STAT_LABELS[name]!,
+        locator: { type: 'stats' },
+        offset: off,
+        kind: 'u32',
+        confidence: name === 'mana' || name === 'maxmana' ? 'medium' : 'high',
+        note: statNote(off),
+        minimum: 0,
+        encoded: true,
+    };
+}
+FIELDS['inv.equipped'] = {
+    key: 'inv.equipped',
+    label: 'Cell equipped',
+    locator: { type: 'cell' },
+    offset: 0,
+    kind: 'u32',
+    confidence: 'medium',
+    note:
+        "Equipped flag of inventory cell N (inv.N.equipped, 0 or 1) in Rynn's record. Cell table found by " +
+        'structure. Read from 60 saves; edits are checked for load only.',
+};
+FIELDS['inv.hot'] = {
+    key: 'inv.hot',
+    label: 'Cell quick slot',
+    locator: { type: 'cell' },
+    offset: 4,
+    kind: 'u32',
+    confidence: 'medium',
+    note: 'Quick-slot flag of cell N (inv.N.hot, 0 or 1).',
+};
+FIELDS['inv.durability'] = {
+    key: 'inv.durability',
+    label: 'Item durability / arrows / quantity',
+    locator: { type: 'item' },
+    offset: 8,
+    kind: 'u32',
+    confidence: 'high',
+    note:
+        'Durability (melee), arrows (bow) or quantity (potion) of the item in cell N (inv.N.durability); stored ' +
+        'obfuscated in the item record right after its self pointer. 0xffffffff = indestructible.',
+    encoded: true,
+};
+FIELDS['inv.max'] = {
+    key: 'inv.max',
+    label: 'Item max',
+    locator: { type: 'item' },
+    offset: 12,
+    kind: 'u32',
+    confidence: 'high',
+    note: 'Max durability / arrows / quantity of the item in cell N (inv.N.max).',
+    encoded: true,
+};
+FIELDS.quest = {
+    key: 'quest',
+    label: 'Quest row state',
+    locator: { type: 'quest' },
+    offset: 0x1c,
+    kind: 'u32',
+    confidence: 'low',
+    note:
+        'Row N of the quest / map marker table (quest.N, last word of the 0x20-byte row). Row layout ' +
+        '{x, y, float, icon, enabled, region, quest id, state} matches RAM 0x4fbb70; the meaning of state is unverified.',
+};
+
 const SKILL_FIELD = /^skill\.(\d+)(\.max)?$/;
 const PROGRESS_FIELD = /^progress\.(\d+)$/;
+const INV_FIELD = /^inv\.(\d+)\.(equipped|hot|durability|max)$/;
+const QUEST_FIELD = /^quest\.(\d+)$/;
 
 export function resolveField(name: string): { def: FieldDef; rowId: number | null } {
     const m = SKILL_FIELD.exec(name);
     if (m) return { def: FIELDS[m[2] ? 'skill.max' : 'skill']!, rowId: Number(m[1]) };
     const pm = PROGRESS_FIELD.exec(name);
     if (pm) return { def: FIELDS.progress!, rowId: Number(pm[1]) };
+    const im = INV_FIELD.exec(name);
+    if (im) return { def: FIELDS[`inv.${im[2]}`]!, rowId: Number(im[1]) };
+    const qm = QUEST_FIELD.exec(name);
+    if (qm) return { def: FIELDS.quest!, rowId: Number(qm[1]) };
     const def = FIELDS[name];
-    if (def && def.locator.type === 'record') return { def, rowId: null };
-    throw new SaveFieldError(`unknown field "${name}" (skills are skill.N or skill.N.max, progress rows progress.KEY)`);
+    if (def && (def.locator.type === 'record' || def.locator.type === 'stats')) return { def, rowId: null };
+    throw new SaveFieldError(
+        `unknown field "${name}" (skill.N, skill.N.max, progress.KEY, stat.NAME, inv.CELL.equipped|hot|durability|max, quest.ROW)`,
+    );
 }
 
 const u32At = (d: Uint8Array, off: number): number => view(d).getUint32(off, true);
@@ -426,12 +550,129 @@ export function listProgress(save: SaveFile): ProgressRow[] {
     }
 }
 
+/** Entry and offset S of the raw stats block: the u32 pair (6, 3) at S+4, S+8 with a plausible block after it. */
+export function statsBase(save: SaveFile): { entry: SaveEntry; base: number } {
+    const { entry, first } = skillTable(save);
+    const d = entry.data;
+    for (let a = 4; a < first - 0x30; a += 4) {
+        if (u32At(d, a) !== 6 || u32At(d, a + 4) !== 3 || u32At(d, a + 0x10) !== 0) continue;
+        const v = Object.values(STAT_OFFSETS).map((o) => dec(u32At(d, a - 4 + o)));
+        const [hp, mx, gold, , , , level] = v as [number, number, number, number, number, number, number];
+        if (mx >= 1 && mx <= 100000 && hp <= mx + 100000 && level >= 1 && level <= 200 && gold < 100000000) {
+            return { entry, base: a - 4 };
+        }
+    }
+    throw new SaveFieldError('stats block not found in the text payload');
+}
+
+const heapHandle = (w: number): boolean => w > 0x600000 && w < 0x2000000 && w % 16 === 0;
+
+/** Rynn's record and the offset of inventory cell 0, found by structure (see savetool.py `cell_table`). */
+export function cellTable(save: SaveFile): { entry: SaveEntry; base: number } {
+    const rynn = save.entries.filter(
+        (e) => e.type === TYPE_RECORD && e.data.length > 12 && u32At(e.data, CLASS_OFFSET) === RYNN_CLASS,
+    );
+    if (rynn.length !== 1) throw new SaveFieldError(`expected one Rynn record, found ${rynn.length}`);
+    const entry = rynn[0]!;
+    const d = entry.data;
+    const dv = view(d);
+    for (let base = 0x40; base < d.length - INV_CELL_COUNT * INV_CELL_SIZE - 8; base += 2) {
+        if (dv.getInt32(base - 4, true) !== -1 || dv.getInt32(base - 0x14, true) !== -1) continue;
+        const sel = dv.getInt32(base - 0x10, true);
+        if (sel < -1 || sel > 0x1c || u32At(d, base - 0xc) > 2) continue;
+        let ok = true;
+        for (let k = 0; k < INV_CELL_COUNT && ok; k++) {
+            const o = base + INV_CELL_SIZE * k;
+            const h = u32At(d, o + 8);
+            ok = u32At(d, o) <= 1 && u32At(d, o + 4) <= 1 && (h <= 0x53 || heapHandle(h));
+        }
+        if (ok) return { entry, base };
+    }
+    throw new SaveFieldError("inventory cell table not recognised in Rynn's record");
+}
+
+/** The 0x102 record that stores `handle` twice, 0xe0 bytes apart, and the offset of the first copy. */
+export function itemRecord(save: SaveFile, handle: number): { entry: SaveEntry; at: number } {
+    for (const e of save.entries) {
+        if (e.type !== TYPE_RECORD || e.data.length < ITEM_PTR_GAP + 16 || u32At(e.data, CLASS_OFFSET) === RYNN_CLASS) {
+            continue;
+        }
+        for (let i = 0; i + ITEM_PTR_GAP + 4 <= e.data.length; i++) {
+            if (u32At(e.data, i) === handle && u32At(e.data, i + ITEM_PTR_GAP) === handle) return { entry: e, at: i };
+        }
+    }
+    throw new SaveFieldError(`no item record holds handle 0x${handle.toString(16)}`);
+}
+
+export interface InventoryCell {
+    cell: number;
+    /** Extra cell of a multi-cell item (value dx*10+dy back to the origin); the other fields are then absent. */
+    marker?: number;
+    equipped?: number;
+    hot?: number;
+    handle?: number;
+    /** Resource id (record u32 +0 plus 0x20000). */
+    resource?: number;
+    entry?: number;
+    durability?: number;
+    max?: number;
+}
+
+/** Occupied cells of the inventory grid, with the item records' durability / quantity where found. */
+export function listInventory(save: SaveFile): InventoryCell[] {
+    const { entry, base } = cellTable(save);
+    const out: InventoryCell[] = [];
+    for (let k = 0; k < INV_CELL_COUNT; k++) {
+        const o = base + INV_CELL_SIZE * k;
+        const handle = u32At(entry.data, o + 8);
+        if (handle === 0) continue;
+        if (handle <= 0x53) {
+            out.push({ cell: k, marker: handle });
+            continue;
+        }
+        const row: InventoryCell = { cell: k, equipped: u32At(entry.data, o), hot: u32At(entry.data, o + 4), handle };
+        try {
+            const { entry: item, at } = itemRecord(save, handle);
+            row.resource = u32At(item.data, 0) + 0x20000;
+            row.entry = item.id;
+            row.durability = dec(u32At(item.data, at + 8));
+            row.max = dec(u32At(item.data, at + 12));
+        } catch (e) {
+            if (!(e instanceof SaveFieldError)) throw e;
+        }
+        out.push(row);
+    }
+    return out;
+}
+
 function locate(
     save: SaveFile,
     def: FieldDef,
     rowId: number | null,
     force: boolean,
 ): { entry: SaveEntry; base: number } {
+    if (def.locator.type === 'stats') return statsBase(save);
+    if (def.locator.type === 'quest') {
+        const { entry } = skillTable(save);
+        const count = u32At(entry.data, 0x80);
+        if (count > 64 || 0x84 + count * QUEST_ROW_SIZE > entry.data.length) {
+            throw new SaveFieldError('quest table count does not fit the payload');
+        }
+        if (rowId === null || rowId >= count) throw new SaveFieldError(`quest row must be 0..${count - 1}`);
+        return { entry, base: 0x84 + rowId * QUEST_ROW_SIZE };
+    }
+    if (def.locator.type === 'cell' || def.locator.type === 'item') {
+        if (rowId === null || rowId >= INV_CELL_COUNT) {
+            throw new SaveFieldError('inventory fields need a cell 0..23, e.g. inv.0.durability');
+        }
+        const { entry, base } = cellTable(save);
+        const cell = base + INV_CELL_SIZE * rowId;
+        const handle = u32At(entry.data, cell + 8);
+        if (handle <= 0x53) throw new SaveFieldError(`cell ${rowId} holds no item`);
+        if (def.locator.type === 'cell') return { entry, base: cell };
+        const item = itemRecord(save, handle);
+        return { entry: item.entry, base: item.at };
+    }
     if (def.locator.type === 'record') return { entry: findRecord(save, def.locator, force), base: 0 };
     if (def.locator.type === 'progress') {
         const t = progressTable(save);
@@ -482,7 +723,8 @@ export function getField(save: SaveFile, name: string, force = false): FieldValu
     const { def, rowId } = resolveField(name);
     const { entry, base } = locate(save, def, rowId, force);
     checkSpan(entry, base + def.offset, def, name);
-    return decodeAt(def, entry.data, base + def.offset);
+    const v = decodeAt(def, entry.data, base + def.offset);
+    return def.encoded && typeof v === 'number' ? dec(v) : v;
 }
 
 export type FieldProbe =
@@ -575,8 +817,13 @@ export function applyFieldEdits(save: SaveFile, edits: FieldEdit[]): SaveFile {
         checkSpan(entry, off, def, edit.name);
         const data = (working.get(entry.index) ?? entry.data).slice();
         const dv = view(data);
-        if (def.kind === 'u32') dv.setUint32(off, edit.value as number, true);
-        else (edit.value as number[]).forEach((x, i) => dv.setFloat32(off + 4 * i, x, true));
+        if (def.kind === 'u32') {
+            if (def.locator.type === 'cell' && (edit.value as number) > 1) {
+                throw new SaveFieldError(`${edit.name} must be 0 or 1`);
+            }
+            const word = def.encoded ? enc(edit.value as number) : (edit.value as number);
+            dv.setUint32(off, word, true);
+        } else (edit.value as number[]).forEach((x, i) => dv.setFloat32(off + 4 * i, x, true));
         working.set(entry.index, data);
         touched.push({ edit, def, rowId });
     }
