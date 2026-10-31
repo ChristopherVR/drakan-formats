@@ -127,17 +127,27 @@ describe('PS2 texture encode', () => {
 
     it('uses 16 bpp for photo-like images and 8 bpp with graded alpha otherwise', () => {
         const photo = img(32, 32, (x, y) => [x * 8, y * 8, (x * y) & 255, 255]);
-        const t = encodePs2Texture(photo);
+        const t = encodePs2Texture(photo, { mode: 'auto' });
         expect(t.bpp).toBe(16);
         const d = decodeTxd(t.body, { upright: false });
         expect(d.flags).toBe(1);
         expect(d.rgba[0]).toBe(0);
         expect(d.rgba[(5 + 3 * 32) * 4]).toBe(Math.floor((((5 * 8) >> 3) * 255) / 31));
         const soft = img(32, 32, (x, y) => [x * 8, y * 8, 0, 40 + x * 6]);
-        const s = encodePs2Texture(soft);
+        const s = encodePs2Texture(soft, { mode: 'auto' });
         expect(s).toMatchObject({ bpp: 8, hasAlpha: true, lossy: true });
         expect(decodeTxd(s.body).flags).toBe(8);
         expect(encodePs2Texture(photo, { mode: 'indexed' }).bpp).toBe(8);
+    });
+
+    it('truecolor mode writes 32 bpp without quantising or 5-bit reduction', () => {
+        const photo = img(32, 32, (x, y) => [x * 8 + 1, y * 8 + 3, (x * y) & 255, 40 + x * 6]);
+        const t = encodePs2Texture(photo, { mode: 'truecolor' });
+        expect(t).toMatchObject({ bpp: 32, lossy: false, hasAlpha: true });
+        const d = decodeTxd(t.body, { upright: false });
+        expect(d.rgba[(5 + 3 * 32) * 4]).toBe(5 * 8 + 1);
+        expect(d.rgba[(5 + 3 * 32) * 4 + 1]).toBe(3 * 8 + 3);
+        expect(encodePs2Texture(img(8, 8, () => [1, 2, 3, 255]), { mode: 'truecolor' }).bpp).toBe(8);
     });
 
     it('rounds odd sizes to powers of two and clamps to the maximum', () => {

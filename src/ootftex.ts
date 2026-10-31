@@ -227,11 +227,12 @@ export function quantizeRgba(colors: Map<number, number>, n: number): { palette:
 
 // -------------------------------------------------------------------------------------------- PS2 TXD writer
 
-export type TextureMode = 'auto' | 'indexed';
+export type TextureMode = 'auto' | 'indexed' | 'truecolor';
 
 export interface Ps2TextureOptions {
     /** `auto`: 8 bpp when at most 256 colours, else 16 bpp (1:5:5:5), or quantised 8 bpp with alpha when alpha is graded.
-     * `indexed`: always 8 bpp (smaller; quantises). Default `auto`. */
+     * `indexed`: always 8 bpp (smaller; quantises). `truecolor`: 8 bpp only when at most 256 colours (exact), else 32 bpp
+     * RGBA (flags word 7, alpha 0..0x80), no quantising or 5-bit reduction. Default `truecolor` (the PC is not memory bound). */
     mode?: TextureMode;
     /** Largest edge written (default 256, the largest size on the disc). */
     maxSize?: number;
@@ -303,8 +304,8 @@ export function encodePs2Texture(src: RgbaImage, opt: Ps2TextureOptions = {}): P
         colors.set(k, (colors.get(k) ?? 0) + 1);
     }
     const hasAlpha = transparent + translucent > 0;
-    const mode = opt.mode ?? 'auto';
-    const indexed = colors.size <= 256 || mode === 'indexed' || translucent > 0;
+    const mode = opt.mode ?? 'truecolor';
+    const indexed = colors.size <= 256 || mode === 'indexed' || (translucent > 0 && mode !== 'truecolor');
     if (indexed) {
         let lossy = false;
         let palette: number[];
@@ -335,6 +336,17 @@ export function encodePs2Texture(src: RgbaImage, opt: Ps2TextureOptions = {}): P
         for (let i = palette.length / 4; i < 256; i++) body[0x40 + 16 + i * 4 + 3] = PS2_OPAQUE;
         for (let i = 0; i < px; i++) body[0x40 + 16 + 1024 + i] = lookup(i);
         return { body, width: w, height: h, bpp: 8, hasAlpha, lossy };
+    }
+    if (mode === 'truecolor') {
+        const body = new Uint8Array(0x40 + px * 4);
+        body.set(header(w, h, 32, 7, hasAlpha, fps, opt.slot), 0);
+        for (let i = 0; i < px; i++) {
+            body[0x40 + i * 4] = img.rgba[i * 4]!;
+            body[0x40 + i * 4 + 1] = img.rgba[i * 4 + 1]!;
+            body[0x40 + i * 4 + 2] = img.rgba[i * 4 + 2]!;
+            body[0x40 + i * 4 + 3] = ps2Alpha(img.rgba[i * 4 + 3]!);
+        }
+        return { body, width: w, height: h, bpp: 32, hasAlpha, lossy: false };
     }
     // More than 256 colours, no graded alpha: 16 bpp 1:5:5:5 (R in the low bits, A in bit 15), as the disc's 16 bpp textures.
     const body = new Uint8Array(0x40 + px * 2);

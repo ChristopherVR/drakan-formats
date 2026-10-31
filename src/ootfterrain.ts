@@ -36,7 +36,7 @@ export const TERRAIN_TEXTURE_SLOT = 45;
 
 export interface TerrainTextureOptions {
     texture?: Ps2TextureOptions;
-    /** Largest edge written for a terrain texture (default 128: disc terrain textures are 32..256, mostly 64 / 128). */
+    /** Largest edge written for a terrain texture (default 256 = the largest PC source; 128 halved 54 of the Ruined Village textures). */
     maxSize?: number;
     /** Keep only the N most used textures per level; the rest map to the nearest kept one by mean colour (default no cap). */
     maxTextures?: number;
@@ -159,7 +159,7 @@ export class TerrainTextureBuilder {
     async addLevel(pc: PcLevel): Promise<(pcRef: number, pc: PcLevel) => number | null> {
         const opt = this.opt;
         const maxTextures = opt.maxTextures ?? env('DRAKAN_TERRAIN_TEX_COUNT') ?? Infinity;
-        const maxSize = opt.maxSize ?? env('DRAKAN_TERRAIN_TEX_MAX') ?? 128;
+        const maxSize = opt.maxSize ?? env('DRAKAN_TERRAIN_TEX_MAX') ?? 256;
         const noRef = env('DRAKAN_TERRAIN_NOREF') === 1;
         const uses = new Map<number, number>();
         for (const L of pc.terrain) {
@@ -204,7 +204,7 @@ export class TerrainTextureBuilder {
                 fps: 10,
                 maxSize,
                 slot: opt.slot ?? env('DRAKAN_TERRAIN_SLOT') ?? TERRAIN_TEXTURE_SLOT,
-                mode: 'indexed',
+                mode: ({ 0: 'indexed', 1: 'auto', 2: 'truecolor' } as const)[env('DRAKAN_TERRAIN_TEX_MODE') ?? 2] ?? 'truecolor',
                 ...opt.texture,
             });
             const id = this.nextId++;
