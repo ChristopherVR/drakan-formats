@@ -9,6 +9,7 @@ import {
     TYPE_RECORD,
     TYPE_TEXT,
     decodeScreenshot,
+    listInventory,
     listSkills,
     probeField,
     progressTable,
@@ -276,9 +277,10 @@ export interface TransferRow {
 }
 
 /**
- * What can move from `src` to `dst`: gold, Rynn's health, skill levels (raising max when the source level needs it)
- * and, when both saves are from the same level, the player and Arokh positions. Items are not listed: their slots
- * are not decoded (see the journal), so there is nothing safe to move.
+ * What can move from `src` to `dst`: the stats block (health, gold, mana, xp, level, skill points; the old Rynn-record
+ * hp / gold only when a save has no stats block), skill levels (raising max when the source level needs it), item
+ * counts of same-resource items in the same cell and, when both saves are from the same level, the player and Arokh
+ * positions. Items themselves cannot move (creating items is not supported).
  */
 export function transferPlan(src: SaveFile, dst: SaveFile, sameLevel: boolean): TransferRow[] {
     const rows: TransferRow[] = [];
@@ -305,8 +307,50 @@ export function transferPlan(src: SaveFile, dst: SaveFile, sameLevel: boolean): 
                       : null,
         });
     };
-    simple('gold', 'Gold');
-    simple('hp', 'Health');
+    // The stats block is what the game applies on load; the old Rynn-record hp / gold candidates are only offered
+    // when a save has no stats block.
+    const hasStats = probeField(src, 'stat.hp').status !== 'missing' && probeField(dst, 'stat.hp').status !== 'missing';
+    if (hasStats) {
+        simple('stat.hp', 'Health');
+        simple('stat.maxhp', 'Max health');
+        simple('stat.gold', 'Gold');
+        simple('stat.mana', 'Mana');
+        simple('stat.maxmana', 'Max mana');
+        simple('stat.xp', 'Experience');
+        simple('stat.level', 'Character level');
+        simple('stat.skillpoints', 'Unspent skill points');
+    } else {
+        simple('gold', 'Gold');
+        simple('hp', 'Health');
+    }
+    // Item counts: same-resource items in the same cell only (the destination keeps its own items).
+    try {
+        const dstCells = new Map(listInventory(dst).map((c) => [c.cell, c]));
+        for (const c of listInventory(src)) {
+            const d = dstCells.get(c.cell);
+            if (c.durability === undefined || c.max === undefined) continue;
+            const same = d && d.resource === c.resource && d.durability !== undefined;
+            rows.push({
+                name: `inv.${c.cell}.durability`,
+                label: `Cell ${c.cell} count (${c.resource === undefined ? 'item' : `0x${c.resource.toString(16)}`})`,
+                from: c.durability,
+                to: d?.durability ?? null,
+                edits: same
+                    ? [
+                          { name: `inv.${c.cell}.max`, value: c.max },
+                          { name: `inv.${c.cell}.durability`, value: c.durability },
+                      ]
+                    : [],
+                blocked: same
+                    ? null
+                    : d
+                      ? 'a different item sits in this cell'
+                      : 'no item in this cell of the destination',
+            });
+        }
+    } catch (e) {
+        if (!(e instanceof SaveFieldError)) throw e;
+    }
     try {
         const dstSkills = new Map(listSkills(dst).map((r) => [r.id, r]));
         for (const s of listSkills(src)) {

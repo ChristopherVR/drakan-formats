@@ -616,6 +616,8 @@ export interface InventoryCell {
     entry?: number;
     durability?: number;
     max?: number;
+    /** The controller's icon word of the cell (the game draws a 3D render of the item; not a texture id). */
+    icon?: number;
 }
 
 /** Occupied cells of the inventory grid, with the item records' durability / quantity where found. */
@@ -630,7 +632,13 @@ export function listInventory(save: SaveFile): InventoryCell[] {
             out.push({ cell: k, marker: handle });
             continue;
         }
-        const row: InventoryCell = { cell: k, equipped: u32At(entry.data, o), hot: u32At(entry.data, o + 4), handle };
+        const row: InventoryCell = {
+            cell: k,
+            equipped: u32At(entry.data, o),
+            hot: u32At(entry.data, o + 4),
+            handle,
+            icon: u32At(entry.data, o + 12),
+        };
         try {
             const { entry: item, at } = itemRecord(save, handle);
             row.resource = u32At(item.data, 0) + 0x20000;
@@ -641,6 +649,42 @@ export function listInventory(save: SaveFile): InventoryCell[] {
             if (!(e instanceof SaveFieldError)) throw e;
         }
         out.push(row);
+    }
+    return out;
+}
+
+/** One row of the quest / map marker table in type 0x401 id 893 (RAM 0x4fbb70). `state` is the `quest.N` field. */
+export interface QuestRow {
+    index: number;
+    x: number;
+    y: number;
+    icon: number;
+    enabled: number;
+    region: number;
+    questId: number;
+    state: number;
+}
+
+/** The quest rows (count at payload +0x80, rows from +0x84, 0x20 bytes each). Empty when the count does not fit. */
+export function listQuests(save: SaveFile): QuestRow[] {
+    const { entry } = skillTable(save);
+    const d = entry.data;
+    const count = u32At(d, 0x80);
+    if (count > 64 || 0x84 + count * QUEST_ROW_SIZE > d.length) return [];
+    const dv = view(d);
+    const out: QuestRow[] = [];
+    for (let i = 0; i < count; i++) {
+        const o = 0x84 + i * QUEST_ROW_SIZE;
+        out.push({
+            index: i,
+            x: dv.getUint32(o, true),
+            y: dv.getUint32(o + 4, true),
+            icon: dv.getUint32(o + 12, true),
+            enabled: dv.getUint32(o + 16, true),
+            region: dv.getUint32(o + 20, true),
+            questId: dv.getUint32(o + 24, true),
+            state: dv.getUint32(o + 28, true),
+        });
     }
     return out;
 }
@@ -1027,7 +1071,18 @@ function readOrNull(save: SaveFile, name: string): FieldValue | null {
 
 /** Field table and per-entry diff. Entries are matched by (type, id, sub) and occurrence order. */
 export function diffSaves(a: SaveFile, b: SaveFile): SaveDiff {
-    const names = ['hp', 'gold', 'pos', 'arokh.pos'];
+    const names = [...Object.keys(STAT_OFFSETS).map((n) => `stat.${n}`), 'hp', 'gold', 'pos', 'arokh.pos'];
+    const cells = new Set<number>();
+    for (const s of [a, b]) {
+        try {
+            for (const c of listInventory(s)) if (c.marker === undefined) cells.add(c.cell);
+        } catch {
+            /* no recognisable inventory */
+        }
+    }
+    for (const c of [...cells].sort((x, y) => x - y)) {
+        names.push(`inv.${c}.durability`, `inv.${c}.equipped`, `inv.${c}.hot`);
+    }
     const skillIds = new Set<number>();
     for (const s of [a, b]) {
         try {
@@ -1042,9 +1097,10 @@ export function diffSaves(a: SaveFile, b: SaveFile): SaveDiff {
         const av = readOrNull(a, name);
         const bv = readOrNull(b, name);
         const row = name.startsWith('skill.') ? name.replace(/^skill\.(\d+)(\.max)?$/, 'skill $1$2') : name;
+        const inv = /^inv\.(\d+)\.(\w+)$/.exec(name);
         return {
             name,
-            label: name.startsWith('skill.') ? row : def.label,
+            label: name.startsWith('skill.') ? row : inv ? `cell ${inv[1]} ${inv[2]}` : def.label,
             a: av,
             b: bv,
             changed: !valueEq(av, bv),
