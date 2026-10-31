@@ -1,4 +1,14 @@
 import { latin1, view } from './bytes.ts';
+import {
+    decodeFieldValue,
+    encodeScalar,
+    fieldIsIndirect,
+    fieldIsArray,
+    fieldBase,
+    FIELD_STRING,
+    stringToWords,
+    type ClassFieldValue,
+} from './fields.ts';
 import { type OdbClass, type OdbIndex, odbStemForDependency } from './odb.ts';
 import { type SrscEntry, SrscError, type SrscReader, writeSrsc } from './srsc.ts';
 
@@ -556,34 +566,88 @@ export function setObjectLinks(model: LvlObjectList, id: number, links: readonly
 
 /** Parameter types whose value is one plain dword in `data[i]` (not a string or an array). */
 export function isScalarParam(type: number): boolean {
-    return (type & 0x1000) === 0 && (type & 0xff) !== 0x0a;
+    return !fieldIsIndirect(type);
 }
 
-export type ParamValue = number | string | number[];
+export type ParamValue = ClassFieldValue;
 
 /** Typed view of parameter `i` (strings decoded, arrays as dwords, int signed, float f32, others as stored). */
 export function paramValue(o: LvlObject, i: number): ParamValue {
     const p = o.params[i];
     const dword = o.data[i];
     if (!p || dword === undefined) throw new LvlEditError(`object ${o.id} has no parameter ${i}`);
-    const base = p.type & 0xff;
-    if ((p.type & 0x1000) !== 0 || base === 0x0a) {
-        const off = dword & 0xffff;
-        const len = dword >>> 16;
-        const words = o.data.slice(off, off + len);
-        if (base === 0x0a && (p.type & 0x1000) === 0) {
-            const bytes: number[] = [];
-            for (const w of words) bytes.push(w & 255, (w >>> 8) & 255, (w >>> 16) & 255, w >>> 24);
-            const z = bytes.indexOf(0);
-            return String.fromCharCode(...(z < 0 ? bytes : bytes.slice(0, z)));
+    return decodeFieldValue(p.type, dword, o.data);
+}
+
+/** One parameter to write: the class field it overrides, its definition and its value. */
+export interface ParamSpec {
+    fieldIndex: number;
+    type: number;
+    name: string;
+    /** Number for scalar types, text for strings, raw element dwords for arrays. */
+    value: ParamValue;
+}
+
+/** All parameters of an object as specs (what `setObjectParams` takes back). */
+export function objectParamSpecs(o: LvlObject): ParamSpec[] {
+    return o.params.map((p, i) => ({ fieldIndex: p.fieldIndex, type: p.type, name: p.name, value: paramValue(o, i) }));
+}
+
+function encodeName(name: string): Uint8Array {
+    const n = name.length + 1;
+    const raw = new Uint8Array(n + (n % 2));
+    for (let i = 0; i < name.length; i++) raw[i] = name.charCodeAt(i) & 0xff;
+    return raw;
+}
+
+/**
+ * Replace the whole parameter list of an object (its field overrides). Parameters are written in ascending field
+ * index; scalars take one dword each, strings and arrays are appended after the per-parameter dwords. The previous
+ * data area is not reused, so only call this for an object whose parameters really changed.
+ */
+export function setObjectParams(model: LvlObjectList, id: number, specs: readonly ParamSpec[]): void {
+    const o = need(model, id);
+    const sorted = [...specs].sort((a, b) => a.fieldIndex - b.fieldIndex);
+    for (let i = 1; i < sorted.length; i++) {
+        if (sorted[i]!.fieldIndex === sorted[i - 1]!.fieldIndex) {
+            throw new LvlEditError(`object ${id}: field ${sorted[i]!.fieldIndex} appears twice`);
         }
-        return words;
     }
-    const dv = new DataView(new ArrayBuffer(4));
-    dv.setUint32(0, dword);
-    if (base === 2) return dv.getFloat32(0);
-    if (base === 1) return dv.getInt32(0);
-    return dword;
+    const n = sorted.length;
+    const data: number[] = new Array<number>(n).fill(0);
+    const params: LvlParam[] = [];
+    sorted.forEach((s, i) => {
+        if (!Number.isInteger(s.fieldIndex) || s.fieldIndex < 0 || s.fieldIndex > 0xffff) {
+            throw new LvlEditError(`object ${id}: bad field index ${s.fieldIndex}`);
+        }
+        const old = o.params.find((p) => p.fieldIndex === s.fieldIndex && p.name === s.name && p.type === s.type);
+        params.push({
+            fieldIndex: s.fieldIndex,
+            type: s.type,
+            name: s.name,
+            nameRaw: old ? old.nameRaw.slice() : encodeName(s.name),
+        });
+        if (!fieldIsIndirect(s.type)) {
+            if (typeof s.value !== 'number' || !Number.isFinite(s.value)) {
+                throw new LvlEditError(`object ${id}: "${s.name}" needs a finite number`);
+            }
+            data[i] = encodeScalar(s.type, s.value);
+            return;
+        }
+        let words: number[];
+        if (fieldBase(s.type) === FIELD_STRING && !fieldIsArray(s.type)) {
+            if (typeof s.value !== 'string') throw new LvlEditError(`object ${id}: "${s.name}" needs text`);
+            words = stringToWords(s.value);
+        } else {
+            if (!Array.isArray(s.value)) throw new LvlEditError(`object ${id}: "${s.name}" needs a list`);
+            words = s.value.map((v) => v >>> 0);
+        }
+        if (data.length > 0xffff || words.length > 0xffff) throw new LvlEditError(`object ${id}: data area too large`);
+        data[i] = ((words.length << 16) | data.length) >>> 0;
+        data.push(...words);
+    });
+    o.data = data;
+    o.params = params;
 }
 
 /** Overwrite a scalar parameter (int, float, bool, enum, colour, ids). Strings and arrays are not editable. */
