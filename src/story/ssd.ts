@@ -181,3 +181,42 @@ export function writeSequence(s: SsdSequence): Uint8Array {
 export function parseFolderName(b: Uint8Array): string {
     return readName(b, 0)?.name ?? '';
 }
+
+// ---- creating sequences -----------------------------------------------------------------------------------------------
+
+/** A free sequence id above every used one (the runtime resolves `Sequence List` entries by SRSC id). */
+export function freeSequenceId(used: ReadonlySet<number>): number {
+    let max = 0;
+    for (const id of used) max = Math.max(max, id);
+    return max + 1;
+}
+
+/** Stored name length for a new name: with a terminator, padded so that `2 + length` is a multiple of 4 (disc rule). */
+export function sequenceNameLen(name: string): number {
+    let n = name.length + 1;
+    while ((n + 2) % 4) n++;
+    return n;
+}
+
+/** An empty sequence (header only, `length` 60 like the disc's empty default) in folder `folder`. */
+export function newSequence(id: number, folder: number, name: string, length = 60): SsdSequence {
+    return { id, folder, name, nameLen: sequenceNameLen(name), length, unknown1: 0, slots: 1, actors: [] };
+}
+
+/** Add an actor with no actions to `seq` (slot = next free, `slots` kept at highest slot + 1); returns it. */
+export function addActor(seq: SsdSequence, name: string, ref: number, mode = 0): SsdActor {
+    const slot = seq.actors.reduce((m, a) => Math.max(m, a.slot), 0) + 1;
+    const a: SsdActor = {
+        name,
+        slot,
+        ref,
+        mode,
+        nameLen: sequenceNameLen(name),
+        actionCount: 0,
+        actions: new Uint8Array(0),
+        keys: [],
+    };
+    seq.actors.push(a);
+    seq.slots = slot + 1;
+    return a;
+}

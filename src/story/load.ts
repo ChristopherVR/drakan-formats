@@ -4,7 +4,7 @@
 
 import { SrscReader, type SrscEntry } from '../srsc.ts';
 import { parseDb, resolveDependencyStem } from '../levellist.ts';
-import { ODB_CLASS_TYPE, odbStemForDependency, parseOdbClasses, type OdbClass } from '../odb.ts';
+import { ODB_CLASS_TYPE, ODB_FIELDS_TYPE, odbStemForDependency, parseOdbClasses, type OdbClass } from '../odb.ts';
 import { SDB_DESCRIPTOR, SDB_SAMPLES, adpcmSamples, parseSoundDescriptor } from '../resources.ts';
 import { bufferSource } from '../bytes.ts';
 import {
@@ -60,6 +60,8 @@ export interface LevelStory {
     sequenceEntry: Map<number, SrscEntry>;
     /** ODB class records (0x0102) as stored, by class id, for patching with `patchClassData`. */
     classRecord: Map<number, { sub: number; raw: Uint8Array }>;
+    /** The 0x0103 field-list entry of the level ODB as stored (needed to add classes), null without an ODB. */
+    fieldLists: { id: number; sub: number; stored: Uint8Array } | null;
 }
 
 /** Level folders of a language tree that carry story data (an .SSD, .SDB or .ODB named like the folder). */
@@ -93,6 +95,7 @@ export async function loadLevelStory(fs: StoryFs, language: string, stem: string
         soundEntry: new Map(),
         sequenceEntry: new Map(),
         classRecord: new Map(),
+        fieldLists: null,
     };
     const db = await fs.read(`${dir}.DB`);
     if (db) {
@@ -135,6 +138,8 @@ export async function loadLevelStory(fs: StoryFs, language: string, stem: string
     const odb = await openSrsc(fs, `${dir}.ODB`);
     if (odb) {
         out.classes = await parseOdbClasses(odb);
+        const fl = odb.entries.find((e) => e.type === ODB_FIELDS_TYPE);
+        if (fl) out.fieldLists = { id: fl.id, sub: fl.sub, stored: (await odb.readRaw(fl)).slice() };
         for (const e of odb.entries)
             if (e.type === ODB_CLASS_TYPE && !out.classRecord.has(e.id))
                 out.classRecord.set(e.id, { sub: e.sub, raw: await odb.readRaw(e) });

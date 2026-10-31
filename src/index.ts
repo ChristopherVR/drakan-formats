@@ -30,3 +30,5 @@ export * from './ootfseq.ts';
 export * from './ootfsound.ts';
 export * from './ootfclass.ts';
 export * from './ootfanim.ts';
+export * from './skeleton.ts';
+export * from './anim.ts';

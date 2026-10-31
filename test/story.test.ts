@@ -314,3 +314,35 @@ describe('level story loading', () => {
         expect(none.sequences).toEqual([]);
     });
 });
+
+describe('creating story content (synthetic)', () => {
+    it('newSequence + addActor round trips through writeSequence / parseSequence', async () => {
+        const {
+            newSequence,
+            addActor,
+            writeSequence,
+            parseSequence,
+            newActionBytes,
+            insertAction,
+            parseActions,
+            freeSequenceId,
+        } = await import('../src/index.ts');
+        expect(freeSequenceId(new Set([3, 9]))).toBe(10);
+        const seq = newSequence(10, 2, 'My new scene');
+        const cam = addActor(seq, 'Camera', 910);
+        const r = addActor(seq, 'Rynn', 908);
+        const ins = insertAction(r, newActionBytes(3, 1.5, { sound: 33, params: 3680016 }));
+        r.actions = ins.actions;
+        r.actionCount = ins.actionCount;
+        expect(cam.slot).toBe(1);
+        expect(r.slot).toBe(2);
+        expect(seq.slots).toBe(3);
+        const bytes = writeSequence(seq);
+        const back = parseSequence(10, 2, bytes)!;
+        expect(back.name).toBe('My new scene');
+        expect(back.actors.map((a) => a.name)).toEqual(['Camera', 'Rynn']);
+        const acts = parseActions(back.actors[1]!)!;
+        expect(acts.map((a) => a.type)).toEqual([3]);
+        expect(writeSequence(back)).toEqual(bytes);
+    });
+});

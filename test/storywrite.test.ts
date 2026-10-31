@@ -251,3 +251,25 @@ describe('srsc patch sanity', () => {
         expect(typeof SrscReader.open).toBe('function');
     });
 });
+
+describe('setClassArray / handler phases / new dialog lines (synthetic)', () => {
+    // fields: 0 array (base 5, FIELD_ARRAY), 1 scalar; data: [word0, 7, off=2 len=2 -> 100, 200]
+    const defs: ClassFieldDef[] = [
+        { type: 0x1005, name: 'Beginning Dialog Exchange' },
+        { type: 7, name: 'Other' },
+    ];
+    const rec = (): Uint8Array => questRecord('Handler', [(2 << 16) | 2, 7, 100, 200]);
+    it('replaces an array with a different length and keeps the rest', async () => {
+        const { setClassArray, handlerPhaseRecord } = await import('../src/index.ts');
+        const grown = setClassArray(rec(), 0, [1, 2, 3]);
+        const b = parseClassBody(splitClassRecord(grown).body)!;
+        expect(b.data.length).toBe(7);
+        expect(b.data[1]).toBe(7);
+        expect(b.data[0]! >>> 16).toBe(3);
+        const off = b.data[0]! & 0xffff;
+        expect(b.data.slice(off, off + 3)).toEqual([1, 2, 3]);
+        const viaPhase = handlerPhaseRecord(rec(), defs, 'beginning', []);
+        expect(parseClassBody(splitClassRecord(viaPhase).body)!.data[0]! >>> 16).toBe(0);
+        expect(() => handlerPhaseRecord(rec(), defs, 'done', [1])).toThrow();
+    });
+});
