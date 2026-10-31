@@ -2,6 +2,9 @@ import { type ByteSource, bufferSource, latin1, view } from './bytes.ts';
 import { inflate } from './inflate.ts';
 
 export const SRSC_HEADER_SIZE = 16;
+/** PC (Order of the Flame) header: `'SRSC', u16 ver 0x0100, u32 indexOffset, u16 count`. */
+export const SRSC_PC_HEADER_SIZE = 12;
+export const SRSC_PC_VERSION = 0x0100;
 export const SRSC_ENTRY_SIZE = 14;
 
 export interface SrscEntry {
@@ -29,7 +32,9 @@ export function looksLikeZlib(b: Uint8Array): boolean {
 export class SrscReader {
     private constructor(
         readonly source: ByteSource,
-        /** The 16 header bytes verbatim (so re-serialising keeps the unknown pad bytes). */
+        /** `'pc'` for the 12-byte Order of the Flame header (version 0x0100), else `'ps2'`. */
+        readonly platform: 'ps2' | 'pc',
+        /** The header bytes verbatim (so re-serialising keeps the unknown pad bytes). */
         readonly header: Uint8Array,
         readonly version: number,
         readonly indexOffset: number,
@@ -41,16 +46,20 @@ export class SrscReader {
     ) {}
 
     static async open(source: ByteSource): Promise<SrscReader> {
-        const header = await source.read(0, SRSC_HEADER_SIZE);
-        if (header.length < SRSC_HEADER_SIZE || latin1(header, 0, 4) !== 'SRSC') {
+        const head = await source.read(0, SRSC_HEADER_SIZE);
+        if (head.length < SRSC_PC_HEADER_SIZE || latin1(head, 0, 4) !== 'SRSC') {
             throw new SrscError('missing SRSC magic');
         }
-        const dv = view(header);
+        const dv = view(head);
         const version = dv.getUint16(4, true);
+        const platform = version === SRSC_PC_VERSION ? 'pc' : 'ps2';
+        const hsize = platform === 'pc' ? SRSC_PC_HEADER_SIZE : SRSC_HEADER_SIZE;
+        if (head.length < hsize) throw new SrscError('missing SRSC magic');
+        const header = head.slice(0, hsize);
         const indexOffset = dv.getUint32(6, true);
-        const count = dv.getUint32(10, true);
+        const count = platform === 'pc' ? dv.getUint16(10, true) : dv.getUint32(10, true);
         const warnings: string[] = [];
-        if (indexOffset < SRSC_HEADER_SIZE || indexOffset > source.size) {
+        if (indexOffset < hsize || indexOffset > source.size) {
             throw new SrscError('index offset out of range');
         }
         const indexBytes = count * SRSC_ENTRY_SIZE;
@@ -73,7 +82,7 @@ export class SrscReader {
         }
         const trailer = idx.subarray(indexBytes);
         if (trailer.length) warnings.push(`${trailer.length} trailing bytes after the index`);
-        return new SrscReader(source, header, version, indexOffset, entries, trailer, warnings);
+        return new SrscReader(source, platform, header, version, indexOffset, entries, trailer, warnings);
     }
 
     static fromBytes(data: ArrayBuffer | Uint8Array): Promise<SrscReader> {
@@ -142,7 +151,8 @@ export async function writeSrsc(
     reader: SrscReader,
     replacements: ReadonlyMap<number, Uint8Array> = new Map(),
 ): Promise<Uint8Array> {
-    const data = await reader.source.read(SRSC_HEADER_SIZE, reader.indexOffset - SRSC_HEADER_SIZE);
+    const hsize = reader.header.length;
+    const data = await reader.source.read(hsize, reader.indexOffset - hsize);
     const chunks: Uint8Array[] = [data];
     let pos = reader.indexOffset;
     const entries = reader.entries.map((e) => ({ ...e }));
@@ -170,11 +180,12 @@ export async function writeSrsc(
     const header = reader.header.slice();
     const hv = view(header);
     hv.setUint32(6, pos, true);
-    hv.setUint32(10, entries.length, true);
+    if (reader.platform === 'pc') hv.setUint16(10, entries.length, true);
+    else hv.setUint32(10, entries.length, true);
 
     const out = new Uint8Array(pos + index.length + reader.trailer.length);
     out.set(header, 0);
-    let w = SRSC_HEADER_SIZE;
+    let w = hsize;
     for (const c of chunks) {
         out.set(c, w);
         w += c.length;
