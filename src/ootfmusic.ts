@@ -181,6 +181,8 @@ export interface ApplyMusicOptions {
     musicClass: MusicClassRef;
     /** Database bits of the sound refs (default 0: the class's own database, PS2MUSIC.SDB, like Surdana's music objects). */
     soundDb?: number;
+    /** Set `Start State For Triggered Sounds` to 1 so the track plays as soon as the level is up (in-game test aid; PC music is started by detectors). */
+    startOn?: boolean;
 }
 
 export interface ApplyMusicResult {
@@ -194,7 +196,7 @@ export interface ApplyMusicResult {
     tracks: Map<number, number>;
 }
 
-function specsFor(fields: readonly ClassFieldDef[], track: number, soundDb: number, overlay: boolean, fadeIn: number, fadeOut: number): ParamSpec[] {
+function specsFor(fields: readonly ClassFieldDef[], track: number, soundDb: number, overlay: boolean, fadeIn: number, fadeOut: number, startOn = false): ParamSpec[] {
     const out: ParamSpec[] = [];
     const add = (re: RegExp, value: number | number[]): void => {
         const i = fields.findIndex((f) => re.test(f.name.trim()));
@@ -206,6 +208,7 @@ function specsFor(fields: readonly ClassFieldDef[], track: number, soundDb: numb
     add(/^plays overlay music/i, overlay ? 1 : 0);
     add(/^fade out time when stopped/i, fadeOut);
     add(/^fade in time when started/i, fadeIn);
+    if (startOn) add(/^start state for triggered/i, 1);
     return out;
 }
 
@@ -244,7 +247,7 @@ export function applyMusicTriggers(
         let first = list.objects.find((o) => o.id === t.objectId);
         slots.forEach((s, k) => {
             const track = use(trackFor(levelPath, s.slot, s.id));
-            const specs = specsFor(opt.musicClass.fields, track, soundDb, s.slot === 2, s.fadeIn, s.fadeOut);
+            const specs = specsFor(opt.musicClass.fields, track, soundDb, s.slot === 2, s.fadeIn, s.fadeOut, opt.startOn);
             let obj: LvlObject;
             if (k === 0 && first) {
                 obj = first;

@@ -11,6 +11,7 @@ import {
     encodeSdbSamples,
     encodeVag,
     nextSdbIds,
+    ps2SoundEntries,
     parsePcSounds,
     pcmToMono16,
     resamplePcm,
@@ -175,6 +176,34 @@ describe('PS2 SDB writer', () => {
         const conv = convertPcSounds(new Map([[key, bank]]), { firstId: 2000, groupId: 40 });
         return { pcm, conv, key };
     }
+
+    it('hands out ids from a list and ships the sounds as new SDB entries', async () => {
+        const { conv: _c, key } = await convertOne();
+        const bank = await parsePcSounds(
+            pcSrsc([
+                { type: 0x302, id: 4, sub: 1, data: pcSound('a', signal(900), {}) },
+                { type: 0x302, id: 6, sub: 1, data: pcSound('b', signal(900), {}) },
+            ]),
+        );
+        const free = [3, 9];
+        const conv = convertPcSounds(new Map([[key, bank]]), { firstId: 1, groupId: 94, nextId: () => free.shift() ?? null });
+        expect(conv.sounds.map((s) => [s.id, s.group])).toEqual([
+            [3, 94],
+            [9, 94],
+        ]);
+        expect(conv.map.get(key, 6)).toBe(9);
+        const recs = ps2SoundEntries(conv.sounds);
+        expect(recs.map((r) => [r.type, r.id, r.sub])).toEqual([
+            [0x302, 3, 94],
+            [0x304, 3, 94],
+            [0x302, 9, 94],
+            [0x304, 9, 94],
+        ]);
+        // out of ids: the rest is skipped with a warning
+        const few = convertPcSounds(new Map([[key, bank]]), { firstId: 1, groupId: 94, nextId: () => null });
+        expect(few.sounds).toEqual([]);
+        expect(few.warnings).toContain('out of ids');
+    });
 
     it('writes a standalone SDB the SRSC reader and descriptor parser accept', async () => {
         const { pcm, conv } = await convertOne();

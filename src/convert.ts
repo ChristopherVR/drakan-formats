@@ -366,8 +366,15 @@ export function convertPcLevel(pc: PcLevel, opt: ConvertOptions): Ps2LevelParts 
 
     // ---- header
     const name = opt.name ?? pcLevelName(pc.header);
+    // The template's splat dependency names its own level (`Level 1A - Surdana_splats`); the engine opens that file next to
+    // the level being loaded, so a native level transition (no start-level redirect that rewrites the name) would ask
+    // for a file the pack does not have. Name it after this level: its mangled stem is the pack's `<first 6>TS`.
+    const dependencies = opt.template.header.dependencies.map((d) =>
+        /_splats$/i.test(d.path.text) ? { ...d, path: encodeString(`${name}_splats`) } : d,
+    );
     const header: LvlHeader = {
         ...opt.template.header,
+        dependencies,
         name: encodeString(name),
         maxWidth: pc.header.maxWidth,
         maxHeight: pc.header.maxHeight,

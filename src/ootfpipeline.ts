@@ -22,7 +22,7 @@ import {
 import { ODB_CLASS_TYPE, ODB_FIELDS_TYPE, buildOdbIndex, parseOdbClasses, type OdbClass } from './odb.ts';
 import { resourceKind, type ResourceContext, type ResourceKind } from './convert.ts';
 import { FIELD_SOUND } from './fields.ts';
-import { convertPcSounds, parsePcSounds, sdbKey, writePs2Sdb, type PcSoundBank } from './ootfsound.ts';
+import { convertPcSounds, parsePcSounds, ps2SoundEntries, sdbKey, writePs2Sdb, type PcSoundBank } from './ootfsound.ts';
 import { convertPcSequences, ssdPackFiles, usedIdsOf } from './ootfseq.ts';
 import { SrscReader } from './srsc.ts';
 import {
@@ -44,7 +44,7 @@ import {
     type CampaignPlan,
 } from './ootfcampaign.ts';
 import { applyMusicTriggers, findMusicTriggers, musicTriggerClassNames } from './ootfmusic.ts';
-import { TextPlan, parseRrcStrings, rewriteClassTextDefaults, rewriteObjectTexts } from './ootftext.ts';
+import { TextPlan, isTextField, parseRrcStrings, rewriteClassTextDefaults, rewriteObjectTexts } from './ootftext.ts';
 import { writePs2Srsc, type Ps2Entry } from './ootfcontainer.ts';
 import {
     PS2_SUBSTITUTES,
@@ -101,6 +101,10 @@ export interface OotfPs2Context {
      */
     hostMod?: SrscReader;
     hostTxd?: SrscReader;
+    /** The host ODB's SDB (RESOURES.SDB): converted sounds are added to it as `new/<HOST>.SDB/` entries with free ids. */
+    hostSdb?: SrscReader;
+    /** Upper-case names of the XDBs on the disc (`SYSTEM.XDB`). A class in an ODB without one (FX) gets no text ids: its string defaults are blanked. */
+    xdbFiles?: ReadonlySet<string>;
 }
 
 export interface OotfPipelineOptions {
@@ -123,6 +127,8 @@ export interface OotfPipelineOptions {
     /** Plan the campaign (titles, exits, strings) when more than one level is converted (default true). */
     campaign?: boolean;
     music?: boolean;
+    /** Test aid: music objects start playing at level start (Start State = 1). */
+    musicStartOn?: boolean;
     /** Rewrite text defaults / parameters to new XDB strings (default true). */
     texts?: boolean;
     sounds?: boolean;
@@ -311,8 +317,14 @@ export async function convertOotfLevels(
                 rewriteText:
                     opt.texts === false
                         ? undefined
-                        : (file, fields, data) =>
-                              void rewriteClassTextDefaults(fields, data, textPlan, file.replace(/\.ODB$/i, '.XDB')),
+                        : (file, fields, data) => {
+                              const xdb = file.replace(/\.ODB$/i, '.XDB');
+                              if (ps2.xdbFiles && !ps2.xdbFiles.has(xdb.toUpperCase())) {
+                                  fields.forEach((f, i) => {
+                                      if (isTextField(f) && data[i] !== undefined) data[i] = 0; // no XDB to hold the text
+                                  });
+                              } else rewriteClassTextDefaults(fields, data, textPlan, xdb);
+                          },
                 substituteEngineId: PS2_SUBSTITUTES,
                 modelOdbFile: hostFile,
                 modelFor: hostOk
@@ -408,6 +420,18 @@ export async function convertOotfLevels(
         return out;
     };
 
+    // A ref is `(db << 16) | id`, db relative to the owning ODB's `.DB` list (0 = its own stem). Converted sounds sit in the
+    // host SDB: db 0 for the host's own classes, else the index the owner's `.DB` gives the host (null: not reachable).
+    const hostDbOf = (stem: string): number | null => {
+        if (stem === hostStem) return 0;
+        const text = ps2.dbFiles?.get(stem)?.text;
+        if (!text) return null;
+        for (const m of text.matchAll(/^(\d+)\s+(.+?)\s*$/gm)) {
+            if (odbStemForDependency(m[2]!) === hostStem) return Number(m[1]);
+        }
+        return null;
+    };
+    const stemOfTarget = (t: Parameters<typeof fileOfTarget>[0]): string => fileOfTarget(t).replace(/\.ODB$/i, '');
     // ---- sounds: the sounds that object parameters name, in one new SDB of the shared container
     let soundLookup: ((ownerPath: string, ref: number) => number | null) | null = null;
     if (opt.sounds === true) {
@@ -416,6 +440,7 @@ export async function convertOotfLevels(
             const want = new Map<string, Set<number>>();
             for (const pc of pcs) {
                 for (const n of await scan(pc, 'sound')) {
+                    if (!n.target || hostDbOf(stemOfTarget(n.target)) === null) continue; // dropped object or unreachable host SDB
                     const c = builder.resolveContainer(n.owner, n.ref >>> 16);
                     if (!c) continue;
                     const k = sdbKey(`${c}.sdb`);
@@ -429,16 +454,36 @@ export async function convertOotfLevels(
                 banks.set(k, { ...bank, sounds: bank.sounds.filter((x) => want.get(k)!.has(x.id)) });
             }
             if (!banks.size) return;
+            // Ids: the host SDB's free ids below its maximum (an id above a file's maximum did not work for ODB classes),
+            // group: an existing one (the host's most used), so no 0x0301 record has to be added.
+            const host = ps2.hostSdb;
+            const hostSounds = new Set((host?.entries ?? []).filter((e) => e.type === 0x302).map((e) => e.id));
+            const hostMax = [...hostSounds].reduce((m, i) => Math.max(m, i), 0);
+            const perGroup = new Map<number, number>();
+            for (const e of host?.entries ?? []) if (e.type === 0x302) perGroup.set(e.sub, (perGroup.get(e.sub) ?? 0) + 1);
+            const group = [...perGroup].sort((a, b) => b[1] - a[1])[0]?.[0] ?? 1;
+            let cursor = 0;
+            const freeId = host
+                ? (): number | null => {
+                      while (++cursor <= hostMax) if (!hostSounds.has(cursor)) return cursor;
+                      return null;
+                  }
+                : undefined;
             const conv = convertPcSounds(
                 banks,
-                { firstId: 1, groupId: 1, groupName: 'Order of the Flame' },
+                { firstId: 1, groupId: group, groupName: 'Order of the Flame', nextId: freeId },
                 { maxBytes: 0x3f000 },
             );
             for (const w of conv.warnings.slice(0, 5)) res.warnings.push(`sounds: ${w}`);
             if (!conv.sounds.length) return;
-            res.files[`files/${hostDir ?? 'ENGLISH/COMMON/RESOURES'}/${hostStem}.SDB.new`] = writePs2Sdb(conv.sounds, [
-                conv.group,
-            ]); // TODO merge into the host SDB
+            if (host) {
+                for (const r of ps2SoundEntries(conv.sounds))
+                    res.files[`new/${hostStem}.SDB/${hex4(r.type)}_${r.id}_${r.sub}.bin`] = r.data;
+            } else {
+                res.files[`files/${hostDir ?? 'ENGLISH/COMMON/RESOURES'}/${hostStem}.SDB.new`] = writePs2Sdb(conv.sounds, [
+                    conv.group,
+                ]);
+            }
             soundLookup = (ow, ref) => {
                 const c = builder.resolveContainer(ow, ref >>> 16);
                 const m = c ? conv.map.get(sdbKey(`${c}.sdb`), ref & 0xffff) : null;
@@ -451,11 +496,16 @@ export async function convertOotfLevels(
         const ow = owner(ctx.pc, ctx.ownerDb);
         if (!ow) return null;
         try {
-            // Refs resolve through the owning ODB; only the host ODB's own MOD / SDB (db 0) carries converted resources.
-            if (fileOfTarget(ctx.target) !== hostFile) return null;
-            if (kind === 'sound' && soundLookup) return soundLookup(ow, ref);
-            if (kind === 'model') return builder.mapModelRef(ref >>> 16, ref & 0xffff, ow);
+            // Sequences live in the SSD of the owner's stem (db 0), whatever the ODB.
             if (kind === 'sequence') return seqIds.get(`${ctx.pc.path}|${ow}|${ref}`) ?? null;
+            if (kind === 'sound') {
+                const db = soundLookup ? hostDbOf(stemOfTarget(ctx.target)) : null;
+                const id = db === null ? null : soundLookup!(ow, ref);
+                return db === null || id === null ? null : ((db << 16) | id) >>> 0;
+            }
+            // Other refs resolve through the owning ODB; only the host ODB's own MOD (db 0) carries converted models.
+            if (fileOfTarget(ctx.target) !== hostFile) return null;
+            if (kind === 'model') return builder.mapModelRef(ref >>> 16, ref & 0xffff, ow);
         } catch {
             return null;
         }
@@ -548,11 +598,13 @@ export async function convertOotfLevels(
         const lvl = parts;
         const xdbOf = (o: LvlObject): string | null => {
             const d = tplHeader.dependencies.find((x) => x.dbIndex === o.dbIndex);
-            return d ? `${odbStemForDependency(d.path.text)}.XDB` : null;
+            const xdb = d ? `${odbStemForDependency(d.path.text)}.XDB` : null;
+            return xdb && (!ps2.xdbFiles || ps2.xdbFiles.has(xdb)) ? xdb : null;
         };
         if (opt.music !== false && musicClass) {
             await stage(`music ${pc.path}`, async () => {
                 applyMusicTriggers(lvl.objects, findMusicTriggers(pc), pc.path, {
+                    startOn: opt.musicStartOn,
                     musicClass: {
                         dbIndex: musicClass.t.dbIndex,
                         classId: musicClass.t.classId,

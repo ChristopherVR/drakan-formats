@@ -363,15 +363,20 @@ export function writePs2Descriptor(s: Ps2Sound, pcmBytes: number, adpcmBytes: nu
     return out;
 }
 
-interface Rec {
+export interface SdbRecord {
     type: number;
     id: number;
     sub: number;
     data: Uint8Array;
 }
 
-function soundRecords(sounds: readonly Ps2Sound[], groups: readonly Ps2Group[]): Rec[] {
-    const recs: Rec[] = groups.map((g) => ({ type: 0x301, id: g.id, sub: g.parent, data: writePs2Group(g) }));
+/** The 0x0302 / 0x0304 entries of converted sounds, ready to ship as `new/<FILE>.SDB/<type>_<id>_<sub>.bin`. */
+export function ps2SoundEntries(sounds: readonly Ps2Sound[]): SdbRecord[] {
+    return soundRecords(sounds, []);
+}
+
+function soundRecords(sounds: readonly Ps2Sound[], groups: readonly Ps2Group[]): SdbRecord[] {
+    const recs: SdbRecord[] = groups.map((g) => ({ type: 0x301, id: g.id, sub: g.parent, data: writePs2Group(g) }));
     for (const s of sounds) {
         const adpcm = encodeSdbSamples(s.pcm);
         recs.push({ type: 0x302, id: s.id, sub: s.group, data: writePs2Descriptor(s, s.pcm.length * 2, adpcm.length) });
@@ -380,7 +385,7 @@ function soundRecords(sounds: readonly Ps2Sound[], groups: readonly Ps2Group[]):
     return recs;
 }
 
-function layout(recs: Rec[], start: number): { body: Uint8Array; index: Uint8Array; end: number } {
+function layout(recs: SdbRecord[], start: number): { body: Uint8Array; index: Uint8Array; end: number } {
     const entries: { type: number; id: number; sub: number; off: number; size: number }[] = [];
     let pos = start;
     const chunks: { off: number; data: Uint8Array }[] = [];
@@ -406,7 +411,7 @@ function layout(recs: Rec[], start: number): { body: Uint8Array; index: Uint8Arr
 }
 
 /** Disc order of the three trailer records (index order 0x300, 0x402, 0x307; data last). */
-function trailerRecords(entryCount: number, nextId: number): Rec[] {
+function trailerRecords(entryCount: number, nextId: number): SdbRecord[] {
     const t300 = new Uint8Array(4);
     view(t300).setUint16(0, entryCount & 0xffff, true);
     view(t300).setUint16(2, nextId & 0xffff, true);
@@ -559,7 +564,14 @@ export interface SoundConversion {
  */
 export function convertPcSounds(
     banks: ReadonlyMap<string, PcSoundBank>,
-    ids: { firstId: number; groupId: number; groupName?: string; ps2Db?: number },
+    ids: {
+        firstId: number;
+        groupId: number;
+        groupName?: string;
+        ps2Db?: number;
+        /** Hand out ids from a list instead of counting up from `firstId` (for example the free ids of a host SDB). */
+        nextId?: () => number | null;
+    },
     opts: SoundConvertOptions = {},
 ): SoundConversion {
     const map = new SoundMap(ids.ps2Db ?? 0);
@@ -585,6 +597,12 @@ export function convertPcSounds(
                 warnings.push(`${key}#${pc.id} ${pc.name}: ${size} bytes exceeds the cap`);
                 continue;
             }
+            const given = ids.nextId ? ids.nextId() : next;
+            if (given === null) {
+                warnings.push('out of ids');
+                break;
+            }
+            next = given;
             const loop = (pc.flags & 8) !== 0;
             const flags = opts.flags ? opts.flags(pc) : loop ? 0xa : 0x2;
             const sound: Ps2Sound = {
