@@ -100,6 +100,39 @@ describe('Srsc', () => {
         expect(looksLikeZlib(bytes(0x78, 0x02))).toBe(false);
     });
 
+    it('batches zlib detection for all entries with the same answers as per-entry checks', async () => {
+        const many = [
+            ...specs,
+            { type: 0x41, id: 9, sub: 0, data: bytes(0x78) }, // size 1: never compressed
+            { type: 0x42, id: 1, sub: 0, data: bytes(0x78, 0x9c, 1, 2) }, // valid-looking zlib header, junk stream
+            ...Array.from({ length: 40 }, (_, i) => ({
+                type: 0x43,
+                id: i,
+                sub: 0,
+                data: i % 3 === 0 ? zlibSync(new Uint8Array(30 + i).fill(i)) : new Uint8Array(20 + i).fill(i),
+            })),
+        ];
+        const src = bufferSource(buildSrsc(many));
+        let reads = 0;
+        const counting = {
+            size: src.size,
+            read(o: number, l: number) {
+                reads++;
+                return src.read(o, l);
+            },
+        };
+        const r = await SrscReader.open(counting);
+        const expected: boolean[] = [];
+        for (const e of r.entries) expected.push(await r.isCompressed(e));
+        // specs' zlib entry, the 0x78 0x9c junk entry (header test only), and 14 of the 40 generated entries
+        expect(expected.filter(Boolean).length).toBe(1 + 1 + 14);
+
+        reads = 0;
+        expect(await r.zlibFlags()).toEqual(expected);
+        expect(reads).toBeLessThanOrEqual(2); // one window covers this container
+        expect(await r.zlibFlags(16)).toEqual(expected); // tiny windows force many reads, same answers
+    });
+
     it('does not treat a bogus 0x78 header as compressed data', async () => {
         const bogus = bytes(0x78, 0x01, 0xff, 0xff, 0xff);
         const r = await SrscReader.fromBytes(buildSrsc([{ type: 1, id: 1, sub: 0, data: bogus }]));

@@ -100,9 +100,36 @@ export class SrscReader {
         return { data: raw, compressed: false };
     }
 
-    /** Cheap zlib detection for listings: reads only 2 bytes. */
+    /** Cheap zlib detection for one entry: reads only 2 bytes. */
     async isCompressed(e: SrscEntry): Promise<boolean> {
         return e.size >= 2 && looksLikeZlib(await this.readRaw(e, 2));
+    }
+
+    /**
+     * zlib detection for every entry (same answers as `isCompressed`). Entries are scanned in offset order through
+     * `window`-sized reads, so a container with thousands of entries costs a few reads instead of one per entry.
+     */
+    async zlibFlags(window = 1 << 20): Promise<boolean[]> {
+        const flags: boolean[] = this.entries.map(() => false);
+        const order = this.entries
+            .map((e, i) => i)
+            .filter((i) => this.entries[i]!.size >= 2)
+            .sort((a, b) => this.entries[a]!.offset - this.entries[b]!.offset);
+        let k = 0;
+        while (k < order.length) {
+            const first = this.entries[order[k]!]!.offset;
+            const buf = await this.source.read(first, window);
+            const start = k;
+            while (k < order.length) {
+                const o = this.entries[order[k]!]!.offset - first;
+                if (o + 2 > buf.length) break;
+                flags[order[k]!] = looksLikeZlib(buf.subarray(o, o + 2));
+                k++;
+            }
+            // The entry at `start` runs past the end of the source: leave it false and move on.
+            if (k === start) k++;
+        }
+        return flags;
     }
 }
 
