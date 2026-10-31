@@ -53,12 +53,25 @@ export function decodeXdbSlots(body: Uint8Array): string[] {
     return out;
 }
 
+const cp1252Reverse = new Map<number, number>();
+for (let b = 0x80; b < 0xa0; b++) {
+    const ch = cp1252.decode(Uint8Array.of(b));
+    if (ch !== '�') cp1252Reverse.set(ch.charCodeAt(0), b);
+}
+
+/** Windows-1252 byte of a character, or -1 when it has none. */
+export function cp1252Byte(ch: string): number {
+    const c = ch.charCodeAt(0);
+    if (c < 0x80 || (c >= 0xa0 && c <= 0xff)) return c;
+    return cp1252Reverse.get(c) ?? -1;
+}
+
 /** Inverse of `decodeXdbSlots` for tests and tools: pad each text to the 4-aligned slot size. */
 export function encodeXdbSlots(texts: readonly string[]): Uint8Array {
     const slots: Uint8Array[] = [];
     for (let i = 0; i < XDB_SLOTS; i++) {
         const t = texts[i] ?? '';
-        const bytes = Uint8Array.from(t, (c) => c.charCodeAt(0) & 0xff);
+        const bytes = Uint8Array.from(t, (c) => Math.max(0, cp1252Byte(c)));
         const n = ((bytes.length + 2 + 3) & ~3) - 2;
         const slot = new Uint8Array(2 + n);
         view(slot).setUint16(0, n, true);
