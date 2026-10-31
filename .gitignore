@@ -1,0 +1,13 @@
+node_modules/
+dist/
+*.zip
+# Game data is never committed
+*.iso
+*.lvl
+*.odb
+*.mod
+*.txd
+*.sdb
+*.adb
+*.ssd
+*.rrc

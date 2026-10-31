@@ -30,7 +30,17 @@ function actor(name: string, id: number, obj: number, actions: number[][]): numb
 function pcSeq(): Uint8Array {
     const cam = actor('Camera', 1, 100, [
         act(5, 0, u32(0)),
-        act(0, 1, [...f32(0), ...f32(0), ...f32(0), ...f32(1), ...f32(10), ...f32(20), ...f32(30), ...u32(0), ...u32(0x10)]),
+        act(0, 1, [
+            ...f32(0),
+            ...f32(0),
+            ...f32(0),
+            ...f32(1),
+            ...f32(10),
+            ...f32(20),
+            ...f32(30),
+            ...u32(0),
+            ...u32(0x10),
+        ]),
         act(8, 2, [...u32(4), ...u32(0x103), ...f32(0.5), ...f32(3)]),
         act(5, 9, u32(1)),
     ]);
