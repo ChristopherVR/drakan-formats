@@ -25,6 +25,11 @@ export const RYNN_CLASS = 0x17081069;
 export const GOLD_CLASS = 0x19001255;
 export const CLASS_OFFSET = 8;
 export const POS_OFFSET = 12;
+/** Resource id (u32 at +0) of Arokh's record; Rynn's is 0xa50. */
+export const AROKH_RESOURCE = 0xa60;
+export const PROGRESS_ROW_SIZE = 12;
+/** `kind` values seen in the progress table rows (see `listProgress`). */
+export const PROGRESS_KINDS: readonly number[] = [20, 50, 68, 75, 100];
 
 export class SaveFormatError extends Error {}
 
@@ -183,7 +188,10 @@ export type Confidence = 'high' | 'medium' | 'low';
 export type FieldKind = 'u32' | 'vec3';
 export type FieldValue = number | [number, number, number];
 
-export type FieldLocator = { type: 'record'; classId: number; entryId?: number } | { type: 'skill' };
+export type FieldLocator =
+    | { type: 'record'; classId?: number; resourceId?: number; entryId?: number }
+    | { type: 'skill' }
+    | { type: 'progress' };
 
 export interface FieldDef {
     key: string;
@@ -237,6 +245,31 @@ export const FIELDS: Record<string, FieldDef> = {
             'Rynn record, float X,Y,Z at +12. Matched by class alone because entry ids vary between saves (53, 56, ...). ' +
             'The same offsets the combat fixture moves, verified in game.',
     },
+    'arokh.pos': {
+        key: 'arokh.pos',
+        label: 'Arokh position',
+        locator: { type: 'record', resourceId: AROKH_RESOURCE },
+        offset: POS_OFFSET,
+        kind: 'vec3',
+        confidence: 'low',
+        note:
+            'Record whose resource id (u32 at +0) is 0xa60, float X,Y,Z at +12 like every positioned record. Arokh sits ' +
+            'far from Rynn in Surdana saves. Only matches by symmetry with Rynn; never moved in game.',
+    },
+    progress: {
+        key: 'progress',
+        label: 'Progress value',
+        locator: { type: 'progress' },
+        offset: 8,
+        kind: 'u32',
+        confidence: 'low',
+        note:
+            'Row of the state table at the end of type 0x401 id 893: {u32 kind, u32 key, u32 value}, 12 bytes, running ' +
+            'to the end of the payload. kind is one of 20, 50, 68, 75, 100; keys are unique. The table has about 100-370 ' +
+            'rows, fewer after play than at the start. Meaning of kind and value is a hypothesis (per-actor state); ' +
+            'only the layout is verified.',
+        minimum: 0,
+    },
     skill: {
         key: 'skill',
         label: 'Skill level',
@@ -260,38 +293,50 @@ export const FIELDS: Record<string, FieldDef> = {
 };
 
 const SKILL_FIELD = /^skill\.(\d+)(\.max)?$/;
+const PROGRESS_FIELD = /^progress\.(\d+)$/;
 
 export function resolveField(name: string): { def: FieldDef; rowId: number | null } {
     const m = SKILL_FIELD.exec(name);
     if (m) return { def: FIELDS[m[2] ? 'skill.max' : 'skill']!, rowId: Number(m[1]) };
+    const pm = PROGRESS_FIELD.exec(name);
+    if (pm) return { def: FIELDS.progress!, rowId: Number(pm[1]) };
     const def = FIELDS[name];
     if (def && def.locator.type === 'record') return { def, rowId: null };
-    throw new SaveFieldError(`unknown field "${name}" (skills are skill.N or skill.N.max)`);
+    throw new SaveFieldError(`unknown field "${name}" (skills are skill.N or skill.N.max, progress rows progress.KEY)`);
 }
 
 const u32At = (d: Uint8Array, off: number): number => view(d).getUint32(off, true);
 
-function findRecord(save: SaveFile, loc: { classId: number; entryId?: number }, force: boolean): SaveEntry {
+function findRecord(
+    save: SaveFile,
+    loc: { classId?: number; resourceId?: number; entryId?: number },
+    force: boolean,
+): SaveEntry {
+    const what =
+        loc.classId !== undefined
+            ? `class 0x${loc.classId.toString(16).padStart(8, '0')}`
+            : `resource 0x${(loc.resourceId ?? 0).toString(16)}`;
     let candidates = save.entries.filter(
         (e) =>
-            e.type === TYPE_RECORD && e.data.length >= CLASS_OFFSET + 4 && u32At(e.data, CLASS_OFFSET) === loc.classId,
+            e.type === TYPE_RECORD &&
+            e.data.length >= CLASS_OFFSET + 4 &&
+            (loc.classId !== undefined
+                ? u32At(e.data, CLASS_OFFSET) === loc.classId
+                : u32At(e.data, 0) === loc.resourceId),
     );
     if (loc.entryId !== undefined && !force) {
         const pinned = candidates.filter((e) => e.id === loc.entryId);
         if (candidates.length && !pinned.length) {
             const ids = [...new Set(candidates.map((e) => e.id))].sort((a, b) => a - b);
             throw new SaveFieldError(
-                `record class 0x${loc.classId.toString(16).padStart(8, '0')} has entry id ${ids.join(', ')}; ` +
-                    `this field is verified only for id ${loc.entryId}`,
+                `record ${what} has entry id ${ids.join(', ')}; ` + `this field is verified only for id ${loc.entryId}`,
                 true,
             );
         }
         candidates = pinned;
     }
     if (candidates.length !== 1) {
-        throw new SaveFieldError(
-            `expected one record for class 0x${loc.classId.toString(16).padStart(8, '0')}, found ${candidates.length}`,
-        );
+        throw new SaveFieldError(`expected one record for ${what}, found ${candidates.length}`);
     }
     return candidates[0]!;
 }
@@ -346,6 +391,41 @@ export function listSkills(save: SaveFile): SkillRow[] {
     return rows;
 }
 
+export interface ProgressRow {
+    kind: number;
+    key: number;
+    value: number;
+}
+
+/**
+ * The state table at the end of the skill/text payload (type 0x401 id 893): 12-byte rows {kind, key, value} that run to
+ * the end of the payload. The start is found by walking back from the end while the kind is one of `PROGRESS_KINDS`,
+ * never into the skill rows. Returns the entry, the payload offset of the first row and the rows.
+ */
+export function progressTable(save: SaveFile): { entry: SaveEntry; start: number; rows: ProgressRow[] } {
+    const { entry, first, count } = skillTable(save);
+    const data = entry.data;
+    const floor = first + count * SKILL_ROW_SIZE;
+    let start = data.length;
+    while (start - PROGRESS_ROW_SIZE >= floor && PROGRESS_KINDS.includes(u32At(data, start - PROGRESS_ROW_SIZE))) {
+        start -= PROGRESS_ROW_SIZE;
+    }
+    const rows: ProgressRow[] = [];
+    for (let o = start; o + PROGRESS_ROW_SIZE <= data.length; o += PROGRESS_ROW_SIZE) {
+        rows.push({ kind: u32At(data, o), key: u32At(data, o + 4), value: u32At(data, o + 8) });
+    }
+    return { entry, start, rows };
+}
+
+export function listProgress(save: SaveFile): ProgressRow[] {
+    try {
+        return progressTable(save).rows;
+    } catch (e) {
+        if (e instanceof SaveFieldError) return [];
+        throw e;
+    }
+}
+
 function locate(
     save: SaveFile,
     def: FieldDef,
@@ -353,6 +433,15 @@ function locate(
     force: boolean,
 ): { entry: SaveEntry; base: number } {
     if (def.locator.type === 'record') return { entry: findRecord(save, def.locator, force), base: 0 };
+    if (def.locator.type === 'progress') {
+        const t = progressTable(save);
+        const hits: number[] = [];
+        t.rows.forEach((r, k) => {
+            if (r.key === rowId) hits.push(t.start + k * PROGRESS_ROW_SIZE);
+        });
+        if (hits.length !== 1) throw new SaveFieldError(`no unique progress row with key ${String(rowId)}`);
+        return { entry: t.entry, base: hits[0]! };
+    }
     if (rowId === null) throw new SaveFieldError('skill fields need a row number, e.g. skill.1');
     const { entry, first, count } = skillTable(save);
     const rows: number[] = [];
@@ -609,6 +698,8 @@ export interface RecordInfo {
     size: number;
     /** Object class id (type 0x102 only). */
     classId?: number;
+    /** Resource id (u32 at +0, type 0x102 only): 0xa50 Rynn, 0xa60 Arokh. */
+    resource?: number;
     /** World position of an object record (float32 at +12), when plausible. */
     pos?: [number, number, number];
 }
@@ -634,6 +725,7 @@ export function describeRecords(save: SaveFile): RecordInfo[] {
     return save.entries.map((e) => {
         const info: RecordInfo = { index: e.index, type: e.type, id: e.id, sub: e.sub, size: e.data.length };
         if (e.type === TYPE_RECORD && e.data.length >= CLASS_OFFSET + 4) {
+            info.resource = u32At(e.data, 0);
             info.classId = u32At(e.data, CLASS_OFFSET);
             const pos = recordPosition(e.data);
             if (pos) info.pos = pos;
@@ -688,7 +780,7 @@ function readOrNull(save: SaveFile, name: string): FieldValue | null {
 
 /** Field table and per-entry diff. Entries are matched by (type, id, sub) and occurrence order. */
 export function diffSaves(a: SaveFile, b: SaveFile): SaveDiff {
-    const names = ['hp', 'gold', 'pos'];
+    const names = ['hp', 'gold', 'pos', 'arokh.pos'];
     const skillIds = new Set<number>();
     for (const s of [a, b]) {
         try {

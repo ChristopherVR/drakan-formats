@@ -456,6 +456,164 @@ export function duplicateObject(model: LvlObjectList, id: number, offset: readon
     return copy;
 }
 
+// ---------------------------------------------------------------- add / links / parameters
+
+export interface NewObjectSpec {
+    classId: number;
+    dbIndex: number;
+    pos: readonly number[];
+    /** Signed degrees (default 0, 0, 0). */
+    rot?: readonly number[];
+    /** Only applied when the template (or default) body has flag 0x100. */
+    scale?: readonly number[];
+    /** Id to give the object; default is max id + 1 (ids must stay ascending, so it must be above every other id). */
+    id?: number;
+    /** Copy the body of this object instead of searching for an instance of the class. */
+    templateId?: number;
+}
+
+export interface AddObjectResult {
+    object: LvlObject;
+    /** `template`: body copied from an existing instance of the class; `default`: minimal body (flags 0x01, no parameters). */
+    from: 'template' | 'default';
+    templateId?: number;
+}
+
+/**
+ * Add a new object of a class. The body is templated from an existing instance of the same (class id, db index): flags,
+ * radius, event count, scale, data and parameters are copied (so it carries that instance's parameter overrides), links
+ * are emptied and the transform replaced. Without an instance a minimal body is written: visible flag, one initial event,
+ * no parameters (every field then takes the class default). Class default values are not decoded (level-format.md
+ * section 8), so a default-body object is unverified in game. Appended with the next free id so ids stay ascending.
+ */
+export function addObject(model: LvlObjectList, spec: NewObjectSpec): AddObjectResult {
+    if (model.objects.length >= 0xffff) throw new LvlEditError('object list is full (65535)');
+    if (!Number.isInteger(spec.classId) || spec.classId < 0 || spec.classId > 0xffff) {
+        throw new LvlEditError('class id must be a u16');
+    }
+    if (!Number.isInteger(spec.dbIndex) || spec.dbIndex < 0 || spec.dbIndex > 0xffff) {
+        throw new LvlEditError('db index must be a u16');
+    }
+    const pos = finiteVec(spec.pos, 'position').map(Math.fround) as Vec3;
+    const rot = finiteVec(spec.rot ?? [0, 0, 0], 'rotation');
+    if (!rot.every((d) => Number.isInteger(d) && d >= -32768 && d <= 32767)) {
+        throw new LvlEditError('rotation must be integer degrees in the i16 range');
+    }
+    const maxId = model.objects.reduce((m, o) => Math.max(m, o.id), 0);
+    const id = spec.id ?? maxId + 1;
+    if (!Number.isInteger(id) || id <= maxId || id > 0xffffffff)
+        throw new LvlEditError(`id ${id} is not above every existing id`);
+    const tpl =
+        spec.templateId !== undefined
+            ? need(model, spec.templateId)
+            : model.objects.find((o) => o.classId === spec.classId && o.dbIndex === spec.dbIndex);
+    let obj: LvlObject;
+    if (tpl) {
+        obj = {
+            ...tpl,
+            id,
+            classId: spec.classId,
+            dbIndex: spec.dbIndex,
+            pos,
+            rot,
+            links: [],
+            scale: tpl.scale ? ((spec.scale ? finiteVec(spec.scale, 'scale') : [...tpl.scale]) as Vec3) : null,
+            data: [...tpl.data],
+            params: tpl.params.map((p) => ({ ...p, nameRaw: p.nameRaw.slice() })),
+        };
+        if (obj.scale) obj.scale = obj.scale.map(Math.fround) as Vec3;
+    } else {
+        obj = {
+            id,
+            classId: spec.classId,
+            dbIndex: spec.dbIndex,
+            prefix0: 0,
+            prefix1: 0,
+            pos,
+            flags: FLAG_VISIBLE,
+            initialEvents: 1,
+            radius: null,
+            links: [],
+            rot,
+            scale: null,
+            preSentinel: 0,
+            sentinel: LVL_SENTINEL,
+            data: [],
+            params: [],
+        };
+    }
+    model.objects.push(obj);
+    return { object: obj, from: tpl ? 'template' : 'default', ...(tpl ? { templateId: tpl.id } : {}) };
+}
+
+/** Replace the link list (ids of other objects; duplicates removed, order kept). Dangling ids are allowed (validation reports them). */
+export function setObjectLinks(model: LvlObjectList, id: number, links: readonly number[]): void {
+    if (!links.every((l) => Number.isInteger(l) && l >= 0 && l <= 0xffffffff)) {
+        throw new LvlEditError('link ids must be u32');
+    }
+    need(model, id).links = [...new Set(links)];
+}
+
+/** Parameter types whose value is one plain dword in `data[i]` (not a string or an array). */
+export function isScalarParam(type: number): boolean {
+    return (type & 0x1000) === 0 && (type & 0xff) !== 0x0a;
+}
+
+export type ParamValue = number | string | number[];
+
+/** Typed view of parameter `i` (strings decoded, arrays as dwords, int signed, float f32, others as stored). */
+export function paramValue(o: LvlObject, i: number): ParamValue {
+    const p = o.params[i];
+    const dword = o.data[i];
+    if (!p || dword === undefined) throw new LvlEditError(`object ${o.id} has no parameter ${i}`);
+    const base = p.type & 0xff;
+    if ((p.type & 0x1000) !== 0 || base === 0x0a) {
+        const off = dword & 0xffff;
+        const len = dword >>> 16;
+        const words = o.data.slice(off, off + len);
+        if (base === 0x0a && (p.type & 0x1000) === 0) {
+            const bytes: number[] = [];
+            for (const w of words) bytes.push(w & 255, (w >>> 8) & 255, (w >>> 16) & 255, w >>> 24);
+            const z = bytes.indexOf(0);
+            return String.fromCharCode(...(z < 0 ? bytes : bytes.slice(0, z)));
+        }
+        return words;
+    }
+    const dv = new DataView(new ArrayBuffer(4));
+    dv.setUint32(0, dword);
+    if (base === 2) return dv.getFloat32(0);
+    if (base === 1) return dv.getInt32(0);
+    return dword;
+}
+
+/** Overwrite a scalar parameter (int, float, bool, enum, colour, ids). Strings and arrays are not editable. */
+export function setParamScalar(model: LvlObjectList, id: number, i: number, value: number): void {
+    const o = need(model, id);
+    const p = o.params[i];
+    if (!p) throw new LvlEditError(`object ${id} has no parameter ${i}`);
+    if (!isScalarParam(p.type)) throw new LvlEditError(`parameter "${p.name}" is a string or array; not editable`);
+    if (!Number.isFinite(value)) throw new LvlEditError('value must be finite');
+    const dv = new DataView(new ArrayBuffer(4));
+    if ((p.type & 0xff) === 2) dv.setFloat32(0, value);
+    else dv.setUint32(0, value >>> 0);
+    o.data[i] = dv.getUint32(0);
+}
+
+/**
+ * Drop parameter `i` so the field falls back to the class default. Refused when the object has any string or array
+ * parameter: their offsets point into `data` and shifting them is unverified.
+ */
+export function removeParam(model: LvlObjectList, id: number, i: number): void {
+    const o = need(model, id);
+    if (!o.params[i]) throw new LvlEditError(`object ${id} has no parameter ${i}`);
+    if (o.params.some((p) => !isScalarParam(p.type))) {
+        throw new LvlEditError(`object ${id} has string or array parameters; resetting a parameter is not supported`);
+    }
+    if (o.data.length !== o.params.length) throw new LvlEditError(`object ${id} has a data area beyond its parameters`);
+    o.params.splice(i, 1);
+    o.data.splice(i, 1);
+}
+
 // ---------------------------------------------------------------- SRSC glue
 
 export interface Lvl {

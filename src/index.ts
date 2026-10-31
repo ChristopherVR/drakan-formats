@@ -4,5 +4,8 @@ export * from './srsc.ts';
 export * from './txd.ts';
 export * from './levellist.ts';
 export * from './save.ts';
+export * from './save-state.ts';
 export * from './lvl.ts';
 export * from './discprofile.ts';
+export * from './terrain.ts';
+export * from './model.ts';

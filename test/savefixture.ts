@@ -12,6 +12,12 @@ export interface SaveFixtureOptions {
     levelName?: string;
     withGold?: boolean;
     extraRecords?: number;
+    /** State table rows [kind, key, value] appended to the skill/text payload. */
+    progress?: [number, number, number][];
+    /** Add an Arokh record (resource id 0xa60). */
+    arokh?: [number, number, number];
+    /** Write the item text of the Equipment page into Rynn's record (with the usual damaged line starts). */
+    itemText?: boolean;
 }
 
 const LEVEL_PATH = 'Levels/Level 1A - Test/Level 1A - Test.lvl';
@@ -32,8 +38,8 @@ function record(classId: number, pos: [number, number, number], size: number): U
     return b;
 }
 
-export function skillTable(skills: [number, number][]): Uint8Array {
-    const b = new Uint8Array(0x3d4 + 0x4c * skills.length + 8);
+export function skillTable(skills: [number, number][], progress: [number, number, number][] = []): Uint8Array {
+    const b = new Uint8Array(0x3d4 + 0x4c * skills.length + 8 + progress.length * 12);
     const dv = new DataView(b.buffer);
     dv.setUint32(0x3d0, skills.length, true);
     const names = ['Melee', 'Archery', 'Magic', 'Extra'];
@@ -43,6 +49,12 @@ export function skillTable(skills: [number, number][]): Uint8Array {
         dv.setUint32(o + 4, level, true);
         dv.setUint32(o + 8, max, true);
         for (let i = 0; i < names[k]!.length; i++) b[o + 12 + i] = names[k]!.charCodeAt(i);
+    });
+    const base = 0x3d4 + 0x4c * skills.length + 8;
+    progress.forEach(([kind, key, value], k) => {
+        dv.setUint32(base + k * 12, kind, true);
+        dv.setUint32(base + k * 12 + 4, key, true);
+        dv.setUint32(base + k * 12 + 8, value, true);
     });
     return b;
 }
@@ -69,6 +81,18 @@ export interface SaveSpecEntry {
 export function saveEntries(o: SaveFixtureOptions = {}): SaveSpecEntry[] {
     const rynn = record(0x17081069, o.pos ?? [1000, 2000, 3000], 0x720);
     new DataView(rynn.buffer).setUint32(0x708, o.hp ?? 84, true);
+    if (o.itemText) {
+        const put = (at: number, text: string): void => {
+            for (let i = 0; i < text.length; i++) rynn[at + i] = text.charCodeAt(i);
+        };
+        put(0x100, 'Wood Club');
+        put(0x140, 'Skill Needed: 1');
+        put(0x181, '?Damage: 8');
+        put(0x1c0, 'L=Speed: Medium');
+        put(0x202, 'ange: Short');
+        put(0x240, 'u?Durability: 144/150');
+        put(0x280, 'W=In left hand');
+    }
     const entries: SaveSpecEntry[] = [
         { type: 0x23, id: 0, data: screenshot() },
         { type: 0x400, id: 0, data: lenString(LEVEL_PATH) },
@@ -82,6 +106,7 @@ export function saveEntries(o: SaveFixtureOptions = {}): SaveSpecEntry[] {
                     [2, 5],
                     [2, 6],
                 ],
+                o.progress,
             ),
         },
         { type: 0x402, id: 0, data: Uint8Array.from([7, 0, 0, 0, 1, 0, 0, 0]) },
@@ -91,6 +116,11 @@ export function saveEntries(o: SaveFixtureOptions = {}): SaveSpecEntry[] {
         const gold = record(0x19001255, [5, 6, 7], 0x460);
         new DataView(gold.buffer).setUint32(0x448, o.gold ?? 376, true);
         entries.push({ type: 0x102, id: 63, data: gold });
+    }
+    if (o.arokh) {
+        const arokh = record(0x1b001041, o.arokh, 0x200);
+        new DataView(arokh.buffer).setUint32(0, 0xa60, true);
+        entries.push({ type: 0x102, id: 71, data: arokh });
     }
     for (let i = 0; i < (o.extraRecords ?? 3); i++) {
         entries.push({ type: 0x102, id: 100 + i, data: record(0x100d3 + (i % 2), [i * 100, 50, -i * 20], 64 + i) });
