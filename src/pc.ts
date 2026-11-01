@@ -124,7 +124,7 @@ function parsePcBody(c: PcCursor): LvlObject {
 
 /**
  * Parse a PC LVL 0x0020 payload: `u16 count`, then self-contained bodies. Throws LvlError unless the bodies consume the
- * payload exactly. Link ids (u16 on PC) and rotations are widened to the PS2 model.
+ * payload exactly. Links (u16 table positions on PC) are translated to object ids and rotations are widened to the PS2 model.
  */
 export function parsePcObjectList(data: Uint8Array): LvlObjectList {
     const c = new PcCursor(data);
@@ -145,6 +145,19 @@ export function parsePcObjectList(data: Uint8Array): LvlObjectList {
         if (seen.has(o.id)) warnings.push(`duplicate object id ${o.id} at index ${i}`);
         seen.add(o.id);
     });
+    // A PC link is the 0-based position of the target in this table, not its object id (ids are sparse: Rift World has 149
+    // objects with ids up to 565; read as ids only 17 of its 78 links hit an object, read as positions all 78 do, and every one
+    // of them lands on the object the level design needs - the Dr. Evil heads on the DeathCounter, the counter on the end
+    // timer, the gate timers on the gates next to them). The PS2 model links by id, so translate here.
+    const idAt = objects.map((o) => o.id);
+    for (const o of objects) {
+        const out: number[] = [];
+        for (const l of o.links) {
+            if (l < idAt.length) out.push(idAt[l]!);
+            else warnings.push(`object ${o.id}: link ${l} is past the end of the table (${idAt.length} objects)`);
+        }
+        o.links = out;
+    }
     return { objects, warnings };
 }
 

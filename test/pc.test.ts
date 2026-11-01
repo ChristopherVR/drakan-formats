@@ -177,12 +177,14 @@ describe('PC SRSC container', () => {
 describe('PC object list', () => {
     it('parses links, unsigned rotations, scale and parameters', () => {
         const w = new W().u16(2);
-        pcObject({ id: 10, cls: 5, db: 2, pos: [1, 2, 3], flags: 0x101, links: [11], rot: [270, 90, 0], scale: [1, 2, 3] }, w);
+        pcObject({ id: 10, cls: 5, db: 2, pos: [1, 2, 3], flags: 0x101, links: [1, 7], rot: [270, 90, 0], scale: [1, 2, 3] }, w);
         pcObject({ id: 11, cls: 6, db: 2, pos: [4, 5, 6], params: [{ index: 3, type: 2, name: 'Speed', dword: 0x40000000 }] }, w);
         const list = parsePcObjectList(w.bytes());
         expect(list.objects).toHaveLength(2);
         const a = list.objects[0]!;
+        // a PC link is the position of the target in the table (id 11 sits at position 1); position 7 is past the end and is dropped
         expect(a.links).toEqual([11]);
+        expect(list.warnings.some((x) => /link 7/.test(x))).toBe(true);
         expect(a.rot).toEqual([-90, 90, 0]);
         expect(a.scale).toEqual([1, 2, 3]);
         expect(list.objects[1]!.params[0]).toMatchObject({ name: 'Speed', fieldIndex: 3, type: 2 });
