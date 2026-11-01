@@ -667,6 +667,17 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
             continue;
         }
         const kind = info?.kind;
+        // Ambient creatures (birds, bats; engine class 65): a clone with the PC model leaves a null per-object controller
+        // (this+0xd4, 0x10822c) that the engine hits a frame or two after the level loads, in about 60% of Intro runs
+        // (4 of 6 co-op runs crashed with "Birds" / "Birds2"; 4 of 4 passed with them dropped). Same-named PS2 ones (Fish) are
+        // kept above.
+        if (rfl === 65) {
+            unsupported.set(key, {
+                reason: 'needs-model',
+                detail: `${info?.name ?? 'ambient creature'}: a cloned record crashes the engine (null controller vtable)`,
+            });
+            continue;
+        }
         const modelStandIn = substituted && MODEL_STANDINS.has(rfl);
         // Particle emitters (43, 71, 97): the PC model is only an emitter box. The clone keeps the template's own emitter model.
         const ownFxModel =
