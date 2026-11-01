@@ -240,11 +240,34 @@ describe('applyCampaignExits', () => {
         expect(dets).toHaveLength(r.detectors);
         expect(dets.length).toBeGreaterThanOrEqual(1);
         for (const d of dets) {
-            expect(d.scale).toEqual([3, 3, 3]);
+            expect(d.scale).toEqual([2, 2, 2]);
             const target = list.objects.find((x) => x.id === d.links[0])!;
             expect(target.classId).toBe(966);
         }
         expect(dets.length).toBe(village.exits.filter((e) => e.reason === 'pc' && e.destTitle).length);
+    });
+
+    it('fires the intro hand-over from a linked timer (nobody walks into an exit of a cut-scene level)', () => {
+        const plan = planCampaign(fixture());
+        const intro = plan.levels[0]!;
+        expect(intro.exits.find((e) => e.reason === 'intro-next')!.autoSeconds).toBeGreaterThan(30);
+        const list: LvlObjectList = { objects: [obj(1, 1)], warnings: [] };
+        const fields = [
+            { name: 'Time Until Trigger', type: 2 },
+            { name: 'Start Mode', type: 7 },
+            { name: 'Trigger Message', type: 7 },
+        ];
+        const r = applyCampaignExits(list, intro, plan, {
+            ...ctxFor(() => false),
+            timerClass: { dbIndex: 8, classId: 128, fields },
+        });
+        expect(r.timers).toBe(1);
+        const timer = list.objects.find((o) => o.classId === 128)!;
+        const exit = list.objects.find((o) => o.id === timer.links[0])!;
+        expect(exit.classId).toBe(966);
+        expect(timer.params.map((p) => p.name)).toEqual(['Time Until Trigger', 'Trigger Message']);
+        expect(new DataView(new Uint32Array([timer.data[0]!]).buffer).getFloat32(0, true)).toBeCloseTo(44, 3);
+        expect(timer.data[1]).toBe(5);
     });
 
     it('setExitDestinationId keeps string payloads of other parameters intact', () => {

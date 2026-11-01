@@ -691,6 +691,7 @@ export async function convertOotfLevels(
     const musicClass = findPs2Class((c) => /^triggered music loop$/i.test(c.name.trim()) && !!c.fields);
     const exitClass = findPs2Class((c) => c.rflClass === 55 && transitionFieldIndex(c.fields) >= 0);
     const detectorClass = findPs2Class((c) => c.rflClass === 61 && /^trigger detector$/i.test(c.name.trim()));
+    const timerClass = findPs2Class((c) => c.rflClass === 62 && /^timer$/i.test(c.name.trim()) && !!c.fields);
     // Audit: music triggers never go through the class plan (the resolver below maps them to the Triggered Music Loop class and
     // `applyMusicTriggers` rewrites them), and multiplayer pads / crystals have no PS2 object at all (the editor exports them as
     // arena spawns and markers: `ootfArenaFromPc`). Say so instead of reporting them as unsupported.
@@ -953,6 +954,9 @@ export async function convertOotfLevels(
                     exitFieldOf: exitField,
                     ...(detectorClass ? { detectorClass: { dbIndex: detectorClass.t.dbIndex, classId: detectorClass.t.classId } } : {}),
                     groundAt: (x, z, y) => terrainGroundBelow(pc.terrain, x, z, y),
+                    ...(timerClass
+                        ? { timerClass: { dbIndex: timerClass.t.dbIndex, classId: timerClass.t.classId, fields: timerClass.cls.fields! } }
+                        : {}),
                     exitClass: {
                         dbIndex: exitClass.t.dbIndex,
                         classId: exitClass.t.classId,

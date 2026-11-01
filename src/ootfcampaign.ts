@@ -57,7 +57,17 @@ export interface CampaignExit {
     destTitle: string | null;
     /** The exit is only meant for the player to come back by (`reason` arrival): no PC counterpart. */
     synthetic: boolean;
+    /**
+     * Cut-scene levels (the intro, the Ruined Village Book) have nobody to walk into the exit: a Timer fires it after this many
+     * seconds (the length of the level's scenes). Unset for levels the player plays.
+     */
+    autoSeconds?: number;
 }
+
+/** Length of the three Intro sequences ("Intro 1", "Intro 2", "Intro 3": 14.5 + 10.2 + 16.4 s) plus a short margin. */
+export const INTRO_SECONDS = 44;
+/** Length of the Book's narration sequence ("The Book", 25.7 s) plus a short margin. */
+export const BOOK_SECONDS = 28;
 
 export interface CampaignLevel {
     /** PC path as listed (`Mountain World/Ruined Village/Ruined Village.lvl`). */
@@ -301,6 +311,7 @@ export function planCampaign(levels: readonly PcLevel[], opt: CampaignOptions = 
             const dest = find(e.text);
             if (!dest) warnings.push(`${lv.title}: exit ${e.obj.id} "${e.className}" leads to "${e.text}", which is not in the campaign`);
             lv.exits.push({
+                ...(/book/i.test(lv.pcName) ? { autoSeconds: BOOK_SECONDS } : {}),
                 reason: 'pc',
                 pcObjectId: e.obj.id,
                 pcClassName: e.className,
@@ -322,7 +333,9 @@ export function planCampaign(levels: readonly PcLevel[], opt: CampaignOptions = 
         // Where the PC intro ends: the "Stomp" detector the player walks into (it plays the closing sequence). Without one the
         // hand-over sits at the Rynn start.
         const at = introEnd(pcByPath.get(normalizeLevelRef(start.path))) ?? start.rynn ?? [0, 0, 0];
-        start.exits.push(synth(start, first, 'intro-next', at, opt.arrivalOffset));
+        const hand = synth(start, first, 'intro-next', at, opt.arrivalOffset);
+        hand.autoSeconds = INTRO_SECONDS;
+        start.exits.push(hand);
     }
 
     // Arrival markers: every real edge A -> B needs an exit in B whose destination is A.
@@ -471,9 +484,17 @@ export interface ApplyExitsContext {
      * is touched itself. When given, every real exit (`reason` pc) gets a detector box centred on it that links to the exit.
      */
     detectorClass?: { dbIndex: number; classId: number };
-    /** Size of that box in cells of 2048 units (default 3 x 3 x 3), centre lifted by `detectorLift` units (default 700). */
+    /** Size of that box in cells of 2048 units (default 2 x 2 x 2), centre lifted by `detectorLift` units (default 700). */
     detectorSize?: Vec3;
     detectorLift?: number;
+    /**
+     * Terrain height under (x, z) looking down from y (NaN when unknown). Several PC exits hang 7000 to 40000 units above the ground
+     * (the player stands on the ground and the PC engine touches the object by distance) and one lies 77000 below it; the box is then
+     * stretched down toward the ground (at most 10 cells tall) or put on the ground, so a walker on the floor still enters it.
+     */
+    groundAt?: (x: number, z: number, y: number) => number;
+    /** "Timer" class of the template (engine class 0x1003e): exits with `autoSeconds` get one that fires them (Trigger Message 5, as on the disc). */
+    timerClass?: { dbIndex: number; classId: number; fields: readonly Pick<ClassFieldDef, 'name' | 'type'>[] };
 }
 
 export interface ApplyExitsResult {
@@ -485,6 +506,8 @@ export interface ApplyExitsResult {
     external: number;
     /** Trigger detectors added in front of exits. */
     detectors: number;
+    /** Timers added for cut-scene levels. */
+    timers: number;
     warnings: string[];
 }
 
@@ -517,13 +540,24 @@ export function setExitDestinationId(o: LvlObject, field: ExitField, id: number)
     o.data = [...data, ...extra];
 }
 
+/** Give a freshly added object (no parameters yet) these plain one-dword parameters. */
+export function setScalarParams(o: LvlObject, set: readonly { fieldIndex: number; type: number; name: string; value: number }[]): void {
+    const sorted = [...set].sort((a, b) => a.fieldIndex - b.fieldIndex);
+    o.params = sorted.map((p) => {
+        const nameRaw = new Uint8Array(p.name.length + 1 + ((p.name.length + 1) % 2));
+        for (let i = 0; i < p.name.length; i++) nameRaw[i] = p.name.charCodeAt(i) & 0xff;
+        return { fieldIndex: p.fieldIndex, type: p.type, name: p.name, nameRaw };
+    });
+    o.data = sorted.map((p) => p.value >>> 0);
+}
+
 /**
  * Rewrite the exits of one converted level. `list` is the PS2 object list `convertPcLevel` produced (ids = PC ids; the
  * first occurrence of a duplicate keeps its id). Real exits get the destination string id of their destination level; exits
  * whose PC class was dropped, and the synthesized exits (intro hand-over, arrival markers), are added with the exit class.
  */
 export function applyCampaignExits(list: LvlObjectList, level: CampaignLevel, plan: CampaignPlan, ctx: ApplyExitsContext): ApplyExitsResult {
-    const res: ApplyExitsResult = { rewritten: 0, added: 0, external: 0, detectors: 0, warnings: [] };
+    const res: ApplyExitsResult = { rewritten: 0, added: 0, external: 0, detectors: 0, timers: 0, warnings: [] };
     const converted = new Set(list.objects.map((o) => o.id)); // objects added below take ids above every PC id and must not be mistaken for one
     for (const e of level.exits) {
         if (!e.destTitle) {
@@ -570,17 +604,49 @@ export function applyCampaignExits(list: LvlObjectList, level: CampaignLevel, pl
             }
         }
         if (ctx.detectorClass && exitObj && (e.reason === 'pc' || e.reason === 'intro-next')) {
-            const size = ctx.detectorSize ?? [3, 3, 3];
+            const size: Vec3 = [...(ctx.detectorSize ?? [2, 2, 2])] as Vec3;
+            let cy = exitObj.pos[1] + (ctx.detectorLift ?? 700);
+            const g = ctx.groundAt ? ctx.groundAt(exitObj.pos[0], exitObj.pos[2], exitObj.pos[1] + 1500) : NaN;
+            if (Number.isFinite(g) && Math.abs(exitObj.pos[1] - g) > 1000) {
+                // The exit hangs above (or lies below) the terrain: stretch the box from the ground up to the exit (at most 10 cells), or
+                // put it on the ground when the exit is buried.
+                const bottom = g - 500;
+                const top = exitObj.pos[1] > g ? Math.min(exitObj.pos[1] + 1500, bottom + 10 * 2048) : g + 3500;
+                size[1] = (top - bottom) / 2048;
+                cy = (top + bottom) / 2;
+            }
             const { object: det } = addObject(list, {
                 classId: ctx.detectorClass.classId,
                 dbIndex: ctx.detectorClass.dbIndex,
-                pos: [exitObj.pos[0], exitObj.pos[1] + (ctx.detectorLift ?? 700), exitObj.pos[2]],
+                pos: [exitObj.pos[0], cy, exitObj.pos[2]],
                 rot: [0, 0, 0],
             });
             det.flags |= FLAG_SCALED;
-            det.scale = [...size];
+            det.scale = size;
             det.links = [exitObj.id];
             res.detectors++;
+        }
+        if (ctx.timerClass && exitObj && e.autoSeconds) {
+            const fi = (name: string): number => ctx.timerClass!.fields.findIndex((f) => f.name.trim().toLowerCase() === name);
+            const iTime = fi('time until trigger');
+            const iMsg = fi('trigger message');
+            if (iTime < 0 || iMsg < 0) res.warnings.push(`${level.title}: the Timer class lacks Time Until Trigger / Trigger Message`);
+            else {
+                const { object: tm } = addObject(list, {
+                    classId: ctx.timerClass.classId,
+                    dbIndex: ctx.timerClass.dbIndex,
+                    pos: [exitObj.pos[0], exitObj.pos[1], exitObj.pos[2]],
+                    rot: [0, 0, 0],
+                });
+                const f32 = new DataView(new ArrayBuffer(4));
+                f32.setFloat32(0, e.autoSeconds);
+                setScalarParams(tm, [
+                    { fieldIndex: iTime, type: ctx.timerClass.fields[iTime]!.type, name: ctx.timerClass.fields[iTime]!.name, value: f32.getUint32(0) },
+                    { fieldIndex: iMsg, type: ctx.timerClass.fields[iMsg]!.type, name: ctx.timerClass.fields[iMsg]!.name, value: 5 },
+                ]);
+                tm.links = [exitObj.id];
+                res.timers++;
+            }
         }
     }
     return res;
