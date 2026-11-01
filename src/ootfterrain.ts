@@ -309,8 +309,13 @@ function cellBitsMask(): number {
     return (env('DRAKAN_TERRAIN_CELLBITS') ?? 0x0d) & 0xff;
 }
 
-/** Total `visible` entries over all layers of the largest disc level (LEVEL1NA: 483 layers, 41362 entries, longest list 221). */
-export const MAX_VISIBLE_ENTRIES = 40000;
+/**
+ * Budget for the total `visible` entries over all layers. The largest disc level has 41362 (LEVEL1NA: 483 layers, longest list 221).
+ * It was 40000 after Volcano (941 layers, 67105 entries) crashed in 2026-11-01 runs; those crashes came from the ODB class counts
+ * (fixed in ModPack) and Volcano now loads uncapped, three runs in a row (journal 2026-11-02/ootf-native-mips.md), so the default
+ * is unlimited. `DRAKAN_TERRAIN_VISBUDGET=<n>` brings the cap back for experiments.
+ */
+export const MAX_VISIBLE_ENTRIES = Infinity;
 
 /**
  * Cap the layers' `visible` lists so that their total stays within `budget`. Volcano (941 layers, 67105 entries) crashed in game
@@ -318,7 +323,10 @@ export const MAX_VISIBLE_ENTRIES = 40000;
  * the engine evidently sizes something by the total. Every list keeps its nearest layers (by origin), the longest lists are cut
  * first: the smallest per-list cap `n` with sum(min(len, n)) <= budget is used. Levels under the budget come back unchanged.
  */
-export function limitVisibleEntries(layers: readonly TerrainLayer[], budget = MAX_VISIBLE_ENTRIES): TerrainLayer[] {
+export function limitVisibleEntries(
+    layers: readonly TerrainLayer[],
+    budget = env('DRAKAN_TERRAIN_VISBUDGET') ?? MAX_VISIBLE_ENTRIES,
+): TerrainLayer[] {
     const total = layers.reduce((a, L) => a + L.visible.length, 0);
     if (total <= budget) return [...layers];
     let lo = 0;

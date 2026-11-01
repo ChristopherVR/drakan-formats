@@ -270,13 +270,18 @@ function owner(pc: PcLevel, db: number): string | null {
     return p ? p.replace(/\.odb$/i, '') : null;
 }
 
-/** Test aid: OOTF_TEXMODE=auto|indexed|truecolor and OOTF_TEXMAX=<edge> override the texture writer defaults. */
+/** Test aid: OOTF_TEXMODE=auto|indexed|truecolor and OOTF_TEXMAX=<edge> and OOTF_TEXPIX=<pixels> override the texture writer defaults. */
 function ootfTextureEnv(): Ps2TextureOptions | undefined {
     const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
     const mode = env?.['OOTF_TEXMODE'];
     const max = Number(env?.['OOTF_TEXMAX'] ?? 0);
-    if (!mode && !max) return undefined;
-    return { ...(mode ? { mode: mode as TextureMode } : {}), ...(max ? { maxSize: max } : {}) };
+    const pix = Number(env?.['OOTF_TEXPIX'] ?? 0); // largest 32 bpp texture, in pixels (Infinity = never quantise)
+    if (!mode && !max && !pix) return undefined;
+    return {
+        ...(mode ? { mode: mode as TextureMode } : {}),
+        ...(max ? { maxSize: max } : {}),
+        ...(pix ? { maxTruecolorPixels: pix } : {}),
+    };
 }
 
 /** A PC `Multiplayer/*` level (an arena, not a campaign chapter). */
