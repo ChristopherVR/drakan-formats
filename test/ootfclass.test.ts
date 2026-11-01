@@ -138,9 +138,26 @@ describe('ootfclass', () => {
         expect(m.data[1]! >>> 16).toBe(2);
         const at = m.data[1]! & 0xffff;
         expect(m.data.slice(at, at + 2)).toEqual([101, 102]);
-        expect(m.data[2]).toBe(7); // no converted clip: the template's value stays
+        expect(m.data[2]).toBe(100); // no converted clip: the template's clip would not fit the converted rig, a converted one stands in
         expect(m.skipped).toEqual(['Gone']);
         expect(mergeDefaults(pc, tpl).data[0]).toBe(1); // without a map animations stay the template's
+    });
+
+    it('clamps template joint ids past the converted rig to the root', () => {
+        const pc = cls(1, 'x', 62, [[2, 'Other']], [0]);
+        const tpl = cls(
+            2,
+            'x',
+            62,
+            [
+                [0x1008, 'Body Attachment Channels'],
+                [8, 'Head Channel'],
+            ],
+            [(3 << 16) | 2, 50, 8, 42, 7],
+        );
+        const m = mergeDefaults(pc, tpl, undefined, undefined, true, 32);
+        expect(m.data[1]).toBe(0); // joint 50 does not exist on a 32 joint rig
+        expect(m.data.slice(2, 5)).toEqual([8, 0, 7]);
     });
 
     it('copies channel (joint id) fields only for converted models', () => {

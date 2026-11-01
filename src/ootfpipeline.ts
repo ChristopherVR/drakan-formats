@@ -516,6 +516,26 @@ export async function convertOotfLevels(
                       }
                     : undefined,
             };
+            // Joint count of every skinned template model and of the converted PC models (rig checks in the class merge).
+            const tplJoints = new Map<string, number>();
+            for (const odb of ps2Odbs)
+                for (const c of odb.classes.values()) {
+                    if (!c.model) continue;
+                    const st = containerStem(odb.file.replace(/\.ODB$/i, ''), c.model.db);
+                    const rec = st ? modOf(st)?.find(0x0208, c.model.id) : undefined;
+                    if (!st || !rec) continue;
+                    const k = `${st}#${c.model.id}`;
+                    if (!tplJoints.has(k)) tplJoints.set(k, parseSkeleton(await modOf(st)!.readRaw(rec), 'ps2').joints.length);
+                }
+            planOpts.templateJoints = (c, file) => {
+                const st = c.model ? containerStem(file.replace(/\.ODB$/i, ''), c.model.db) : null;
+                return st && c.model ? tplJoints.get(`${st}#${c.model.id}`) : undefined;
+            };
+            planOpts.modelJoints = (cls) => {
+                const ow = ownerOf.get(cls);
+                const id = ow && cls.model ? builder.mapModelRef(cls.model.db, cls.model.id, ow) : null;
+                return id === null ? undefined : builder.report.creatures.find((c) => c.id === id)?.joints;
+            };
             let result = planClassMapping(input, ps2Odbs, planOpts);
             if (crossWant.length) {
                 // Models of classes cloned from template ODBs go into that ODB's own MOD / TXD: convert them, then plan again.
@@ -991,9 +1011,12 @@ export async function convertOotfLevels(
         if (dbgEnv['DRAKAN_DBG_CLSINFO']) {
             // Test aid: how the classes whose name matches the regex were mapped (template, model, fields kept).
             const re = new RegExp(dbgEnv['DRAKAN_DBG_CLSINFO'], 'i');
-            for (const s of plan?.synthesized ?? [])
-                if (re.test(s.name))
-                    console.warn(`CLSINFO ${s.name} -> ${s.file}#${s.classId} rfl=${s.rfl} template="${s.template.name}"#${s.template.classId} model=${JSON.stringify(s.cls.model)} cov=${s.coverage.toFixed(2)} data=${s.cls.data?.join(',')}`);
+            for (const s of plan?.synthesized ?? []) {
+                if (!re.test(s.name)) continue;
+                console.warn(`CLSINFO ${s.name} -> ${s.file}#${s.classId} rfl=${s.rfl} template="${s.template.name}"#${s.template.classId} model=${JSON.stringify(s.cls.model)} cov=${s.coverage.toFixed(2)} data=${s.cls.data?.join(',')}`);
+                if (dbgEnv['DRAKAN_DBG_CLSFIELDS'])
+                    (s.cls.fields ?? []).forEach((f, i) => console.warn(`  F ${i} ${f.name} t=${f.type} v=${s.cls.data?.[i]}`));
+            }
         }
         if (dbgEnv['DRAKAN_DBG_LISTCLS']) {
             // Test aid: histogram of the placed objects' class names (after the other filters), to compare passing and failing splits.

@@ -240,6 +240,9 @@ export interface PlanOptions {
      */
     modelSkinned?: (cls: OdbClass) => boolean;
     templateSkinned?: (cls: OdbClass, odbFile: string) => boolean;
+    /** Joint count of a PS2 class's skeleton model / of a PC class's converted skinned model (undefined: not skinned). */
+    templateJoints?: (cls: OdbClass, odbFile: string) => number | undefined;
+    modelJoints?: (cls: OdbClass) => number | undefined;
     /** The 64 byte 0x0208 bounds block of a converted skinned model (new id); the class record caches a copy of it (body 16..80). */
     modelBounds?: (modelId: number) => Uint8Array | undefined;
 }
@@ -335,6 +338,17 @@ function isValueField(type: number): boolean {
 const sameType = (a: number, b: number): boolean =>
     fieldBase(a) === fieldBase(b) && fieldIsArray(a) === fieldIsArray(b);
 
+/** A converted clip id of the PC class to stand in for template clips that do not fit the converted rig: Base Idle, else the lowest. */
+function animFallback(
+    pf: readonly { name: string; type: number }[],
+    data: readonly number[],
+    animMap: ReadonlyMap<number, number>,
+): number | undefined {
+    const idle = pf.findIndex((f) => f.name === 'Base Idle' && fieldBase(f.type) === FIELD_ANIMATION && !fieldIsArray(f.type));
+    const own = idle >= 0 ? animMap.get((data[idle] ?? 0) & 0xffff) : undefined;
+    return own ?? [...animMap.values()].sort((a, b) => a - b)[0];
+}
+
 interface Merge {
     data: number[];
     copied: string[];
@@ -353,6 +367,7 @@ export function mergeDefaults(
     mapClassRef?: PlanOptions['mapClassRef'],
     animMap?: ReadonlyMap<number, number>,
     copyChannels = false,
+    rigJoints?: number,
 ): Merge {
     const pf = pc.fields ?? [];
     const tf = tpl.fields ?? [];
@@ -364,6 +379,9 @@ export function mergeDefaults(
     let valueFields = 0;
     let found = 0;
     let same = 0;
+    // Template fields that the PC class did not supply still name the TEMPLATE rig's clips and joints.
+    const convertedAnim = new Set<number>();
+    const copiedChan = new Set<number>();
     pf.forEach((f, i) => {
         const isClassRef = fieldBase(f.type) === 3 && !fieldIsArray(f.type);
         const value = isValueField(f.type);
@@ -395,6 +413,7 @@ export function mergeDefaults(
                 out[j] = ((words.length << 16) | out.length) >>> 0;
                 out.push(...words);
             } else out[j] = dword;
+            copiedChan.add(j);
             copied.push(f.name);
             return;
         }
@@ -418,6 +437,7 @@ export function mergeDefaults(
                 }
                 out[j] = n;
             }
+            convertedAnim.add(j);
             copied.push(f.name);
             return;
         }
@@ -436,6 +456,38 @@ export function mergeDefaults(
         }
         copied.push(f.name);
     });
+    if (copyChannels && rigJoints !== undefined)
+        // Channel fields the PC class lacks keep the template's joint ids, which index the TEMPLATE's rig (Savage Leader's body
+        // attachments name joints 42, 44 and 50 of a 55 joint rig). Past the converted rig's joint count they index outside the
+        // creature's per-joint arrays and corrupt the heap (Volcanic hang at 0x4ac960, Rift Crystal wild jump): clamp to the root.
+        tf.forEach((t, j) => {
+            if (fieldBase(t.type) !== FIELD_CHANNEL || copiedChan.has(j)) return;
+            const v = out[j] ?? 0;
+            if (fieldIsIndirect(t.type)) {
+                const n = v >>> 16;
+                const off = v & 0xffff;
+                for (let k = 0; k < n; k++) if ((out[off + k] ?? 0) >= rigJoints) out[off + k] = 0;
+            } else if (v >= rigJoints) out[j] = 0;
+        });
+    const foreignAnim = animMap
+        ? tf.map((_, j) => j).filter((j) => fieldBase(tf[j]!.type) === FIELD_ANIMATION && !convertedAnim.has(j))
+        : [];
+    if (animMap && foreignAnim.length) {
+        // A clip is played on the model's skeleton by joint index: a clip with another track count than the converted rig has
+        // (every clip the template names, 5100..5313 in Volcanic's Ebon Knight) does not fit it. Every such field gets a
+        // converted clip of the PC class instead (its base idle, else any converted clip), which has the rig's track count.
+        const fallback = animFallback(pf, pc.data ?? [], animMap);
+        if (fallback !== undefined)
+            for (const j of foreignAnim) {
+                const v = out[j] ?? 0;
+                if (fieldIsIndirect(tf[j]!.type)) {
+                    const n = v >>> 16;
+                    if (n === 0) continue;
+                    out[j] = ((n << 16) | out.length) >>> 0;
+                    for (let k = 0; k < n; k++) out.push(fallback);
+                } else if ((v & 0xffff) !== 0) out[j] = fallback;
+            }
+    }
     return { data: out, copied, skipped, coverage: valueFields === 0 ? 1 : found / valueFields, same };
 }
 
@@ -650,8 +702,18 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
         // Two new records cloned from the same template broke the ODB load in game (ootf-ingame.md bisect, K=3 vs K=2), so a
         // template is reused only when no other candidate of that engine class is left.
         const fresh = pool.filter((c) => !usedTemplates.has(`${c.odb.file}|${c.id}`));
+        if ((globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['DRAKAN_DBG_TPLRIG']) {
+            // Test aid: rig size of the converted model against each candidate template (flags = body u32 at 6).
+            const mj = opt.modelJoints?.(cls);
+            if (mj !== undefined)
+                for (const c of pool) {
+                    const raw = c.odb.raw?.(c.id);
+                    const fl = raw ? view(splitClassRecord(raw).body).getUint32(6, true) : -1;
+                    console.warn(`TPLRIG ${cls.name} (${mj} joints) cand "${c.cls.name}"#${c.id} joints=${opt.templateJoints?.(c.cls, c.odb.file)} flags=${fl}`);
+                }
+        }
         for (const c of fresh.length ? fresh : pool) {
-            const m = mergeDefaults(cls, c.cls, opt.mapClassRef, opt.mapAnimFor?.(cls), wantsModel);
+            const m = mergeDefaults(cls, c.cls, opt.mapClassRef, opt.mapAnimFor?.(cls), wantsModel, opt.modelJoints?.(cls));
             if (!best || m.coverage > best.m.coverage || (m.coverage === best.m.coverage && m.same > best.m.same))
                 best = { c, m };
         }
