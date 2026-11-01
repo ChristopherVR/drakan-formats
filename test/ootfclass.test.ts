@@ -48,7 +48,7 @@ const timerFields: [number, string][] = [
 ];
 const ps2Timer = cls(10, 'Timer', 62, timerFields, [f32(1), 1, 0, (3 << 16) | 4, ...stringToWords('abc')]);
 
-function odb(): Ps2OdbIn {
+function odb(): Ps2OdbIn & { classes: Map<number, OdbClass> } {
     const classes = new Map<number, OdbClass>([
         [10, ps2Timer],
         [900, cls(900, 'Other', 99, [], [])],
