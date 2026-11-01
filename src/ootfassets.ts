@@ -318,7 +318,9 @@ export class OotfAssetBuilder {
                 animIds: anims.ids,
             };
             const ps2sk = remapSkeletonVertices(base, dl.layout.source, dl.model.polygons.length);
-            out = dl.model;
+            // PS2 character models carry shading 0x20002, a distance of 35000 and a second word of 1 (troll 4418, Scavenger 5055);
+            // the PC conversion wrote shading 2 / no distance. Matching the disc did NOT make creature classes draw the body (see the journal).
+            out = { ...dl.model, shading: dl.model.shading | 0x20000, distance: dl.model.distance ?? 35000, reserved: 1 };
             records = [
                 ...writePs2ModelRecords(out).filter((r) => r.type !== MOD_BOUNDS),
                 { type: MOD_CHARACTER, data: writePs2Skeleton(ps2sk, skin.positions, Infinity) },
