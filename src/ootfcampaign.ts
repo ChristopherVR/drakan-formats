@@ -17,7 +17,7 @@ import { cp1252Byte } from './xdb.ts';
 import { encodeXdbString } from './xdbwrite.ts';
 import { decodeFieldValue, fieldBase, fieldIsArray, fieldIsIndirect, FIELD_STRING, type ClassFieldDef } from './fields.ts';
 import { mangleComponent } from './levellist.ts';
-import { FLAG_SCALED, addObject, type LvlObject, type LvlObjectList, type LvlParam, type Vec3 } from './lvl.ts';
+import { FLAG_SCALED, FLAG_VISIBLE, addObject, type LvlObject, type LvlObjectList, type LvlParam, type Vec3 } from './lvl.ts';
 import type { PcLevel } from './pc.ts';
 import { terrainGroundBelow } from './terrain.ts';
 import { pcDependencyKey, pcLevelName, resolvePcPath } from './pc.ts';
@@ -615,9 +615,13 @@ export function applyCampaignExits(list: LvlObjectList, level: CampaignLevel, pl
                 pos: [exitObj.pos[0], cy, exitObj.pos[2]],
                 rot: [0, 0, 0],
             });
-            det.flags |= FLAG_SCALED;
+            // `addObject` copies the body of the first object of the class in the list: in levels that have converted PC detectors
+            // that carried their parameters over (Trigger Message 0, Detect Only Once, Task ...) and the exit never got its message.
+            det.flags = FLAG_VISIBLE | FLAG_SCALED;
+            det.initialEvents = 1;
+            det.radius = null;
             det.scale = size;
-            if (ctx.detectorParams?.length) setScalarParams(det, ctx.detectorParams);
+            setScalarParams(det, ctx.detectorParams ?? []);
             det.links = [exitObj.id];
             res.detectors++;
             if (ctx.mountDetector) {
@@ -627,7 +631,9 @@ export function applyCampaignExits(list: LvlObjectList, level: CampaignLevel, pl
                     pos: [exitObj.pos[0], cy, exitObj.pos[2]],
                     rot: [0, 0, 0],
                 });
-                md.flags |= FLAG_SCALED;
+                md.flags = FLAG_VISIBLE | FLAG_SCALED;
+                md.initialEvents = 1;
+                md.radius = null;
                 md.scale = [...size];
                 setScalarParams(md, [{ ...ctx.mountDetector, value: 1 }]);
                 md.links = [exitObj.id];

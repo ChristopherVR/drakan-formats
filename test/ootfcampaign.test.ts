@@ -225,7 +225,12 @@ describe('applyCampaignExits', () => {
         const plan = planCampaign(fixture());
         const village = plan.levels.find((l) => l.path.endsWith('Ruined Village.lvl'))!;
         // object 10 is the converted PC exit but of a class that is no exit on PS2 (a synthesized clone)
-        const list: LvlObjectList = { objects: [obj(1, 1), obj(10, 5)], warnings: [] };
+        // an existing detector of the class carries parameters that must not leak into the exit detectors
+        const stray = obj(2, 3050, {
+            params: [{ fieldIndex: 9, type: 7, name: 'Trigger Message', nameRaw: new Uint8Array(16) }],
+            data: [0],
+        });
+        const list: LvlObjectList = { objects: [obj(1, 1), stray, obj(10, 5)], warnings: [] };
         const r = applyCampaignExits(list, village, plan, {
             ...ctxFor(() => false),
             detectorClass: { dbIndex: 2, classId: 3050 },
@@ -237,7 +242,8 @@ describe('applyCampaignExits', () => {
         expect(ten.classId).toBe(966);
         expect(list.objects.filter((x) => x.classId === 966 && x.dbIndex === 8)).toHaveLength(3); // 10, the exit whose class was dropped, the arrival marker
         // every real (pc) exit has a detector that links to it; the arrival marker has none
-        const dets = list.objects.filter((x) => x.classId === 3050);
+        const dets = list.objects.filter((x) => x.classId === 3050 && x.id !== 2);
+        expect(dets.every((d) => d.params.every((p) => p.name === 'Detect Which?'))).toBe(true);
         expect(dets).toHaveLength(r.detectors);
         expect(dets.length).toBeGreaterThanOrEqual(1);
         for (const d of dets) {
