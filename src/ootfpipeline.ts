@@ -48,6 +48,7 @@ import { TextPlan, isTextField, parseRrcStrings, rewriteClassTextDefaults, rewri
 import { writePs2Srsc, type Ps2Entry } from './ootfcontainer.ts';
 import {
     PS2_SUBSTITUTES,
+    aliasSquash,
     buildClassEntries,
     levelPropertiesParams,
     planClassMapping,
@@ -380,7 +381,7 @@ export async function convertOotfLevels(
                     const m = i.cls.model;
                     const newId = ow && m ? builder.mapModelRef(m.db, m.id, ow) : null;
                     if (!ow || !m || newId === null || !builder.report.creatures.some((c) => c.id === newId)) continue;
-                    const hit = byName.get(norm(i.cls));
+                    const hit = byName.get(norm(i.cls)) ?? byName.get(`${i.cls.rflClass}|${aliasSquash(i.cls.name)}`);
                     if (!hit?.cls.model) continue;
                     const mStem = containerStem(hit.odb.file.replace(/\.ODB$/i, ''), hit.cls.model.db);
                     const rec = mStem ? modOf(mStem)?.find(0x0208, hit.cls.model.id) : undefined;

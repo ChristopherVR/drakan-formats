@@ -288,6 +288,30 @@ export interface ClassPlan {
 }
 
 const squash = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
+
+/**
+ * PC creature classes whose PS2 counterpart has another name (squashed PC name -> squashed PS2 name). Same creature, same rig:
+ * the PS2 calls the PC trolls LeatherWartock / ChainTock / PlateTock and the PC orcs by colour. Used as a fallback after the
+ * same-name lookup, so `keepOwnModel` / retarget see the PS2 class and its rig. Goblins have no PS2 class (engine id 88).
+ */
+export const PC_CLASS_ALIASES: ReadonlyMap<string, string> = new Map(
+    (
+        [
+            ['Troll Leather', 'LeatherWartock : Center'],
+            ['Troll Leather defense side atta', 'LeatherWartock : Flank'],
+            ['Troll Chain', 'ChainTock : Center'],
+            ['Troll Chain defense side attack', 'ChainTock : Flank'],
+            ['Troll Plate', 'PlateTock : Center'],
+            ['Troll Plate defense side attack', 'PlateTock : Flank'],
+            ['Orc Leather (purple)', 'Purple Orc Center'],
+            ['Orc Plate (yellow)', 'Yellow Orc : Center'],
+            ['War Giant', 'Primitive Giant'],
+            ['starving wargiant', 'Primitive Giant'],
+        ] as const
+    ).map(([pc, ps2]) => [squash(pc), squash(ps2)] as const),
+);
+/** The squashed PS2 name the PC class `name` is an alias of, or its own squashed name. */
+export const aliasSquash = (name: string): string => PC_CLASS_ALIASES.get(squash(name)) ?? squash(name);
 export const pcClassKey = (db: number, id: number): string => `${db}:${id}`;
 
 /** Field types whose PC value is meaningful on PS2 (plain values). Everything else is a resource id of the PC data. */
@@ -526,9 +550,11 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
         }
         // 1. same name and same engine class (unless the caller wants the PC model converted instead: `keepOwnModel`)
         const loose = squash(cls.name);
-        const named = opt.keepOwnModel?.(cls) ? undefined : cands
-            .filter((c) => squash(c.cls.name) === loose)
-            .sort((a, b) => a.odb.dbIndex - b.odb.dbIndex || a.id - b.id)[0];
+        const pickNamed = (want: string): Cand | undefined =>
+            cands
+                .filter((c) => squash(c.cls.name) === want)
+                .sort((a, b) => a.odb.dbIndex - b.odb.dbIndex || a.id - b.id)[0];
+        const named = opt.keepOwnModel?.(cls) ? undefined : (pickNamed(loose) ?? pickNamed(aliasSquash(cls.name)));
         if (named) {
             mapped.set(key, { dbIndex: named.odb.dbIndex, classId: named.id, cls: named.cls });
             continue;
