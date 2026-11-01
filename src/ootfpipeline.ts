@@ -850,6 +850,14 @@ export async function convertOotfLevels(
             for (const o of parts.objects.objects) h.set(dbgName(o), (h.get(dbgName(o)) ?? 0) + 1);
             console.warn(`objects: ${[...h].map(([k, v]) => `${k}x${v}`).join(', ')}`);
         }
+        if (dbgEnv['DRAKAN_DBG_CLSINFO']) {
+            // Test aid: how the classes whose name matches the regex were mapped (template, model, fields kept).
+            console.warn(`CLSINFO plan=${!!plan} synth=${plan?.synthesized.length}`);
+            const re = new RegExp(dbgEnv['DRAKAN_DBG_CLSINFO'], 'i');
+            for (const s of plan?.synthesized ?? [])
+                if (re.test(s.name))
+                    console.warn(`CLSINFO ${s.name} -> ${s.file}#${s.classId} rfl=${s.rfl} template="${s.template.name}"#${s.template.classId} model=${JSON.stringify(s.cls.model)} cov=${s.coverage.toFixed(2)} data=${s.cls.data?.join(',')}`);
+        }
         if (dbgEnv['DRAKAN_DBG_LISTCLS']) {
             // Test aid: histogram of the placed objects' class names (after the other filters), to compare passing and failing splits.
             const h = new Map<string, number>();
@@ -862,12 +870,14 @@ export async function convertOotfLevels(
             const rflOf = (o: LvlObject): number => classes.get(o.dbIndex)?.get(o.classId)?.rflClass ?? -1;
             const start = parts.objects.objects.find((o) => rflOf(o) === 9);
             let n = 0;
+            // DRAKAN_DBG_PULLDIST=<d>,<dy>: ring distance (default 1200) and height offset (default 0) of the pulled objects.
+            const [pd, pdy] = (dbgEnv['DRAKAN_DBG_PULLDIST'] ?? '1200,0').split(',').map(Number);
             if (start)
                 parts.objects = {
                     ...parts.objects,
                     objects: parts.objects.objects.map((o) =>
-                        n < 4 && re.test(dbgName(o)) && (console.warn(`pull ${dbgName(o)} obj ${o.id} from ${o.pos.map(Math.round)}`), true)
-                            ? { ...o, pos: [start.pos[0] + [1200, -1200, 0, 0][n]!, start.pos[1], start.pos[2] + [0, 0, 1200, -1200][n++]!] as typeof o.pos }
+                        n < 4 && re.test(dbgName(o)) && (console.warn(`pull ${dbgName(o)} obj ${o.id} from ${o.pos.map(Math.round)}${dbgEnv['DRAKAN_DBG_PULLP'] ? ' ' + o.params.map((p, i) => `${p.name}=${o.data[i]}`).join(' ') : ''}`), true)
+                            ? { ...o, pos: [start.pos[0] + [pd!, -pd!, 0, 0][n]!, start.pos[1] + (pdy ?? 0), start.pos[2] + [0, 0, pd!, -pd!][n++]!] as typeof o.pos }
                             : o,
                     ),
                 };

@@ -565,6 +565,18 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
             );
             if (sk.length) pool.splice(0, pool.length, ...sk);
         }
+        if (wantsModel && pool.length > 1) {
+            // A template whose model-flags word (body u32 at 6) is not one of the common values 0, 1, 33 (only 8 of the 1344
+            // RESOURES classes: 3 and 32, e.g. BloodVialBlood and "Nichol's Tome Stomp") makes the engine build a per-object
+            // controller the cloned record cannot feed: Alwarren objects of such clones crashed on a null vtable at 0x10822c.
+            const plain = pool.filter((c) => {
+                const raw = c.odb.raw?.(c.id);
+                if (!raw) return true;
+                const body = splitClassRecord(raw).body;
+                return body.length < 10 || [0, 1, 33].includes(view(body).getUint32(6, true));
+            });
+            if (plain.length) pool.splice(0, pool.length, ...plain);
+        }
         if (!pool.length) {
             unsupported.set(key, { reason: 'no-raw-record', detail: `no PS2 class of engine class ${rfl} carries a model` });
             continue;
