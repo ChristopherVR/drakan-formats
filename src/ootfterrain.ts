@@ -304,3 +304,37 @@ export function ps2CellFlags(L: TerrainLayer, mask = cellBitsMask()): Uint16Arra
 function cellBitsMask(): number {
     return (env('DRAKAN_TERRAIN_CELLBITS') ?? 0x0d) & 0xff;
 }
+
+/** Total `visible` entries over all layers of the largest disc level (LEVEL1NA: 483 layers, 41362 entries, longest list 221). */
+export const MAX_VISIBLE_ENTRIES = 40000;
+
+/**
+ * Cap the layers' `visible` lists so that their total stays within `budget`. Volcano (941 layers, 67105 entries) crashed in game
+ * (corrupted objects, wild JALR at a kill-list flush) at every cap tried above the disc maximum and passed with 60 per list, so
+ * the engine evidently sizes something by the total. Every list keeps its nearest layers (by origin), the longest lists are cut
+ * first: the smallest per-list cap `n` with sum(min(len, n)) <= budget is used. Levels under the budget come back unchanged.
+ */
+export function limitVisibleEntries(layers: readonly TerrainLayer[], budget = MAX_VISIBLE_ENTRIES): TerrainLayer[] {
+    const total = layers.reduce((a, L) => a + L.visible.length, 0);
+    if (total <= budget) return [...layers];
+    let lo = 0;
+    let hi = Math.max(...layers.map((L) => L.visible.length));
+    while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (layers.reduce((a, L) => a + Math.min(L.visible.length, mid), 0) <= budget) lo = mid;
+        else hi = mid - 1;
+    }
+    const byIndex = new Map(layers.map((L) => [L.index, L]));
+    return layers.map((L) =>
+        L.visible.length <= lo
+            ? L
+            : {
+                  ...L,
+                  visible: L.visible
+                      .map((v) => ({ v, d: Math.hypot((byIndex.get(v)?.originX ?? 0) - L.originX, (byIndex.get(v)?.originZ ?? 0) - L.originZ) }))
+                      .sort((x, y) => x.d - y.d)
+                      .slice(0, lo)
+                      .map((x) => x.v),
+              },
+    );
+}

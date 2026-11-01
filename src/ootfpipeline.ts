@@ -27,6 +27,7 @@ import { convertPcSequences, ssdPackFiles, usedIdsOf } from './ootfseq.ts';
 import { SrscReader } from './srsc.ts';
 import {
     TERRAIN_TXD_PATH,
+    limitVisibleEntries,
     ps2CellFlags,
     TerrainTextureBuilder,
     convertTerrainTextures,
@@ -807,6 +808,7 @@ export async function convertOotfLevels(
             await stage(`texts ${pc.path}`, async () => void rewriteObjectTexts(lvl.objects, textPlan, xdbOf));
         if (opt.terrainShading !== false)
             parts.terrain = parts.terrain.map((L) => ({ ...L, cellFlags: ps2CellFlags(L) }));
+        parts.terrain = limitVisibleEntries(parts.terrain);
         const dbgEnv = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {};
         if (dbgEnv['DRAKAN_DBG_MAXLAYERS']) parts.terrain = parts.terrain.slice(0, Number(dbgEnv['DRAKAN_DBG_MAXLAYERS']));
         const dbgName = (o: LvlObject): string =>
@@ -845,6 +847,21 @@ export async function convertOotfLevels(
                     return sn ? i % sn === sk : true;
                 }),
             };
+        }
+        if (dbgEnv['DRAKAN_DBG_MAXNAME']) {
+            // Test aid: DRAKAN_DBG_MAXNAME=<regex>=<n> keeps only the first n objects whose class name matches.
+            const cut = dbgEnv['DRAKAN_DBG_MAXNAME'].lastIndexOf('=');
+            const re = new RegExp(dbgEnv['DRAKAN_DBG_MAXNAME'].slice(0, cut), 'i');
+            const max = Number(dbgEnv['DRAKAN_DBG_MAXNAME'].slice(cut + 1));
+            let seen = 0;
+            parts.objects = { ...parts.objects, objects: parts.objects.objects.filter((o) => !re.test(dbgName(o)) || seen++ < max) };
+        }
+        if (dbgEnv['DRAKAN_DBG_DUMPNAME']) {
+            // Test aid: print every object whose class name matches the regex (id, position, field values by name).
+            const re = new RegExp(dbgEnv['DRAKAN_DBG_DUMPNAME'], 'i');
+            for (const o of parts.objects.objects)
+                if (re.test(dbgName(o)))
+                    console.warn(`DUMP ${o.id} ${dbgName(o)} pos=${o.pos.map(Math.round)} ${o.params.map((p, i) => `${p.name}=${o.data[i]}`).join(' ')}`);
         }
         if (dbgEnv['DRAKAN_DBG_LIST']) {
             const h = new Map<string, number>();
