@@ -277,6 +277,8 @@ export interface Ps2TextureOptions {
      * (default 0 = keep the source size). The disc's ground is 128 px (62 % of the cells) where Order of the Flame's is 64 px.
      */
     minSize?: number;
+    /** Write a square texture (the larger edge both ways): every one of the 154 disc creature textures is square. */
+    square?: boolean;
     /** Animation fps byte (disc: 10). */
     fps?: number;
     /** u32 at header +40 (disc: a per-container counter, 0 in splat textures; meaning unknown). */
@@ -326,8 +328,9 @@ export function encodePs2Texture(src: RgbaImage, opt: Ps2TextureOptions = {}): P
     let opaque = true;
     for (let i = 3; i < src.rgba.length && opaque; i += 4) if (src.rgba[i] !== 255) opaque = false;
     const grow = (n: number): number => Math.min(maxSize, opaque ? Math.max(pow2Ceil(n), minSize) : pow2Ceil(n));
-    const w = grow(src.width);
-    const h = grow(src.height);
+    let w = grow(src.width);
+    let h = grow(src.height);
+    if (opt.square) w = h = Math.max(w, h);
     const enlarged = opaque && w >= src.width && h >= src.height && (w > src.width || h > src.height);
     const img = enlarged ? resampleSmooth(src, w, h) : resampleNearest(src, w, h);
     const px = w * h;

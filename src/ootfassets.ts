@@ -162,6 +162,7 @@ export class OotfAssetBuilder {
     /** Convert PC texture `id` of `<container>.txd` (and the frames that follow it). Returns the new PS2 id or null. */
     async addTexture(container: string, id: number, indexed = false): Promise<number | null> {
         // Textures of skinned models are written 8 bpp (`indexed`): see the journal, 32 bpp textures do not draw on creature classes.
+        // They are also written square: a non-square texture (Scavenger 256x128) makes the creature body vanish (shadow only); the disc's are all square.
         const sfx = indexed ? ':i' : '';
         const key = `${lower(container)}#${id}${sfx}`;
         const known = this.texIds.get(key);
@@ -195,7 +196,7 @@ export class OotfAssetBuilder {
             const t = encodePs2Texture(f.image, {
                 fps: f.info.fps || 10,
                 ...this.options.texture,
-                ...(indexed ? { mode: 'indexed' as const } : {}),
+                ...(indexed ? { mode: 'indexed' as const, square: true } : {}),
             });
             if (i > 0) t.body[37] = t.body[37]! | PC_TEX_NEXT_FRAME;
             const nid = base + i;

@@ -117,6 +117,13 @@ describe('PS2 texture encode', () => {
         expect(encodePs2Texture(cut, { minSize: 16 }).width).toBe(8);
     });
 
+    it('square makes a non-square texture square (creature bodies vanish with 256x128 textures)', () => {
+        const src = img(16, 8, (x) => [x * 10, 20, 30, x < 3 ? 0 : 255]);
+        expect([encodePs2Texture(src).width, encodePs2Texture(src).height]).toEqual([16, 8]);
+        const t = encodePs2Texture(src, { square: true });
+        expect([t.width, t.height]).toEqual([16, 16]);
+    });
+
     it('writes few-colour images as 8 bpp the PS2 decoder reads back exactly', () => {
         const src = img(16, 8, (x) => (x < 8 ? [200, 10, 10, 255] : [0, 90, 255, 255]));
         const t = encodePs2Texture(src);
