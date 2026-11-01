@@ -954,6 +954,15 @@ export async function convertOotfLevels(
                     exitFieldOf: exitField,
                     ...(detectorClass ? { detectorClass: { dbIndex: detectorClass.t.dbIndex, classId: detectorClass.t.classId } } : {}),
                     groundAt: (x, z, y) => terrainGroundBelow(pc.terrain, x, z, y),
+                    ...(detectorClass && dbgEnv0['OOTF_DETECT_WHICH'] !== undefined
+                        ? {
+                              // Test aid: Detect Which? of the exit detectors (0 Rynn on ground, 1 on mount, 2 both = class default).
+                              detectorParams: detectorClass.cls
+                                  .fields!.map((f, i) => ({ fieldIndex: i, type: f.type, name: f.name }))
+                                  .filter((f) => /^detect which\?$/i.test(f.name.trim()))
+                                  .map((f) => ({ ...f, value: Number(dbgEnv0['OOTF_DETECT_WHICH']) })),
+                          }
+                        : {}),
                     ...(timerClass
                         ? { timerClass: { dbIndex: timerClass.t.dbIndex, classId: timerClass.t.classId, fields: timerClass.cls.fields! } }
                         : {}),
@@ -995,8 +1004,9 @@ export async function convertOotfLevels(
                         `LINKS ${dbgName(o)}#${o.id} at ${o.pos.map(Math.round)} -> [${o.links.map(nm).join(', ')}] <- [${objs.filter((x) => x.links.includes(o.id)).map((x) => nm(x.id)).join(', ')}]`,
                     );
         }
-        // DRAKAN_DBG_PULLIDS=<id,id,...> restricts DRAKAN_DBG_PULL to those object ids (and lifts the 4 object limit to 8).
-        const pullIds = dbgEnv['DRAKAN_DBG_PULLIDS'] ? new Set(dbgEnv['DRAKAN_DBG_PULLIDS'].split(',').map(Number)) : null;
+        // DRAKAN_DBG_PULLIDS=<id,id,...> restricts DRAKAN_DBG_PULL to those object ids (limit 8), the i-th id goes to ring slot i (+x, -x, +z, -z).
+        const pullArr = dbgEnv['DRAKAN_DBG_PULLIDS'] ? dbgEnv['DRAKAN_DBG_PULLIDS'].split(',').map(Number) : null;
+        const pullIds = pullArr ? new Set(pullArr) : null;
         const pullIdOk = (o: LvlObject): boolean => !pullIds || pullIds.has(o.id);
         if (dbgEnv['DRAKAN_DBG_NOOBJ']) {
             const keep = (o: LvlObject): boolean =>
@@ -1079,24 +1089,33 @@ export async function convertOotfLevels(
             const rflOf = (o: LvlObject): number => classes.get(o.dbIndex)?.get(o.classId)?.rflClass ?? -1;
             const start = parts.objects.objects.find((o) => rflOf(o) === 9);
             let n = 0;
+            const slotOf = (o: LvlObject): number => (pullArr ? pullArr.indexOf(o.id) : n - 1);
             // DRAKAN_DBG_PULLDIST=<d>,<dy>: ring distance (default 1200) and height offset (default 0) of the pulled objects.
             const [pd, pdy] = (dbgEnv['DRAKAN_DBG_PULLDIST'] ?? '1200,0').split(',').map(Number);
             if (start)
                 parts.objects = {
                     ...parts.objects,
                     objects: parts.objects.objects.map((o) =>
-                        n < (pullIds ? 8 : 4) && re.test(dbgName(o)) && pullIdOk(o) && (console.warn(`pull ${dbgName(o)} obj ${o.id} from ${o.pos.map(Math.round)}${dbgEnv['DRAKAN_DBG_PULLP'] ? ` r=${o.radius} flags=${o.flags.toString(16)} links=${o.links} ` + o.params.map((p, i) => `${p.name}=${o.data[i]}`).join(' ') : ''}`), true)
+                        n < (pullIds ? 8 : 4) && re.test(dbgName(o)) && pullIdOk(o) && (n++, console.warn(`pull ${dbgName(o)} obj ${o.id} from ${o.pos.map(Math.round)}${dbgEnv['DRAKAN_DBG_PULLP'] ? ` r=${o.radius} flags=${o.flags.toString(16)} links=${o.links} ` + o.params.map((p, i) => `${p.name}=${o.data[i]}`).join(' ') : ''}`), true)
                             ? {
                                   ...o,
                                   pos: [
-                                      start.pos[0] + [pd!, -pd!, 0, 0][n % 4]! * (1 + (n >> 2) * 0.5),
+                                      start.pos[0] + [pd!, -pd!, 0, 0][slotOf(o) % 4]! * (1 + (slotOf(o) >> 2) * 0.5),
                                       start.pos[1] + (pdy ?? 0),
-                                      start.pos[2] + [0, 0, pd!, -pd!][n++ % 4]! * (1 + ((n - 1) >> 2) * 0.5),
+                                      start.pos[2] + [0, 0, pd!, -pd!][slotOf(o) % 4]! * (1 + (slotOf(o) >> 2) * 0.5),
                                   ] as typeof o.pos,
                               }
                             : o,
                     ),
                 };
+        }
+        if (dbgEnv['DRAKAN_DBG_LINKADD']) {
+            // Test aid: DRAKAN_DBG_LINKADD=<from>><to>,... adds link-target ids (object ids as DRAKAN_DBG_LINKS prints them), e.g. a switch to a door.
+            for (const pair of dbgEnv['DRAKAN_DBG_LINKADD'].split(',')) {
+                const [from, to] = pair.split('>').map(Number);
+                const o = parts.objects.objects.find((x) => x.id === from);
+                if (o && to !== undefined && !o.links.includes(to)) o.links = [...o.links, to];
+            }
         }
         const lf = Number((globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['DRAKAN_TERRAIN_LAYERFLAGS'] ?? 0);
         if (lf) parts.terrain = parts.terrain.map((L) => ({ ...L, flags: L.flags | lf }));
