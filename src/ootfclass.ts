@@ -182,7 +182,7 @@ export const FORCED_SUBSTITUTES: ReadonlySet<number> = new Set([144]);
  * vehicle on the PC) becomes a static Ground Object showing the ship, and a Pressure Plate (29, no PS2 class reachable) a static
  * plate that cannot be pressed.
  */
-export const MODEL_STANDINS: ReadonlySet<number> = new Set([130, 88, 29]);
+export const MODEL_STANDINS: ReadonlySet<number> = new Set([130, 88, 100, 101, 29]);
 
 export const RETARGET_KINDS: ReadonlySet<ClassKind> = new Set(['logic', 'light', 'sound', 'waypoint', 'spawn']);
 
