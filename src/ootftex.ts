@@ -166,6 +166,42 @@ export function resampleNearest(img: RgbaImage, w: number, h: number): RgbaImage
     return { width: w, height: h, rgba: out };
 }
 
+/**
+ * Smooth (Catmull-Rom, wrap-around so tiling ground stays seamless) enlargement to w x h (both at least the source size).
+ * Opaque images only: a cut-out texture keeps its hard alpha edge through `resampleNearest`.
+ */
+export function resampleSmooth(img: RgbaImage, w: number, h: number): RgbaImage {
+    if (w === img.width && h === img.height) return img;
+    const out = new Uint8Array(w * h * 4);
+    const cr = (t: number): number => {
+        const a = Math.abs(t);
+        return a < 1 ? 1.5 * a * a * a - 2.5 * a * a + 1 : a < 2 ? -0.5 * a * a * a + 2.5 * a * a - 4 * a + 2 : 0;
+    };
+    const wrap = (v: number, n: number): number => ((v % n) + n) % n;
+    const wx = new Float64Array(4);
+    const wy = new Float64Array(4);
+    for (let y = 0; y < h; y++) {
+        const fy = ((y + 0.5) * img.height) / h - 0.5;
+        const y0 = Math.floor(fy);
+        for (let k = 0; k < 4; k++) wy[k] = cr(fy - (y0 - 1 + k));
+        for (let x = 0; x < w; x++) {
+            const fx = ((x + 0.5) * img.width) / w - 0.5;
+            const x0 = Math.floor(fx);
+            for (let k = 0; k < 4; k++) wx[k] = cr(fx - (x0 - 1 + k));
+            for (let c = 0; c < 3; c++) {
+                let acc = 0;
+                for (let j = 0; j < 4; j++) {
+                    const row = wrap(y0 - 1 + j, img.height) * img.width;
+                    for (let i = 0; i < 4; i++) acc += wy[j]! * wx[i]! * img.rgba[(row + wrap(x0 - 1 + i, img.width)) * 4 + c]!;
+                }
+                out[(y * w + x) * 4 + c] = Math.max(0, Math.min(255, Math.round(acc)));
+            }
+            out[(y * w + x) * 4 + 3] = 255;
+        }
+    }
+    return { width: w, height: h, rgba: out };
+}
+
 // ------------------------------------------------------------------------------------------------ quantizer
 
 /** Median cut over weighted RGBA colours to at most `n` entries. Returns the palette (RGBA) and a lookup closure. */
@@ -236,6 +272,11 @@ export interface Ps2TextureOptions {
     mode?: TextureMode;
     /** Largest edge written (default 256, the largest size on the disc). */
     maxSize?: number;
+    /**
+     * Smallest edge written for an opaque texture: smaller sources are enlarged with a smooth wrap-around filter
+     * (default 0 = keep the source size). The disc's ground is 128 px (62 % of the cells) where Order of the Flame's is 64 px.
+     */
+    minSize?: number;
     /** Animation fps byte (disc: 10). */
     fps?: number;
     /** u32 at header +40 (disc: a per-container counter, 0 in splat textures; meaning unknown). */
@@ -281,9 +322,16 @@ function header(w: number, h: number, bpp: number, flagsWord: number, alpha: boo
 /** Encode an RGBA image as a PS2 TXD record body. Sizes are rounded up to powers of two (8 .. maxSize). */
 export function encodePs2Texture(src: RgbaImage, opt: Ps2TextureOptions = {}): Ps2Texture {
     const maxSize = opt.maxSize ?? 256;
-    const w = Math.min(maxSize, pow2Ceil(src.width));
-    const h = Math.min(maxSize, pow2Ceil(src.height));
-    const img = resampleNearest(src, w, h);
+    const minSize = Math.min(maxSize, opt.minSize ?? 0);
+    let opaque = true;
+    for (let i = 3; i < src.rgba.length && opaque; i += 4) if (src.rgba[i] !== 255) opaque = false;
+    const grow = (n: number): number => Math.min(maxSize, opaque ? Math.max(pow2Ceil(n), minSize) : pow2Ceil(n));
+    const w = grow(src.width);
+    const h = grow(src.height);
+    const img =
+        opaque && w >= src.width && h >= src.height && (w > src.width || h > src.height)
+            ? resampleSmooth(src, w, h)
+            : resampleNearest(src, w, h);
     const px = w * h;
     const fps = opt.fps ?? 10;
     const colors = new Map<number, number>();

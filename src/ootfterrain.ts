@@ -38,6 +38,8 @@ export interface TerrainTextureOptions {
     texture?: Ps2TextureOptions;
     /** Largest edge written for a terrain texture (default 256 = the largest PC source; 128 halved 54 of the Ruined Village textures). */
     maxSize?: number;
+    /** Smallest edge for an opaque terrain texture (default 128 = the disc ground density; 0 keeps PC sizes). */
+    minSize?: number;
     /** Keep only the N most used textures per level; the rest map to the nearest kept one by mean colour (default no cap). */
     maxTextures?: number;
     /** First id given to a converted texture (default: past the highest id in the base TXD, at least 1000). */
@@ -203,6 +205,7 @@ export class TerrainTextureBuilder {
             const tex = encodePs2Texture(img, {
                 fps: 10,
                 maxSize,
+                minSize: opt.minSize ?? env('DRAKAN_TERRAIN_TEX_MIN') ?? 128,
                 slot: opt.slot ?? env('DRAKAN_TERRAIN_SLOT') ?? TERRAIN_TEXTURE_SLOT,
                 mode: ({ 0: 'indexed', 1: 'auto', 2: 'truecolor' } as const)[env('DRAKAN_TERRAIN_TEX_MODE') ?? 2] ?? 'truecolor',
                 ...opt.texture,

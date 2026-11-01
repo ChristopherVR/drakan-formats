@@ -38,7 +38,7 @@ describe('terrain textures', () => {
     const base = buildPs2Txd([{ id: 3, body: encodePs2Texture({ width: 8, height: 8, rgba: new Uint8Array(256).fill(255) }).body }]);
 
     it('appends converted textures to the target TXD under fresh ids', async () => {
-        const t = await convertTerrainTextures(pc, src, base, 24);
+        const t = await convertTerrainTextures(pc, src, base, 24, { minSize: 0 });
         expect(t.report.converted).toBe(3);
         expect(t.report.skipped.size).toBe(1); // id 99 does not exist
         const r = await SrscReader.fromBytes(t.txd);

@@ -105,6 +105,18 @@ describe('PS2 texture encode', () => {
         return { width: w, height: h, rgba };
     };
 
+    it('enlarges an opaque texture to minSize with a smooth, tileable filter and keeps cut-outs hard', () => {
+        const ramp = img(8, 8, (x) => [x * 30, 100, 50, 255]);
+        const t = encodePs2Texture(ramp, { minSize: 16 });
+        expect([t.width, t.height]).toEqual([16, 16]);
+        const d = decodeTxd(t.body, { upright: false });
+        const mid = d.rgba[(8 * 16 + 5) * 4]!; // between the 3rd and 4th source columns
+        expect(mid).toBeGreaterThan(60);
+        expect(mid).toBeLessThan(90);
+        const cut = img(8, 8, (x) => (x === 0 ? [0, 0, 0, 0] : [1, 2, 3, 255]));
+        expect(encodePs2Texture(cut, { minSize: 16 }).width).toBe(8);
+    });
+
     it('writes few-colour images as 8 bpp the PS2 decoder reads back exactly', () => {
         const src = img(16, 8, (x) => (x < 8 ? [200, 10, 10, 255] : [0, 90, 255, 255]));
         const t = encodePs2Texture(src);
