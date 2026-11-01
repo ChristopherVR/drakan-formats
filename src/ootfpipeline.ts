@@ -1157,7 +1157,11 @@ export async function convertOotfLevels(
             // Test aid: move up to 4 objects whose class name matches the regex next to the player start.
             const re = new RegExp(dbgEnv['DRAKAN_DBG_PULL'], 'i');
             const rflOf = (o: LvlObject): number => classes.get(o.dbIndex)?.get(o.classId)?.rflClass ?? -1;
-            const start = parts.objects.objects.find((o) => rflOf(o) === 9);
+            const found = parts.objects.objects.find((o) => rflOf(o) === 9);
+            // DRAKAN_DBG_PULLAT=x,y,z centres the ring there instead of on the PC start object (the PS2 player can start elsewhere,
+            // e.g. mounted on a dragon: read her position from a world dump).
+            const at = (dbgEnv['DRAKAN_DBG_PULLAT'] ?? '').split(',').map(Number);
+            const start = at.length === 3 && at.every(Number.isFinite) ? ({ pos: [at[0]!, at[1]!, at[2]!] } as { pos: typeof found extends undefined ? never : NonNullable<typeof found>['pos'] }) : found;
             let n = 0;
             const slotOf = (o: LvlObject): number => (pullArr ? pullArr.indexOf(o.id) : n - 1);
             // DRAKAN_DBG_PULLDIST=<d>,<dy>: ring distance (default 1200) and height offset (default 0) of the pulled objects.

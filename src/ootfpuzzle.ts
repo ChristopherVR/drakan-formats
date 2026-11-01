@@ -126,7 +126,11 @@ function platesToDetectors(env: PuzzleEnv, rep: PuzzleReport): void {
         const sc = dst.scale ?? [1, 1, 1];
         // The plate tile is about 4000 units wide; the box covers the tile and the first 2000 units above it.
         const size: Vec3 = [Math.max(2, 2 * sc[0]), 1.5, Math.max(2, 2 * sc[2])];
-        const d = newDetector(env, [dst.pos[0], dst.pos[1] + 1000, dst.pos[2]], size, [
+        // Test aid (`OOTF_TEST_PLATE_AT=x,y,z`): the detector goes there (where the harness player stands) instead of over the plate, so a
+        // run can prove the plate -> mover chain by state without walking to the plate.
+        const at = ((globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_TEST_PLATE_AT'] ?? '').split(',').map(Number);
+        const where: Vec3 = at.length === 3 && at.every(Number.isFinite) ? [at[0]!, at[1]!, at[2]!] : [dst.pos[0], dst.pos[1] + 1000, dst.pos[2]];
+        const d = newDetector(env, where, size, [
             ['Task', 6],
             ['Trigger Message', bottom],
             ['Detect Only Once?', once ? 1 : 0],
@@ -184,6 +188,10 @@ function bossHeads(env: PuzzleEnv, rep: PuzzleReport): void {
         if (Number.isFinite(g)) dst.pos = [dst.pos[0], g + 300, dst.pos[2]];
         dst.flags |= FLAG_SCALED;
         dst.scale = [1.6, 1.6, 1.6];
+        // Test aid (`OOTF_TEST_HEADHP=<hp>`): heads with few hit points, so the harness can kill them with real blows and watch the
+        // engine's own death message reach the counter.
+        const testHp = Number((globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_TEST_HEADHP'] ?? 0);
+        if (testHp > 0) setNamedParam(list, dst, env.classOf(dst)?.fields, 'Initial Health', testHp);
         // Face the middle of the altar (the heads stand around it).
         rep.bossHeads++;
         for (const l of dst.links) counters.add(l);
