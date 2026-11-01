@@ -368,3 +368,31 @@ export function terrainHeightAt(layers: readonly TerrainLayer[], x: number, z: n
     }
     return best;
 }
+
+/**
+ * Ground under a point that hangs at height `y` (a start position): the highest floor-type (0) layer surface that is not above
+ * `y + tolerance`, so multi-layer levels (roofs, upper floors, ceilings) do not pick a surface over the point. When no floor lies
+ * below, the surface closest to `y` (any layer type) wins; NaN when no layer covers (x, z).
+ */
+export function terrainGroundBelow(
+    layers: readonly TerrainLayer[],
+    x: number,
+    z: number,
+    y: number,
+    tolerance = 600,
+): number {
+    let below = NaN;
+    let nearest = NaN;
+    let nearestD = Infinity;
+    for (const L of layers) {
+        const h = layerHeightAt(L, x, z);
+        if (Number.isNaN(h)) continue;
+        if (L.type === 0 && h <= y + tolerance && !(h <= below)) below = h;
+        const d = Math.abs(h - y);
+        if (d < nearestD) {
+            nearestD = d;
+            nearest = h;
+        }
+    }
+    return Number.isNaN(below) ? nearest : below;
+}

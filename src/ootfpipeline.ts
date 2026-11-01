@@ -82,6 +82,9 @@ export const OOTF_COMMON_STEM = 'OOTFCOM';
 const COMMON_DIR = 'files/ENGLISH/COMMON/OOTFCOM';
 const COMMON_DEP = 'Common\\OotFCom\\OotFCom';
 
+/** Engine classes of particle effects: not cloned into template ODBs by default (see `modelFor` in the plan stage). */
+const CROSS_FX_RFL: ReadonlySet<number> = new Set([43, 71, 97]);
+
 export interface OotfPs2Context {
     /** Template level (e.g. LEVEL1NA.LVL): header, dependency table, object list of singletons and every other entry. */
     template: SrscReader;
@@ -116,6 +119,13 @@ export interface OotfPs2Context {
      */
     mods?: ReadonlyMap<string, SrscReader>;
     adbs?: ReadonlyMap<string, SrscReader>;
+    /**
+     * Own MOD / TXD of template ODBs that may host converted models (`LEVEL1ON`, `WORLDCON`, `FX`, `MOUNTAON`), by upper-case stem.
+     * Classes cloned from those ODBs (doors, gates, switches, ladders, ropes, flames: no template with a model in the host ODB) get
+     * their converted model appended to that ODB's own MOD / TXD and name it with `db 0`, as a disc class of that ODB does.
+     * (Naming a RESOURES model through the template ODB's `.DB` index hung the level load.)
+     */
+    hostFiles?: ReadonlyMap<string, { mod: SrscReader; txd: SrscReader }>;
     /** Upper-case names of the XDBs on the disc (`SYSTEM.XDB`). A class in an ODB without one (FX) gets no text ids: its string defaults are blanked. */
     xdbFiles?: ReadonlySet<string>;
 }
@@ -142,7 +152,10 @@ export interface OotfPipelineOptions {
      * of the PC joints (overrides the PS2 clips of the same name), else convert the PC model instead (default true).
      */
     retarget?: boolean;
-    /** Clone classes that need a model (doors, switches ...) from ODBs that list the host ODB when the host has no template (default OFF: it hung the level load in game). */
+    /**
+     * Clone classes that need a model (doors, switches ...) from template ODBs in `OotfPs2Context.hostFiles` when the host ODB has no
+     * template; the converted model goes into that ODB's own MOD / TXD (default on when `hostFiles` is given; env OOTF_XODB=0 turns it off).
+     */
     crossOdb?: boolean;
     /** Generate the 0x0211 display list for every static model, not only trees (default off; env OOTF_DL_ALL=1 turns it on). */
     displayListAll?: boolean;
@@ -384,6 +397,8 @@ export async function convertOotfLevels(
             }
         });
     }
+    /** Static models appended to a template ODB's own MOD / TXD (no skinned models), by ODB stem. */
+    const crossBuilders = new Map<string, OotfAssetBuilder>();
     const sig = (c: OdbClass): string => `${c.name}|${c.rflClass}|${(c.data ?? []).join(',')}`;
     const planKey = new Map<string, { db: number; id: number }>();
     let plan: ClassPlan | null = null;
@@ -438,12 +453,15 @@ export async function convertOotfLevels(
                 res.warnings.push(...retargetNotes);
             }
             const modelFiles = new Set<string>();
+            const crossOn = (opt.crossOdb ?? dbgEnv0['OOTF_XODB'] !== '0') && hostOk;
+            const crossOnly = dbgEnv0['OOTF_XODB_ONLY'] ? dbgEnv0['OOTF_XODB_ONLY'].split(',') : null;
             for (const odb of ps2Odbs) {
                 const st = odb.file.replace(/\.ODB$/i, '');
-                // Cross-ODB static templates (doors, switches, fx) hang the level load in game (ootf-props-audit.md): opt in with crossOdb / OOTF_XODB=1.
-                const cross = (opt.crossOdb ?? dbgEnv0['OOTF_XODB'] === '1') && (!dbgEnv0['OOTF_XODB_ONLY'] || dbgEnv0['OOTF_XODB_ONLY'].split(',').includes(st));
-                if (st !== hostStem && hostDbForStem(st) !== null && (ps2.mods?.has(st) || cross)) modelFiles.add(odb.file);
+                if (st === hostStem) continue;
+                if (crossOn && ps2.hostFiles?.has(st) && (!crossOnly || crossOnly.includes(st))) modelFiles.add(odb.file);
+                else if (hostDbForStem(st) !== null && ps2.mods?.has(st)) modelFiles.add(odb.file);
             }
+            const crossWant: { stem: string; cls: OdbClass }[] = [];
             const planOpts: PlanOptions = {
                 modelOdbFiles: modelFiles,
                 keepOwnModel: (cls) => convertOwn.has(cls),
@@ -477,7 +495,21 @@ export async function convertOotfLevels(
                 modelFor: hostOk
                     ? (cls, file) => {
                           const ow = ownerOf.get(cls);
-                          const db = ow && cls.model ? hostDbForStem(file.replace(/\.ODB$/i, '')) : null;
+                          const fStem = file.replace(/\.ODB$/i, '');
+                          if (fStem !== hostStem && ps2.hostFiles?.has(fStem) && modelFiles.has(file)) {
+                              if (!ow || !cls.model) return null;
+                              // Particle / flame classes (engine 43, 71, 97) cloned into a template ODB hung the level load in game
+                              // (Ruined Village, "Burning Flame (Wide)" from WORLDCON "Part: BaseFire"): opt in with OOTF_XODB_FX=1.
+                              if (CROSS_FX_RFL.has(cls.rflClass ?? -1) && dbgEnv0['OOTF_XODB_FX'] !== '1') return null;
+                              const cb = crossBuilders.get(fStem);
+                              if (!cb) {
+                                  crossWant.push({ stem: fStem, cls });
+                                  return { id: 0, db: 0 }; // first planning pass: the model is converted afterwards
+                              }
+                              const cid = cb.mapModelRef(cls.model.db, cls.model.id, ow);
+                              return cid === null ? null : { id: cid, db: 0 };
+                          }
+                          const db = ow && cls.model ? hostDbForStem(fStem) : null;
                           if (!ow || !cls.model || db === null) return null;
                           const id = builder.mapModelRef(cls.model.db, cls.model.id, ow);
                           return id === null ? null : { id, db };
@@ -485,6 +517,25 @@ export async function convertOotfLevels(
                     : undefined,
             };
             let result = planClassMapping(input, ps2Odbs, planOpts);
+            if (crossWant.length) {
+                // Models of classes cloned from template ODBs go into that ODB's own MOD / TXD: convert them, then plan again.
+                for (const w of crossWant) {
+                    const hf = ps2.hostFiles!.get(w.stem)!;
+                    let cb = crossBuilders.get(w.stem);
+                    if (!cb) {
+                        cb = new OotfAssetBuilder(src, {
+                            firstModelId: maxId(hf.mod, 0x0200) + 1,
+                            firstTextureId: maxId(hf.txd, 0x0040) + 1,
+                            skinned: false,
+                            displayList: /./, // models of template ODBs draw nothing without the strip display list 0x0211
+                        });
+                        crossBuilders.set(w.stem, cb);
+                    }
+                    const ow = ownerOf.get(w.cls);
+                    if (ow && w.cls.model) await cb.addModelRef(ow, w.cls.model.db, w.cls.model.id);
+                }
+                result = planClassMapping(input, ps2Odbs, planOpts);
+            }
             // The engine broke when an ODB grew by about 3 records / 600 bytes of field lists (ootf-ingame.md); `maxNewClasses`
             // keeps the classes used by the most objects and drops the rest, so a level can still be tested.
             if (opt.maxNewClasses !== undefined && result.synthesized.length > opt.maxNewClasses) {
@@ -1030,6 +1081,34 @@ export async function convertOotfLevels(
             for (const e of txd.entries)
                 txdEntries.push({ type: e.type, id: e.id, sub: e.sub, data: await txd.readRaw(e) });
             res.files[`${dir}/${hostStem}.TXD`] = writePs2Srsc([...txdEntries, ...add.textures]);
+        });
+    }
+    if (crossBuilders.size) {
+        await stage('template ODB assets', async () => {
+            for (const [stem, cb] of crossBuilders) {
+                const hf = ps2.hostFiles!.get(stem)!;
+                const dir = ps2.dbFiles?.get(stem)?.dir;
+                const grp = hf.mod.entries.find((e) => e.type === 0x0200)?.sub ?? 1;
+                const add = cb.entries(grp);
+                if (!dir || !add.models.length) continue;
+                const modEntries: Ps2Entry[] = [];
+                for (const e of hf.mod.entries) {
+                    let data = await hf.mod.readRaw(e);
+                    if (e.type === 0x0202 && data.length >= 6) {
+                        data = data.slice();
+                        const dv = new DataView(data.buffer);
+                        dv.setUint16(4, Math.max(add.lastModelId, dv.getUint16(4, true)), true);
+                    }
+                    modEntries.push({ type: e.type, id: e.id, sub: e.sub, data });
+                }
+                res.files[`files/${dir}/${stem}.MOD`] = writePs2Srsc([...modEntries, ...add.models]);
+                const txdEntries: Ps2Entry[] = [];
+                for (const e of hf.txd.entries) txdEntries.push({ type: e.type, id: e.id, sub: e.sub, data: await hf.txd.readRaw(e) });
+                res.files[`files/${dir}/${stem}.TXD`] = writePs2Srsc([...txdEntries, ...add.textures]);
+                res.warnings.push(
+                    `template ODB ${stem}: ${cb.report.models.converted} models, ${cb.report.textures.converted} textures added to its own MOD / TXD`,
+                );
+            }
         });
     }
     if (plan && ps2Odbs.length) {

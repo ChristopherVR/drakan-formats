@@ -39,7 +39,7 @@ import {
     TEX_INVISIBLE,
     parsePs2Terrain,
     ps2TerrainBlockSize,
-    terrainHeightAt,
+    terrainGroundBelow,
     type TerrainLayer,
 } from './terrain.ts';
 
@@ -307,7 +307,7 @@ export function convertPcLevel(pc: PcLevel, opt: ConvertOptions): Ps2LevelParts 
         if (t.cls.name === 'Rynn') {
             // The PC start can hang well above the ground (Relic: 17000 units); the PS2 engine lets Rynn fall and the
             // fall kills her (in-game test), so she starts just over the terrain.
-            const g = terrainHeightAt(pc.terrain, dst.pos[0], dst.pos[2]);
+            const g = terrainGroundBelow(pc.terrain, dst.pos[0], dst.pos[2], dst.pos[1]);
             if (Number.isFinite(g)) dst.pos[1] = g + 400;
         }
         out.push(dst);

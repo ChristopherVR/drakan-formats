@@ -9,6 +9,7 @@ import {
     parsePcTerrain,
     parsePs2Terrain,
     ps2TerrainBlockSize,
+    terrainGroundBelow,
     terrainHeightAt,
 } from '../src/index.ts';
 
@@ -185,5 +186,14 @@ describe('height queries', () => {
         expect(terrainHeightAt(layers, x, z, 1100)).toBeLessThan(2000);
         expect(terrainHeightAt(layers, x, z, 5200)).toBeGreaterThan(4000);
         expect(terrainHeightAt(layers, x, z)).toBeGreaterThan(4000); // highest floor without a hint
+    });
+    it('terrainGroundBelow takes the highest floor not above the start height', () => {
+        const hi: LayerSpec = { ...L1, wh: 5000, tex: [1, 1, 1, 1] };
+        const layers = parsePs2Terrain(ps2File([L1, hi], () => new Array(8).fill(0)));
+        const x = 10.1 * CELL_SIZE;
+        const z = 20.1 * CELL_SIZE;
+        expect(terrainGroundBelow(layers, x, z, 1500)).toBeLessThan(2000); // the roof over the point is ignored
+        expect(terrainGroundBelow(layers, x, z, 9000)).toBeGreaterThan(4000); // start far above: highest floor below it
+        expect(terrainGroundBelow(layers, x, z, 100)).toBeLessThan(2000); // nothing below: nearest surface
     });
 });
