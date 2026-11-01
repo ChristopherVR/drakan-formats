@@ -1103,9 +1103,11 @@ export async function convertOotfLevels(
                 parts.objects = {
                     ...parts.objects,
                     objects: parts.objects.objects.map((o) =>
-                        n < (pullIds ? 8 : 4) && re.test(dbgName(o)) && pullIdOk(o) && (n++, console.warn(`pull ${dbgName(o)} obj ${o.id} from ${o.pos.map(Math.round)}${dbgEnv['DRAKAN_DBG_PULLP'] ? ` r=${o.radius} flags=${o.flags.toString(16)} links=${o.links} ` + o.params.map((p, i) => `${p.name}=${o.data[i]}`).join(' ') : ''}`), true)
+                        n < (pullIds ? 8 : 4) && re.test(dbgName(o)) && pullIdOk(o) && (n++, console.warn(`pull ${dbgName(o)} obj ${o.id} rot=${o.rot.map(Math.round)} from ${o.pos.map(Math.round)}${dbgEnv['DRAKAN_DBG_PULLP'] ? ` r=${o.radius} flags=${o.flags.toString(16)} links=${o.links} ` + o.params.map((p, i) => `${p.name}=${o.data[i]}`).join(' ') : ''}`), true)
                             ? {
                                   ...o,
+                                  // DRAKAN_DBG_PULLROT=<deg> adds degrees to the pulled objects' yaw (rot[1]); a door seen face-on shows its swing.
+                                  rot: [o.rot[0], o.rot[1] + Number(dbgEnv['DRAKAN_DBG_PULLROT'] ?? 0), o.rot[2]] as typeof o.rot,
                                   pos: [
                                       start.pos[0] + [pd!, -pd!, 0, 0][slotOf(o) % 4]! * (1 + (slotOf(o) >> 2) * 0.5),
                                       start.pos[1] + (pdy ?? 0),
