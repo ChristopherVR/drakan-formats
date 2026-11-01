@@ -184,6 +184,11 @@ export const FORCED_SUBSTITUTES: ReadonlySet<number> = new Set([144]);
  */
 export const MODEL_STANDINS: ReadonlySet<number> = new Set([130, 88, 100, 101, 29]);
 
+/** Particle emitter engine classes whose clone keeps the template's emitter model (the PC model is not converted). */
+const FX_OWN_MODEL_RFL: ReadonlySet<number> = new Set(
+    (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_FX_PCMODEL'] === '1' ? [] : [43, 71, 97],
+);
+
 export const RETARGET_KINDS: ReadonlySet<ClassKind> = new Set(['logic', 'light', 'sound', 'waypoint', 'spawn']);
 
 // ---------------------------------------------------------------- inputs
@@ -459,6 +464,13 @@ export function mergeDefaults(
             skipped.push(f.name);
             return;
         }
+        // PC particle classes can carry a life time of 0 (the PS2 emitter then hangs the level load in its spawn loop: rfl 43 / 71 / 97
+        // cloned into a template ODB, ootf-fx-flames.md). Use 0.5 s, the life of the disc's own flame particles (0.1 to 0.8).
+        if (dword === 0 && f.name === 'Particle Life Time' && fieldBase(f.type) === FIELD_FLOAT) {
+            out[j] = 0x3f000000;
+            copied.push(f.name);
+            return;
+        }
         if (fieldIsIndirect(f.type)) {
             const v = decodeFieldValue(f.type, dword, pc.data ?? []);
             const words = typeof v === 'string' ? stringToWords(v) : (v as number[]);
@@ -656,7 +668,11 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
         }
         const kind = info?.kind;
         const modelStandIn = substituted && MODEL_STANDINS.has(rfl);
-        const wantsModel = (!substituted || modelStandIn) && !!kind && !!opt.modelFor && !!cls.model && !RETARGET_KINDS.has(kind);
+        // Particle emitters (43, 71, 97): the PC model is only an emitter box. The clone keeps the template's own emitter model.
+        const ownFxModel =
+            !substituted && FX_OWN_MODEL_RFL.has(rfl) && !!opt.modelFor && !!cls.model && cands.some((c) => !!c.odb.raw?.(c.id));
+        const wantsModel =
+            (!substituted || modelStandIn) && !ownFxModel && !!kind && !!opt.modelFor && !!cls.model && !RETARGET_KINDS.has(kind);
         // A model-less PC class of a mechanism / scenery / fx engine class (Break Brick floor, Fire Fly Axis ...) is cloned from a
         // model-less PS2 class of the same engine id: the clone shows nothing it should not.
         const modelless =
@@ -664,7 +680,7 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
             !cls.model &&
             (kind === 'mechanism' || kind === 'scenery' || kind === 'fx') &&
             cands.some((c) => !c.cls.model && !!c.odb.raw?.(c.id));
-        if (!kind || !(RETARGET_KINDS.has(kind) || substituted || opt.borrowModelKinds?.has(kind) || wantsModel || modelless)) {
+        if (!kind || !(RETARGET_KINDS.has(kind) || substituted || opt.borrowModelKinds?.has(kind) || wantsModel || modelless || ownFxModel)) {
             unsupported.set(key, {
                 reason: 'needs-model',
                 detail: `${info?.name ?? `engine class ${rfl}`} (${kind ?? 'unknown'}) needs a model; none can be taken from the PC data`,
@@ -684,7 +700,9 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
                 : cands.filter((c) => c.cls.model && c.odb.raw?.(c.id) && opt.modelOdbFiles?.has(c.odb.file))
             : modelless
               ? cands.filter((c) => !c.cls.model && !!c.odb.raw?.(c.id))
-              : cands;
+              : ownFxModel
+                ? cands.filter((c) => !!c.odb.raw?.(c.id) && (c.odb.file === opt.modelOdbFile || !!opt.modelOdbFiles?.has(c.odb.file)))
+                : cands;
         if (wantsModel && opt.modelSkinned?.(cls) && opt.templateSkinned) {
             // Skinned templates also come from the ODBs that list the host (their `modelFor` names the host with its `db` there).
             const sk = cands.filter(

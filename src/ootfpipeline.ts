@@ -501,9 +501,9 @@ export async function convertOotfLevels(
                           const fStem = file.replace(/\.ODB$/i, '');
                           if (fStem !== hostStem && ps2.hostFiles?.has(fStem) && modelFiles.has(file)) {
                               if (!ow || !cls.model) return null;
-                              // Particle / flame classes (engine 43, 71, 97) cloned into a template ODB hung the level load in game
-                              // (Ruined Village, "Burning Flame (Wide)" from WORLDCON "Part: BaseFire"): opt in with OOTF_XODB_FX=1.
-                              if (CROSS_FX_RFL.has(cls.rflClass ?? -1) && dbgEnv0['OOTF_XODB_FX'] !== '1') return null;
+                              // Particle / flame classes (engine 43, 71, 97) hung the level load while their "Particle Life Time" was 0
+                              // (`mergeDefaults` now sets 0.5 s); OOTF_XODB_FX=0 keeps them out of template ODBs again.
+                              if (CROSS_FX_RFL.has(cls.rflClass ?? -1) && dbgEnv0['OOTF_XODB_FX'] === '0') return null;
                               const cb = crossBuilders.get(fStem);
                               if (!cb) {
                                   crossWant.push({ stem: fStem, cls });
