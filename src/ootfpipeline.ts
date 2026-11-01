@@ -61,7 +61,7 @@ import {
 } from './ootfclass.ts';
 import { OotfAssetBuilder, type AssetReport } from './ootfassets.ts';
 import { loadPcLevel, pcLevelName, resolvePcPath, type PcFileSource, type PcLevel } from './pc.ts';
-import { CELL_SIZE, LVL_TYPE_LAYERS, parsePs2Terrain, terrainHeightAt } from './terrain.ts';
+import { CELL_SIZE, LVL_TYPE_LAYERS, parsePs2Terrain, terrainGroundBelow, terrainHeightAt } from './terrain.ts';
 import { odbStemForDependency } from './odb.ts';
 import { animName, parseSkeleton, writePs2Anim } from './ootfanim.ts';
 import { chooseRetargetTarget, retargetCreature } from './ootfretarget.ts';
@@ -952,6 +952,7 @@ export async function convertOotfLevels(
                 const r = applyCampaignExits(lvl.objects, cl, plan0, {
                     exitFieldOf: exitField,
                     ...(detectorClass ? { detectorClass: { dbIndex: detectorClass.t.dbIndex, classId: detectorClass.t.classId } } : {}),
+                    groundAt: (x, z, y) => terrainGroundBelow(pc.terrain, x, z, y),
                     exitClass: {
                         dbIndex: exitClass.t.dbIndex,
                         classId: exitClass.t.classId,
@@ -976,10 +977,27 @@ export async function convertOotfLevels(
             classes.get(o.dbIndex)?.get(o.classId)?.name ??
             plan?.synthesized.find((x) => x.dbIndex === o.dbIndex && x.classId === o.classId)?.name ??
             '';
+        if (dbgEnv['DRAKAN_DBG_LINKS']) {
+            // Test aid: objects whose class name matches the regex, with the names of their link targets and of their linkers.
+            const re = new RegExp(dbgEnv['DRAKAN_DBG_LINKS'], 'i');
+            const objs = parts.objects.objects;
+            const nm = (id: number): string => {
+                const t = objs.find((x) => x.id === id);
+                return t ? `${dbgName(t)}#${t.id}` : `?#${id}`;
+            };
+            for (const o of objs)
+                if (re.test(dbgName(o)))
+                    console.warn(
+                        `LINKS ${dbgName(o)}#${o.id} at ${o.pos.map(Math.round)} -> [${o.links.map(nm).join(', ')}] <- [${objs.filter((x) => x.links.includes(o.id)).map((x) => nm(x.id)).join(', ')}]`,
+                    );
+        }
+        // DRAKAN_DBG_PULLIDS=<id,id,...> restricts DRAKAN_DBG_PULL to those object ids (and lifts the 4 object limit to 8).
+        const pullIds = dbgEnv['DRAKAN_DBG_PULLIDS'] ? new Set(dbgEnv['DRAKAN_DBG_PULLIDS'].split(',').map(Number)) : null;
+        const pullIdOk = (o: LvlObject): boolean => !pullIds || pullIds.has(o.id);
         if (dbgEnv['DRAKAN_DBG_NOOBJ']) {
             const keep = (o: LvlObject): boolean =>
                 [9, 27, 54].includes(classes.get(o.dbIndex)?.get(o.classId)?.rflClass ?? -1) || classes.get(o.dbIndex)?.get(o.classId)?.name === 'Procedural Sky' ||
-                (!!dbgEnv['DRAKAN_DBG_PULL'] && new RegExp(dbgEnv['DRAKAN_DBG_PULL'], 'i').test(dbgName(o)));
+                (!!dbgEnv['DRAKAN_DBG_PULL'] && new RegExp(dbgEnv['DRAKAN_DBG_PULL'], 'i').test(dbgName(o)) && pullIdOk(o));
             parts.objects = { ...parts.objects, objects: parts.objects.objects.filter(keep) };
         }
         if (dbgEnv['DRAKAN_DBG_STOMP'] !== undefined) {
@@ -1063,8 +1081,15 @@ export async function convertOotfLevels(
                 parts.objects = {
                     ...parts.objects,
                     objects: parts.objects.objects.map((o) =>
-                        n < 4 && re.test(dbgName(o)) && (console.warn(`pull ${dbgName(o)} obj ${o.id} from ${o.pos.map(Math.round)}${dbgEnv['DRAKAN_DBG_PULLP'] ? ' ' + o.params.map((p, i) => `${p.name}=${o.data[i]}`).join(' ') : ''}`), true)
-                            ? { ...o, pos: [start.pos[0] + [pd!, -pd!, 0, 0][n]!, start.pos[1] + (pdy ?? 0), start.pos[2] + [0, 0, pd!, -pd!][n++]!] as typeof o.pos }
+                        n < (pullIds ? 8 : 4) && re.test(dbgName(o)) && pullIdOk(o) && (console.warn(`pull ${dbgName(o)} obj ${o.id} from ${o.pos.map(Math.round)}${dbgEnv['DRAKAN_DBG_PULLP'] ? ` r=${o.radius} flags=${o.flags.toString(16)} links=${o.links} ` + o.params.map((p, i) => `${p.name}=${o.data[i]}`).join(' ') : ''}`), true)
+                            ? {
+                                  ...o,
+                                  pos: [
+                                      start.pos[0] + [pd!, -pd!, 0, 0][n % 4]! * (1 + (n >> 2) * 0.5),
+                                      start.pos[1] + (pdy ?? 0),
+                                      start.pos[2] + [0, 0, pd!, -pd!][n++ % 4]! * (1 + ((n - 1) >> 2) * 0.5),
+                                  ] as typeof o.pos,
+                              }
                             : o,
                     ),
                 };
