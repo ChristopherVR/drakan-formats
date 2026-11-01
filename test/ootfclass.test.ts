@@ -211,7 +211,7 @@ describe('ootfclass', () => {
         expect(aliasSquash('Timer')).toBe('timer');
         const tock = cls(11, 'LeatherWartock : Center', 62, timerFields, [f32(1), 1, 0, 0]);
         const ps2 = odb();
-        ps2.classes.set(11, tock);
+        (ps2.classes as Map<number, OdbClass>).set(11, tock);
         const pc = cls(1, 'Troll Leather', 62, timerFields, [f32(2), 1, 0, 0]);
         expect(planClassMapping([{ db: 1, id: 1, cls: pc }], [ps2]).mapped.get('1:1')?.classId).toBe(11);
         const own = planClassMapping([{ db: 1, id: 1, cls: pc }], [ps2], { keepOwnModel: (c) => c === pc });
