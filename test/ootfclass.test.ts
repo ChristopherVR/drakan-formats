@@ -4,6 +4,7 @@ import { encodeFieldList, parseClassBody, splitClassRecord, stringToWords, type 
 import {
     ENGINE_CLASSES,
     buildClassEntries,
+    aliasSquash,
     buildPlainClassRecord,
     cloneClassRecord,
     levelPropertiesParams,
@@ -186,6 +187,18 @@ describe('ootfclass', () => {
             [0x103, false],
         ]);
         expect(entries[0]!.id).toBe(s.classId);
+    });
+
+    it('maps an aliased PC creature name to the differently named PS2 class', () => {
+        expect(aliasSquash('Troll Leather')).toBe('leatherwartockcenter');
+        expect(aliasSquash('Timer')).toBe('timer');
+        const tock = cls(11, 'LeatherWartock : Center', 62, timerFields, [f32(1), 1, 0, 0]);
+        const ps2 = odb();
+        ps2.classes.set(11, tock);
+        const pc = cls(1, 'Troll Leather', 62, timerFields, [f32(2), 1, 0, 0]);
+        expect(planClassMapping([{ db: 1, id: 1, cls: pc }], [ps2]).mapped.get('1:1')?.classId).toBe(11);
+        const own = planClassMapping([{ db: 1, id: 1, cls: pc }], [ps2], { keepOwnModel: (c) => c === pc });
+        expect(own.mapped.has('1:1')).toBe(false);
     });
 
     it('keepOwnModel skips the same-name mapping so the class is cloned instead', () => {
