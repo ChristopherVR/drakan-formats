@@ -166,9 +166,20 @@ export const PS2_SUBSTITUTES: ReadonlyMap<number, number> = new Map([
     [80, 71],
     [123, 223],
     [137, 224],
-    [130, 35],
+    [130, 17],
     [120, 10],
+    // PC Water Droplet (144) is the PS2 Water Drip (146: Type / Period / Deviation + Max Particles Per Period); PS2 reuses 144 for shields.
+    [144, 146],
 ]);
+
+/** PC engine ids whose PS2 class is cloned even though the PS2 has another class under the same number (144 = shields on PS2). */
+export const FORCED_SUBSTITUTES: ReadonlySet<number> = new Set([144]);
+
+/**
+ * Substituted PC engine ids whose clone gets the converted PC model instead of the template's: the Pirate Ship (a spline
+ * vehicle on the PC) becomes a static Ground Object showing the ship.
+ */
+export const MODEL_STANDINS: ReadonlySet<number> = new Set([130]);
 
 export const RETARGET_KINDS: ReadonlySet<ClassKind> = new Set(['logic', 'light', 'sound', 'waypoint', 'spawn']);
 
@@ -618,7 +629,7 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
         const info = ENGINE_CLASSES.get(rfl);
         let cands = byRfl.get(rfl) ?? [];
         let substituted = false;
-        if (!cands.length && opt.substituteEngineId?.has(rfl)) {
+        if ((!cands.length || FORCED_SUBSTITUTES.has(rfl)) && opt.substituteEngineId?.has(rfl)) {
             cands = byRfl.get(opt.substituteEngineId.get(rfl)!) ?? [];
             substituted = cands.length > 0;
         }
@@ -641,7 +652,8 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
             continue;
         }
         const kind = info?.kind;
-        const wantsModel = !substituted && !!kind && !!opt.modelFor && !!cls.model && !RETARGET_KINDS.has(kind);
+        const modelStandIn = substituted && MODEL_STANDINS.has(rfl);
+        const wantsModel = (!substituted || modelStandIn) && !!kind && !!opt.modelFor && !!cls.model && !RETARGET_KINDS.has(kind);
         // A model-less PC class of a mechanism / scenery / fx engine class (Break Brick floor, Fire Fly Axis ...) is cloned from a
         // model-less PS2 class of the same engine id: the clone shows nothing it should not.
         const modelless =
@@ -720,7 +732,9 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
         const { c, m } = best!;
         usedTemplates.add(`${c.odb.file}|${c.id}`);
         if (opt.rewriteText && c.cls.fields) opt.rewriteText(c.odb.file, c.cls.fields, m.data);
-        if (m.coverage < (wantsModel || (substituted && kind === 'mp') ? 0 : minCoverage)) {
+        // Model-less scenery (Dragon Detector / Dragon Location Object ... markers) is inert whatever the template's fields are.
+        const floorZero = wantsModel || (substituted && kind === 'mp') || (modelless && kind === 'scenery');
+        if (m.coverage < (floorZero ? 0 : minCoverage)) {
             unsupported.set(key, {
                 reason: 'low-coverage',
                 detail: `PS2 "${c.cls.name}" shares ${Math.round(m.coverage * 100)}% of the fields of "${cls.name}"`,
