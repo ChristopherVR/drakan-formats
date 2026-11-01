@@ -160,8 +160,10 @@ export class OotfAssetBuilder {
     }
 
     /** Convert PC texture `id` of `<container>.txd` (and the frames that follow it). Returns the new PS2 id or null. */
-    async addTexture(container: string, id: number): Promise<number | null> {
-        const key = `${lower(container)}#${id}`;
+    async addTexture(container: string, id: number, indexed = false): Promise<number | null> {
+        // Textures of skinned models are written 8 bpp (`indexed`): see the journal, 32 bpp textures do not draw on creature classes.
+        const sfx = indexed ? ':i' : '';
+        const key = `${lower(container)}#${id}${sfx}`;
         const known = this.texIds.get(key);
         if (known !== undefined) return known;
         if (this.texIds.has(key)) return null;
@@ -190,12 +192,16 @@ export class OotfAssetBuilder {
         }
         const base = this.nextTex;
         frames.forEach((f, i) => {
-            const t = encodePs2Texture(f.image, { fps: f.info.fps || 10, ...this.options.texture });
+            const t = encodePs2Texture(f.image, {
+                fps: f.info.fps || 10,
+                ...this.options.texture,
+                ...(indexed ? { mode: 'indexed' as const } : {}),
+            });
             if (i > 0) t.body[37] = t.body[37]! | PC_TEX_NEXT_FRAME;
             const nid = base + i;
             this.texBodies.push({ id: nid, body: t.body });
             this.texAlpha.set(nid, t.hasAlpha);
-            this.texIds.set(`${lower(container)}#${f.id}`, nid);
+            this.texIds.set(`${lower(container)}#${f.id}${sfx}`, nid);
             this.report.textures.converted++;
             this.report.textures.bytes += t.body.length;
             this.report.textures.byBpp[t.bpp] = (this.report.textures.byBpp[t.bpp] ?? 0) + 1;
@@ -260,7 +266,7 @@ export class OotfAssetBuilder {
         if (!pc) return fail('no such model');
         if (this.nextModel > 0xffff) return fail('model id space exhausted');
         if (pc.character && this.options.skinned === false) return fail('skinned model (conversion off)');
-        let skin: { sk: Skeleton; positions: Float32Array } | null = null;
+        let skin: { sk: Skeleton; positions: Float32Array; sphereVerts: Float32Array } | null = null;
         if (pc.character) {
             try {
                 const sk = parseSkeleton(await mod.readRaw(mod.find(MOD_CHARACTER, id)!), 'pc');
@@ -268,7 +274,9 @@ export class OotfAssetBuilder {
                 if (!L || sk.joints.length === 0) return fail('skinned model without LOD or joints');
                 // Weights, polygon indices and sphere vertices of a LOD count from that LOD's first vertex.
                 const positions = pc.positions.slice(L.firstVertex * 3, (L.firstVertex + L.vertexCount) * 3);
-                skin = { sk, positions };
+                // PC bounding spheres name their centre by a vertex numbered from the LOD's first vertex, and those vertices sit
+                // AFTER the LOD's own vertices (Scavenger: 165..174 of 180), so the sphere centres need the unsliced list.
+                skin = { sk, positions, sphereVerts: pc.positions.slice(L.firstVertex * 3) };
                 pc = { ...pc, positions, polygons: pc.polygons.slice(L.firstPoly, L.firstPoly + L.polyCount) };
             } catch (e) {
                 return fail(`skeleton: ${e instanceof Error ? e.message : String(e)}`);
@@ -279,7 +287,7 @@ export class OotfAssetBuilder {
         for (const [ti, t] of pc.textures.entries()) {
             if (!used.has(ti)) continue; // unused list entries are not converted
             const tc = this.resolveContainer(container, t.db);
-            const nid = tc ? await this.addTexture(tc, t.id) : null;
+            const nid = tc ? await this.addTexture(tc, t.id, !!skin) : null;
             if (nid !== null) this.useTexture(nid, key);
             map.set(`${t.db}/${t.id}`, nid === null ? null : { id: nid, db: 0 });
         }
@@ -315,15 +323,34 @@ export class OotfAssetBuilder {
                 joints: sk.joints.map((j) => ({ ...j, weights: [(j.weights[0] ?? []).filter((w) => w.vertex < nv)] })),
                 channels: sk.channels.map((c) => ({ ...c, caps: [] })),
                 spheresPerLod: [sk.spheresPerLod[0] ?? []],
-                animIds: anims.ids,
+                animIds: (() => {
+                    const mode = process.env['DRAKAN_DBG_LISTMODE'] ?? 'sorted';
+                    const mp = this.animMaps.get(key) ?? new Map<number, number>();
+                    const ordered = sk.animIds.map((x) => mp.get(x)).filter((x): x is number => x !== undefined);
+                    if (mode === 'order') return ordered;
+                    if (mode === 'first') return ordered.slice(0, 1);
+                    if (mode === 'rev') return [...anims.ids].reverse();
+                    if (mode === 'ps2') return [5183, 5181, 5182, 5180, 5237, 5238, 5239, 5240, 5681, 5682, 5708, 5722];
+                    return anims.ids;
+                })(),
             };
-            const ps2sk = remapSkeletonVertices(base, dl.layout.source, dl.model.polygons.length);
+            const remapped = remapSkeletonVertices(base, dl.layout.source, dl.model.polygons.length);
+            // Channel 0 (the whole body, joint 0) lists the polygon range of every LOD as a cap {0, 0, firstPoly, polyCount, 0} on the disc
+            // (Scavenger 5055: 1693 + 223, troll 4418: 1229 + 606 + 302). Creature classes draw the body from it; without it nothing draws.
+            const ps2sk: Skeleton = {
+                ...remapped,
+                channels: remapped.channels.map((c, i) =>
+                    i === 0
+                        ? { ...c, caps: remapped.lods.map((l) => ({ values: [0, 0, l.firstPoly, l.polyCount, 0] as [number, number, number, number, number], weights: [] })) }
+                        : c,
+                ),
+            };
             // PS2 character models carry shading 0x20002, a distance of 35000 and a second word of 1 (troll 4418, Scavenger 5055);
             // the PC conversion wrote shading 2 / no distance. Matching the disc did NOT make creature classes draw the body (see the journal).
             out = { ...dl.model, shading: dl.model.shading | 0x20000, distance: dl.model.distance ?? 35000, reserved: 1 };
             records = [
                 ...writePs2ModelRecords(out).filter((r) => r.type !== MOD_BOUNDS),
-                { type: MOD_CHARACTER, data: writePs2Skeleton(ps2sk, skin.positions, Infinity) },
+                { type: MOD_CHARACTER, data: writePs2Skeleton(ps2sk, skin.sphereVerts, Infinity) },
                 { type: MOD_DISPLAY_LIST, data: dl.record },
             ];
             this.report.creatures.push({
@@ -505,6 +532,25 @@ export class OotfAssetBuilder {
     }
 
     // ------------------------------------------------------------------------------------------------ output
+
+    /** The 64 byte bounds block at the head of a converted skinned model's 0x0208 (class records cache a copy of it); undefined otherwise. */
+    skeletonBounds(newId: number): Uint8Array | undefined {
+        const r = this.models.find((m) => m.id === newId)?.records?.find((x) => x.type === MOD_CHARACTER);
+        return r ? r.data.slice(0, 64) : undefined;
+    }
+
+    /**
+     * The 64 byte bounds block a class record caches at body 16..80 for its model (sphere, box; equals 0x0207 bytes 8..72 on all 813
+     * RESOURES classes with a model): the skeleton's for a skinned model, else the model's 0x0207. A clone must carry its own model's.
+     */
+    modelBounds(newId: number): Uint8Array | undefined {
+        const m = this.models.find((x) => x.id === newId);
+        if (!m) return undefined;
+        const sk = this.skeletonBounds(newId);
+        if (sk) return sk;
+        const r = (m.records ?? writePs2ModelRecords(m.model)).find((x) => x.type === MOD_BOUNDS);
+        return r && r.data.length >= 72 ? r.data.slice(8, 72) : undefined;
+    }
 
     /**
      * The converted records as container entries, for appending to an existing PS2 MOD / TXD (a host container whose own

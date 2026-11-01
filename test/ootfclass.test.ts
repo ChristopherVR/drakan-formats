@@ -1,6 +1,6 @@
 // Synthetic fixtures only; no game bytes.
 import { describe, expect, it } from 'vitest';
-import { encodeFieldList, parseClassBody, splitClassRecord, stringToWords, type OdbClass } from '../src/index.ts';
+import { encodeFieldList, joinClassRecord, parseClassBody, splitClassRecord, stringToWords, type OdbClass } from '../src/index.ts';
 import {
     ENGINE_CLASSES,
     buildClassEntries,
@@ -9,6 +9,7 @@ import {
     cloneClassRecord,
     levelPropertiesParams,
     mergeDefaults,
+    patchRecordModel,
     planClassMapping,
     type Ps2OdbIn,
 } from '../src/ootfclass.ts';
@@ -142,6 +143,22 @@ describe('ootfclass', () => {
         expect(mergeDefaults(pc, tpl).data[0]).toBe(1); // without a map animations stay the template's
     });
 
+    it('copies channel (joint id) fields only for converted models', () => {
+        const T_CHAN = 8;
+        const T_CHANS = 0x1008;
+        const fields: [number, string][] = [
+            [T_CHAN, 'Head Channel'],
+            [T_CHANS, 'Dmg Inflicting Chans'],
+        ];
+        const pc = cls(1, 'x', 41, fields, [6, (2 << 16) | 2, 8, 22]);
+        const tpl = cls(2, 'x', 41, fields, [3, (1 << 16) | 2, 26]);
+        const own = mergeDefaults(pc, tpl, undefined, undefined, true);
+        expect(own.data[0]).toBe(6);
+        const at = own.data[1]! & 0xffff;
+        expect(own.data.slice(at, at + 2)).toEqual([8, 22]);
+        expect(mergeDefaults(pc, tpl).data[0]).toBe(3); // a PS2 rig keeps the template's joints
+    });
+
     it('clones a record keeping the head and replacing name and data', () => {
         const raw = buildPlainClassRecord({
             name: 'Timer',
@@ -209,6 +226,57 @@ describe('ootfclass', () => {
         expect(own.mapped.has('1:1')).toBe(false);
         expect(own.synthesized).toHaveLength(1);
     });
+
+    it('clones a model-less mechanism from a model-less template and a model class across ODBs with its own bounds', () => {
+        // a class record with a model block: u16 group, u16 model, u16 db, ..., bounds at 16..80, u16 rfl at 80, icon at 84, counts at 86
+        const modelRec = (name: string, rfl: number, model: number): Uint8Array => {
+            const body = new Uint8Array(94);
+            const dv = new DataView(body.buffer);
+            dv.setUint16(0, 5, true);
+            dv.setUint16(2, model, true);
+            dv.setUint16(80, rfl, true);
+            return joinClassRecord(name, body);
+        };
+        const tplModel: OdbClass = { ...cls(30, 'Door', 19, [], []), model: { id: 7, db: 0 } };
+        const tplNone = cls(31, 'Breakaway', 44, [], []);
+        const other = odb();
+        other.file = 'LEVEL1ON.ODB';
+        other.classes = new Map([
+            [30, tplModel],
+            [31, tplNone],
+        ]);
+        const raw = new Map<number, Uint8Array>([
+            [30, modelRec('Door', 19, 7)],
+            [31, buildPlainClassRecord({ name: 'Breakaway', group: 5, rfl: 44, icon: 1, fieldCount: 0, data: [] })],
+        ]);
+        other.raw = (id) => raw.get(id);
+        const host = odb();
+        host.file = 'RESOURES.ODB';
+        host.dbIndex = 3;
+        host.classes = new Map();
+        const bounds = new Uint8Array(64).fill(0xab);
+        const pc = [
+            { db: 1, id: 1, cls: { ...cls(1, 'Gate', 19, [], []), model: { id: 99, db: 0 } } },
+            { db: 1, id: 2, cls: cls(2, 'Break floor', 44, [], []) },
+        ];
+        const plan = planClassMapping(pc, [host, other], {
+            modelOdbFile: 'RESOURES.ODB',
+            modelOdbFiles: new Set(['LEVEL1ON.ODB']),
+            modelFor: (_c, file) => (file === 'LEVEL1ON.ODB' ? { id: 500, db: 4 } : null),
+            modelBounds: () => bounds,
+        });
+        expect(plan.unsupported.size).toBe(0);
+        const gate = plan.synthesized.find((x) => x.name === 'Gate')!;
+        expect(gate.file).toBe('LEVEL1ON.ODB');
+        const body = splitClassRecord(gate.record).body;
+        const dv = new DataView(body.buffer, body.byteOffset);
+        expect([dv.getUint16(2, true), dv.getUint16(4, true)]).toEqual([500, 4]);
+        expect([...body.subarray(16, 80)]).toEqual([...bounds]);
+        expect(plan.synthesized.find((x) => x.name === 'Break floor')?.template.name).toBe('Breakaway');
+        const patched = patchRecordModel(modelRec('x', 19, 7), { id: 8, db: 0 }, bounds);
+        expect([...splitClassRecord(patched).body.subarray(16, 80)]).toEqual([...bounds]);
+    });
+
 
     it('does not retarget kinds that need a model', () => {
         const pc = [{ db: 1, id: 1, cls: cls(1, 'Lever', 13, [], []) }];

@@ -494,7 +494,9 @@ export function pcToNeutral(pc: PcModel, opt: PcToPs2Options = {}): { model: Neu
             stats.polygonsDropped++;
             continue;
         }
-        const flags = opt.doubleSided?.(textures[idx]!) ? 2 : 0;
+        // Bit 1 of the PC polygon flags is "double sided" with the same meaning on the PS2 (29966 disc polygons carry it): fences,
+        // banners, thin walls and cards vanish from behind without it. Alpha textures are double sided too.
+        const flags = opt.doubleSided?.(textures[idx]!) || (p.flags & 2) !== 0 ? 2 : 0;
         if (p.indices.length === 3 || !split) {
             polygons.push({
                 flags: flags | (p.indices.length === 4 ? 4 : 0),

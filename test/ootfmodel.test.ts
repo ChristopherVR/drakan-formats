@@ -135,6 +135,13 @@ describe('PC model -> PS2 model', () => {
         expect(Array.from(b.slice(0, 10))).toEqual([0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
     });
 
+    it('keeps the PC double sided bit (flags & 2) of a polygon', async () => {
+        const pc = (await parsePcModel(await SrscReader.fromBytes(pcModelFile()), 7))!;
+        pc.polygons[0]!.flags |= 2;
+        const { model } = pcToNeutral(pc, { mapTexture: (t) => ({ id: t.id, db: 0 }) });
+        expect(model.polygons.map((p) => p.flags)).toEqual([2, 2, 0]);
+    });
+
     it('drops polygons of unmapped textures and keeps quads on request', async () => {
         const pc = (await parsePcModel(await SrscReader.fromBytes(pcModelFile()), 7))!;
         const a = pcToNeutral(pc, { mapTexture: (t) => (t.id === 11 ? { id: 1, db: 0 } : null) });

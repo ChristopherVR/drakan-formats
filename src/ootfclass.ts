@@ -11,6 +11,7 @@
 
 import {
     FIELD_ANIMATION,
+    FIELD_CHANNEL,
     FIELD_COLOUR,
     FIELD_ENUM,
     FIELD_FLOAT,
@@ -166,6 +167,7 @@ export const PS2_SUBSTITUTES: ReadonlyMap<number, number> = new Map([
     [123, 223],
     [137, 224],
     [130, 35],
+    [120, 10],
 ]);
 
 export const RETARGET_KINDS: ReadonlySet<ClassKind> = new Set(['logic', 'light', 'sound', 'waypoint', 'spawn']);
@@ -238,6 +240,8 @@ export interface PlanOptions {
      */
     modelSkinned?: (cls: OdbClass) => boolean;
     templateSkinned?: (cls: OdbClass, odbFile: string) => boolean;
+    /** The 64 byte 0x0208 bounds block of a converted skinned model (new id); the class record caches a copy of it (body 16..80). */
+    modelBounds?: (modelId: number) => Uint8Array | undefined;
 }
 
 // ---------------------------------------------------------------- plan
@@ -348,6 +352,7 @@ export function mergeDefaults(
     tpl: OdbClass,
     mapClassRef?: PlanOptions['mapClassRef'],
     animMap?: ReadonlyMap<number, number>,
+    copyChannels = false,
 ): Merge {
     const pf = pc.fields ?? [];
     const tf = tpl.fields ?? [];
@@ -379,6 +384,17 @@ export function mergeDefaults(
                 return;
             }
             out[j] = mapped >>> 0;
+            copied.push(f.name);
+            return;
+        }
+        if (copyChannels && fieldBase(f.type) === FIELD_CHANNEL) {
+            // Channel fields (Head / Neck / Upper Body / Jaw / Weapon, Choppable and Dmg Inflicting lists) hold JOINT ids of the
+            // model's rig. A converted PC model keeps its own joints, so the PC values apply; the template's belong to the PS2 rig.
+            if (fieldIsIndirect(f.type)) {
+                const words = decodeFieldValue(f.type, dword, pc.data ?? []) as number[];
+                out[j] = ((words.length << 16) | out.length) >>> 0;
+                out.push(...words);
+            } else out[j] = dword;
             copied.push(f.name);
             return;
         }
@@ -465,13 +481,19 @@ export function buildPlainClassRecord(opt: {
 }
 
 /** Point a model-carrying class record at another model (`u16 id` at body +2, `u16 db` at +4). */
-export function patchRecordModel(rec: Uint8Array, model: { id: number; db: number }): Uint8Array {
+export function patchRecordModel(
+    rec: Uint8Array,
+    model: { id: number; db: number },
+    bounds?: Uint8Array,
+): Uint8Array {
     const { name, body } = splitClassRecord(rec);
     const b = body.slice();
     const dv = view(b);
     if (!dv.getUint16(2, true)) throw new Error(`class '${name}': record has no model block`);
     dv.setUint16(2, model.id, true);
     dv.setUint16(4, model.db, true);
+    // The model block after the reference is a copy of the skeleton's 64 byte bounds (disc: identical for Scavenger 5055).
+    if (bounds?.length === 64 && b.length >= 86) b.set(bounds, 16);
     return joinClassRecord(name, b);
 }
 
@@ -568,7 +590,14 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
         }
         const kind = info?.kind;
         const wantsModel = !substituted && !!kind && !!opt.modelFor && !!cls.model && !RETARGET_KINDS.has(kind);
-        if (!kind || !(RETARGET_KINDS.has(kind) || substituted || opt.borrowModelKinds?.has(kind) || wantsModel)) {
+        // A model-less PC class of a mechanism / scenery / fx engine class (Break Brick floor, Fire Fly Axis ...) is cloned from a
+        // model-less PS2 class of the same engine id: the clone shows nothing it should not.
+        const modelless =
+            !substituted &&
+            !cls.model &&
+            (kind === 'mechanism' || kind === 'scenery' || kind === 'fx') &&
+            cands.some((c) => !c.cls.model && !!c.odb.raw?.(c.id));
+        if (!kind || !(RETARGET_KINDS.has(kind) || substituted || opt.borrowModelKinds?.has(kind) || wantsModel || modelless)) {
             unsupported.set(key, {
                 reason: 'needs-model',
                 detail: `${info?.name ?? `engine class ${rfl}`} (${kind ?? 'unknown'}) needs a model; none can be taken from the PC data`,
@@ -577,9 +606,18 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
         }
         // 2. clone the PS2 class of the same engine id whose defaults are closest to the PC class
         let best: { c: Cand; m: Merge } | null = null;
-        const pool = wantsModel
+        const hostPool = wantsModel
             ? cands.filter((c) => c.cls.model && c.odb.raw?.(c.id) && (!opt.modelOdbFile || c.odb.file === opt.modelOdbFile))
-            : cands;
+            : [];
+        // No template with a model in the host ODB (doors, switches, ladders, ropes, fx ...): take one from an ODB that lists the host
+        // in its .DB; the converted model is then named with that ODB's own 'db' index of the host ('modelFor').
+        const pool = wantsModel
+            ? hostPool.length
+                ? hostPool
+                : cands.filter((c) => c.cls.model && c.odb.raw?.(c.id) && opt.modelOdbFiles?.has(c.odb.file))
+            : modelless
+              ? cands.filter((c) => !c.cls.model && !!c.odb.raw?.(c.id))
+              : cands;
         if (wantsModel && opt.modelSkinned?.(cls) && opt.templateSkinned) {
             // Skinned templates also come from the ODBs that list the host (their `modelFor` names the host with its `db` there).
             const sk = cands.filter(
@@ -591,9 +629,9 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
             );
             if (sk.length) pool.splice(0, pool.length, ...sk);
         }
-        if (wantsModel && pool.length > 1 && !opt.modelSkinned?.(cls)) {
-            // Creatures (skinned) keep their templates: flag 32 is normal for characters, and swapping Rift Crystal's Crimson Knight
-            // to a flag 33 template corrupted the heap (journal 2026-11-01/ootf-full-level-runs.md).
+        if (wantsModel && pool.length > 1 && kind !== 'creature') {
+            // Creature engine classes (Knight, Dragon ...) keep their templates: flag 32 is normal for them, and swapping Rift Crystal's
+            // Crimson Knight to a flag 33 template corrupted the heap. Skinned models of generic object classes (Heuge Sailor) are filtered.
             // A template whose model-flags word (body u32 at 6) is not one of the common values 0, 1, 33 (only 8 of the 1344
             // RESOURES classes: 3 and 32, e.g. BloodVialBlood and "Nichol's Tome Stomp") makes the engine build a per-object
             // controller the cloned record cannot feed: Alwarren objects of such clones crashed on a null vtable at 0x10822c.
@@ -613,14 +651,14 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
         // template is reused only when no other candidate of that engine class is left.
         const fresh = pool.filter((c) => !usedTemplates.has(`${c.odb.file}|${c.id}`));
         for (const c of fresh.length ? fresh : pool) {
-            const m = mergeDefaults(cls, c.cls, opt.mapClassRef, opt.mapAnimFor?.(cls));
+            const m = mergeDefaults(cls, c.cls, opt.mapClassRef, opt.mapAnimFor?.(cls), wantsModel);
             if (!best || m.coverage > best.m.coverage || (m.coverage === best.m.coverage && m.same > best.m.same))
                 best = { c, m };
         }
         const { c, m } = best!;
         usedTemplates.add(`${c.odb.file}|${c.id}`);
         if (opt.rewriteText && c.cls.fields) opt.rewriteText(c.odb.file, c.cls.fields, m.data);
-        if (m.coverage < (wantsModel ? 0 : minCoverage)) {
+        if (m.coverage < (wantsModel || (substituted && kind === 'mp') ? 0 : minCoverage)) {
             unsupported.set(key, {
                 reason: 'low-coverage',
                 detail: `PS2 "${c.cls.name}" shares ${Math.round(m.coverage * 100)}% of the fields of "${cls.name}"`,
@@ -664,7 +702,7 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
                   fieldCount: c.cls.fields!.length,
                   data: m.data,
               });
-        if (modelRef && raw) record = patchRecordModel(record, modelRef);
+        if (modelRef && raw) record = patchRecordModel(record, modelRef, opt.modelBounds?.(modelRef.id));
         const out: OdbClass = {
             id: newId,
             name,

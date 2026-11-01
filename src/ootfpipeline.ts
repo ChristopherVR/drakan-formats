@@ -48,6 +48,7 @@ import { applyMusicTriggers, findMusicTriggers, musicTriggerClassNames } from '.
 import { TextPlan, isTextField, parseRrcStrings, rewriteClassTextDefaults, rewriteObjectTexts } from './ootftext.ts';
 import { writePs2Srsc, type Ps2Entry } from './ootfcontainer.ts';
 import {
+    ENGINE_CLASSES,
     PS2_SUBSTITUTES,
     aliasSquash,
     buildClassEntries,
@@ -141,6 +142,10 @@ export interface OotfPipelineOptions {
      * of the PC joints (overrides the PS2 clips of the same name), else convert the PC model instead (default true).
      */
     retarget?: boolean;
+    /** Clone classes that need a model (doors, switches ...) from ODBs that list the host ODB when the host has no template (default OFF: it hung the level load in game). */
+    crossOdb?: boolean;
+    /** Generate the 0x0211 display list for every static model, not only trees (default off; env OOTF_DL_ALL=1 turns it on). */
+    displayListAll?: boolean;
     /** Stem of the host ODB (default RESOURES). */
     hostStem?: string;
     classes?: boolean;
@@ -173,7 +178,31 @@ export interface OotfLevelOut {
     splats: Record<string, Uint8Array>;
 }
 
+/** What became of one PC class (per level): the audit behind docs/journal/2026-11-01/ootf-props-audit.md. */
+export interface ClassAuditRow {
+    pcPath: string;
+    /** PC `db:id` of the class in the level's dependency table. */
+    key: string;
+    name: string;
+    rfl: number;
+    kind: string;
+    /** Objects of the class placed in the PC level. */
+    objects: number;
+    /** `name-mapped` = same-named PS2 class (PS2 model), `cloned` = new record (PC model when `model` is set), `unsupported`. */
+    outcome: 'name-mapped' | 'cloned' | 'unsupported';
+    ps2Name?: string;
+    template?: string;
+    /** `UnsupportedReason`, `max-classes` or `no-plan`. */
+    reason?: string;
+    detail?: string;
+    /** The PC class names a model: converted (`ok`), why it was skipped, or `none` when the class has no model. */
+    model: 'none' | 'ok' | string;
+    /** The PS2 class the object got has a model block. */
+    ps2HasModel?: boolean;
+}
+
 export interface OotfPipelineResult {
+    classAudit: ClassAuditRow[];
     levels: OotfLevelOut[];
     /** Mod-pack files that are not the LVL: `files/...` and `new/...` / `overrides/...` entries. */
     files: Record<string, Uint8Array>;
@@ -231,7 +260,8 @@ export async function convertOotfLevels(
     opt: OotfPipelineOptions = {},
 ): Promise<OotfPipelineResult> {
     const log = opt.log ?? (() => {});
-    const res: OotfPipelineResult = { levels: [], files: {}, stages: [], assets: null, classPlan: null, warnings: [] };
+    const dbgEnv0 = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {};
+    const res: OotfPipelineResult = { classAudit: [], levels: [], files: {}, stages: [], assets: null, classPlan: null, warnings: [] };
     const stage = async <T>(name: string, fn: () => Promise<T>): Promise<T | null> => {
         try {
             const v = await fn();
@@ -293,6 +323,10 @@ export async function convertOotfLevels(
         firstAnimId:
             Math.max(maxId(ps2.hostAdb, 0x0501), ...[...(ps2.adbs?.values() ?? [])].map((a) => maxId(a, 0x0501)), 99) + 1,
         skinned: opt.skinned,
+        displayList:
+            opt.displayListAll ?? (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_DL_ALL'] === '1'
+                ? /./
+                : undefined,
     });
     const splatDb = findSplatDbIndex(tplHeader);
     // `db` index the host has in the `.DB` of an ODB stem (0 for the host itself), null when it is not a dependency.
@@ -406,7 +440,9 @@ export async function convertOotfLevels(
             const modelFiles = new Set<string>();
             for (const odb of ps2Odbs) {
                 const st = odb.file.replace(/\.ODB$/i, '');
-                if (st !== hostStem && hostDbForStem(st) !== null && ps2.mods?.has(st)) modelFiles.add(odb.file);
+                // Cross-ODB static templates (doors, switches, fx) hang the level load in game (ootf-props-audit.md): opt in with crossOdb / OOTF_XODB=1.
+                const cross = (opt.crossOdb ?? dbgEnv0['OOTF_XODB'] === '1') && (!dbgEnv0['OOTF_XODB_ONLY'] || dbgEnv0['OOTF_XODB_ONLY'].split(',').includes(st));
+                if (st !== hostStem && hostDbForStem(st) !== null && (ps2.mods?.has(st) || cross)) modelFiles.add(odb.file);
             }
             const planOpts: PlanOptions = {
                 modelOdbFiles: modelFiles,
@@ -433,6 +469,7 @@ export async function convertOotfLevels(
                     const st = c.model ? containerStem(file.replace(/\.ODB$/i, ''), c.model.db) : null;
                     return !!c.model && !!st && !!modOf(st)?.find(0x0208, c.model.id);
                 },
+                modelBounds: (id) => (dbgEnv0['OOTF_NO_BOUNDS'] ? builder.skeletonBounds(id) : builder.modelBounds(id)),
                 mapAnimFor: (cls) => {
                     const ow = ownerOf.get(cls);
                     return ow && cls.model ? (builder.mapAnimRef(cls.model.db, cls.model.id, ow) ?? undefined) : undefined;
@@ -536,6 +573,38 @@ export async function convertOotfLevels(
         if (plan) {
             const used = new Set(plan.synthesized.flatMap((s) => (s.cls.model ? [s.cls.model.id] : [])));
             builder.pruneSkinned((id) => used.has(id));
+        }
+        // ---- audit rows: what became of every PC class used by a level (per level, with its object count)
+        for (const u of used.values()) {
+            const k = planKey.get(sig(u.cls));
+            const key = k ? `${k.db}:${k.id}` : '';
+            const t = plan?.resolve(k?.db ?? -1, k?.id ?? -1) ?? null;
+            const un = plan?.unsupported.get(key);
+            const syn = plan?.synthesized.find((s) => s.pcKeys.includes(key));
+            const ow = ownerOf.get(u.cls);
+            let model = 'none';
+            if (u.cls.model) {
+                const nid = ow ? builder.mapModelRef(u.cls.model.db, u.cls.model.id, ow) : null;
+                const c = ow ? builder.resolveContainer(ow, u.cls.model.db) : null;
+                const why = c ? builder.report.skipped.get(`model ${c.toLowerCase()}#${u.cls.model.id}`) : undefined;
+                model = nid !== null ? 'ok' : (why ?? (ow ? 'not converted' : 'owner unknown'));
+            }
+            const info = ENGINE_CLASSES.get(u.cls.rflClass ?? -1);
+            res.classAudit.push({
+                pcPath: u.pc.path,
+                key: `${u.db}:${u.id}`,
+                name: u.cls.name.trim(),
+                rfl: u.cls.rflClass ?? -1,
+                kind: info?.kind ?? 'unknown',
+                objects: u.pc.list.objects.filter((o) => o.dbIndex === u.db && o.classId === u.id).length,
+                outcome: syn ? 'cloned' : t ? 'name-mapped' : 'unsupported',
+                ps2Name: t?.cls.name,
+                template: syn?.template.name,
+                reason: t ? undefined : (un?.reason ?? (plan ? 'max-classes' : 'no-plan')),
+                detail: un?.detail,
+                model,
+                ps2HasModel: t ? !!t.cls.model : undefined,
+            });
         }
     }
 
@@ -880,6 +949,12 @@ export async function convertOotfLevels(
             const h = new Map<string, number>();
             for (const o of parts.objects.objects) h.set(dbgName(o), (h.get(dbgName(o)) ?? 0) + 1);
             console.warn(`LISTCLS ${[...h].sort().map(([k, v]) => `${k}=${v}`).join('; ')}`);
+        }
+        if (dbgEnv['DRAKAN_DBG_AT']) {
+            // Test aid: DRAKAN_DBG_AT=<x>,<y>,<z> puts Rynn at that world position (terrain lookups pick the wrong layer on multi-layer levels).
+            const [ax, ay, az] = dbgEnv['DRAKAN_DBG_AT'].split(',').map(Number);
+            const rynn = parts.objects.objects.find((o) => (classes.get(o.dbIndex)?.get(o.classId)?.rflClass ?? -1) === 9);
+            if (rynn && ax !== undefined && ay !== undefined && az !== undefined) rynn.pos = [ax, ay, az];
         }
         if (dbgEnv['DRAKAN_DBG_PULL']) {
             // Test aid: move up to 4 objects whose class name matches the regex next to the player start.
