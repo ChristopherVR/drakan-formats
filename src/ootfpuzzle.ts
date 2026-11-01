@@ -246,18 +246,38 @@ function testEnding(env: PuzzleEnv, counterIds: ReadonlySet<number>): void {
         const t = env.list.objects.find((o) => o.classId === env.timer!.classId && o.dbIndex === env.timer!.dbIndex);
         return t ? env.classOf(t)?.fields : undefined;
     })();
-    for (let k = 0; k < 4; k++) {
+    // OOTF_TEST_DIRECT=<step>: skip the counter (1) or the counter and the end timer (2) and message the next object of the chain.
+    const direct = Number((globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_TEST_DIRECT'] ?? 0);
+    let targets = [...counterIds];
+    if (direct >= 1) targets = [...new Set(targets.flatMap((id) => env.list.objects.find((o) => o.id === id)?.links ?? []))];
+    if (direct >= 2) targets = [...new Set(targets.flatMap((id) => env.list.objects.find((o) => o.id === id)?.links ?? []))];
+    for (let k = 0; k < (direct ? 1 : 4); k++) {
         const { object } = addObject(env.list, { classId: env.timer.classId, dbIndex: env.timer.dbIndex, pos: [0, 0, 0], rot: [0, 0, 0] });
         object.params = [];
         object.data = [];
-        object.links = [...counterIds];
-        const f32 = new DataView(new ArrayBuffer(4));
-        f32.setFloat32(0, sec + k * 0.5);
+        object.links = targets;
         const f = fields ?? env.classOf(object)?.fields;
-        setNamedParam(env.list, object, f, 'Time Until Trigger', f32.getUint32(0));
+        setNamedParam(env.list, object, f, 'Time Until Trigger', sec + k * 0.5);
         setNamedParam(env.list, object, f, 'Start Mode', 0);
-        setNamedParam(env.list, object, f, 'Trigger Message', 8);
+        setNamedParam(env.list, object, f, 'Trigger Message', direct >= 2 ? 4 : direct ? 1 : 8);
     }
+}
+
+/** Test aid (`OOTF_TEST_WAKE=<seconds>`): a timer that sends ON to whatever wakes the Dr. Evil stand-ins (the level's own trigger). */
+function testWake(env: PuzzleEnv): void {
+    const sec = Number((globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_TEST_WAKE'] ?? 0);
+    if (!sec || !env.timer) return;
+    const heads = new Set(env.pc.list.objects.filter((o) => rflOf(env.pc, o) === 92).map((o) => o.id));
+    const wakers = env.list.objects.filter((o) => !heads.has(o.id) && o.links.some((l) => heads.has(l))).map((o) => o.id);
+    if (!wakers.length) return;
+    const { object } = addObject(env.list, { classId: env.timer.classId, dbIndex: env.timer.dbIndex, pos: [0, 0, 0], rot: [0, 0, 0] });
+    object.params = [];
+    object.data = [];
+    object.links = wakers;
+    const f = env.classOf(object)?.fields;
+    setNamedParam(env.list, object, f, 'Time Until Trigger', sec);
+    setNamedParam(env.list, object, f, 'Start Mode', 0);
+    setNamedParam(env.list, object, f, 'Trigger Message', 1);
 }
 
 /** Apply every converter step of this module to one converted level. */
@@ -270,6 +290,7 @@ export function applyPuzzleLogic(env: PuzzleEnv): PuzzleReport {
     const counters = new Set<number>();
     for (const o of env.pc.list.objects) if (rflOf(env.pc, o) === 92) for (const l of env.list.objects.find((x) => x.id === o.id)?.links ?? []) counters.add(l);
     testEnding(env, counters);
+    testWake(env);
     // Links to markers that were left out would dangle.
     const ids = new Set(env.list.objects.map((o) => o.id));
     for (const o of env.list.objects) if (o.links.some((l) => !ids.has(l))) o.links = o.links.filter((l) => ids.has(l));
