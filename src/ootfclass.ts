@@ -591,7 +591,9 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
             );
             if (sk.length) pool.splice(0, pool.length, ...sk);
         }
-        if (wantsModel && pool.length > 1) {
+        if (wantsModel && pool.length > 1 && !opt.modelSkinned?.(cls)) {
+            // Creatures (skinned) keep their templates: flag 32 is normal for characters, and swapping Rift Crystal's Crimson Knight
+            // to a flag 33 template corrupted the heap (journal 2026-11-01/ootf-full-level-runs.md).
             // A template whose model-flags word (body u32 at 6) is not one of the common values 0, 1, 33 (only 8 of the 1344
             // RESOURES classes: 3 and 32, e.g. BloodVialBlood and "Nichol's Tome Stomp") makes the engine build a per-object
             // controller the cloned record cannot feed: Alwarren objects of such clones crashed on a null vtable at 0x10822c.
