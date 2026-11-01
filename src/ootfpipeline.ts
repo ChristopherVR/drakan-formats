@@ -852,7 +852,6 @@ export async function convertOotfLevels(
         }
         if (dbgEnv['DRAKAN_DBG_CLSINFO']) {
             // Test aid: how the classes whose name matches the regex were mapped (template, model, fields kept).
-            console.warn(`CLSINFO plan=${!!plan} synth=${plan?.synthesized.length}`);
             const re = new RegExp(dbgEnv['DRAKAN_DBG_CLSINFO'], 'i');
             for (const s of plan?.synthesized ?? [])
                 if (re.test(s.name))
