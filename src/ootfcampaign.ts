@@ -487,12 +487,8 @@ export interface ApplyExitsContext {
     /** Size of that box in cells of 2048 units (default 2 x 2 x 2), centre lifted by `detectorLift` units (default 700). */
     detectorSize?: Vec3;
     detectorLift?: number;
-    /**
-     * Terrain height under (x, z) looking down from y (NaN when unknown). Several PC exits hang 7000 to 40000 units above the ground
-     * (the player stands on the ground and the PC engine touches the object by distance) and one lies 77000 below it; the box is then
-     * stretched down toward the ground (at most 10 cells tall) or put on the ground, so a walker on the floor still enters it.
-     */
-    groundAt?: (x: number, z: number, y: number) => number;
+    /** Parameter overrides for the added exit detectors (e.g. Detect Which?); other fields keep the class default. */
+    detectorParams?: readonly { fieldIndex: number; type: number; name: string; value: number }[];
     /** "Timer" class of the template (engine class 0x1003e): exits with `autoSeconds` get one that fires them (Trigger Message 5, as on the disc). */
     timerClass?: { dbIndex: number; classId: number; fields: readonly Pick<ClassFieldDef, 'name' | 'type'>[] };
 }
@@ -604,17 +600,10 @@ export function applyCampaignExits(list: LvlObjectList, level: CampaignLevel, pl
             }
         }
         if (ctx.detectorClass && exitObj && (e.reason === 'pc' || e.reason === 'intro-next')) {
+            // Centred on the exit's own height: the terrain function picks other layers under many exits (the real floor is the exit
+            // height, 6000 to 10000 above the layer it finds); a box stretched down to that layer was not touched by a walker standing in it.
             const size: Vec3 = [...(ctx.detectorSize ?? [2, 2, 2])] as Vec3;
-            let cy = exitObj.pos[1] + (ctx.detectorLift ?? 700);
-            const g = ctx.groundAt ? ctx.groundAt(exitObj.pos[0], exitObj.pos[2], exitObj.pos[1] + 1500) : NaN;
-            if (Number.isFinite(g) && Math.abs(exitObj.pos[1] - g) > 1000) {
-                // The exit hangs above (or lies below) the terrain: stretch the box from the ground up to the exit (at most 10 cells), or
-                // put it on the ground when the exit is buried.
-                const bottom = g - 500;
-                const top = exitObj.pos[1] > g ? Math.min(exitObj.pos[1] + 1500, bottom + 10 * 2048) : g + 3500;
-                size[1] = (top - bottom) / 2048;
-                cy = (top + bottom) / 2;
-            }
+            const cy = exitObj.pos[1] + (ctx.detectorLift ?? 700);
             const { object: det } = addObject(list, {
                 classId: ctx.detectorClass.classId,
                 dbIndex: ctx.detectorClass.dbIndex,
@@ -623,6 +612,7 @@ export function applyCampaignExits(list: LvlObjectList, level: CampaignLevel, pl
             });
             det.flags |= FLAG_SCALED;
             det.scale = size;
+            if (ctx.detectorParams?.length) setScalarParams(det, ctx.detectorParams);
             det.links = [exitObj.id];
             res.detectors++;
         }

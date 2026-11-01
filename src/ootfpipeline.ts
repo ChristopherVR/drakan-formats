@@ -61,7 +61,7 @@ import {
 } from './ootfclass.ts';
 import { OotfAssetBuilder, type AssetReport } from './ootfassets.ts';
 import { loadPcLevel, pcLevelName, resolvePcPath, type PcFileSource, type PcLevel } from './pc.ts';
-import { CELL_SIZE, LVL_TYPE_LAYERS, parsePs2Terrain, terrainGroundBelow, terrainHeightAt } from './terrain.ts';
+import { CELL_SIZE, LVL_TYPE_LAYERS, parsePs2Terrain, terrainHeightAt } from './terrain.ts';
 import { odbStemForDependency } from './odb.ts';
 import { animName, parseSkeleton, writePs2Anim } from './ootfanim.ts';
 import { chooseRetargetTarget, retargetCreature } from './ootfretarget.ts';
@@ -953,7 +953,6 @@ export async function convertOotfLevels(
                 const r = applyCampaignExits(lvl.objects, cl, plan0, {
                     exitFieldOf: exitField,
                     ...(detectorClass ? { detectorClass: { dbIndex: detectorClass.t.dbIndex, classId: detectorClass.t.classId } } : {}),
-                    groundAt: (x, z, y) => terrainGroundBelow(pc.terrain, x, z, y),
                     ...(detectorClass && dbgEnv0['OOTF_DETECT_WHICH'] !== undefined
                         ? {
                               // Test aid: Detect Which? of the exit detectors (0 Rynn on ground, 1 on mount, 2 both = class default).
