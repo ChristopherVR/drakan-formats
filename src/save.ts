@@ -22,6 +22,18 @@ export const SKILL_TABLE_ID = 893;
 export const SKILL_ROW_SIZE = 0x4c;
 const SKILL_NAME_OFFSET = 12;
 export const RYNN_CLASS = 0x17081069;
+/**
+ * Bit 27 of the record's class word. Clear in the sample saves (`0x17081069`), set in a save the game wrote after play
+ * (`0x1f081069`, docs/journal/2026-11-01/save-add-item.md). Its meaning is not known; the other bits of the word are
+ * the same, so Rynn is matched with this one bit ignored (`isRynnClass`).
+ */
+export const RYNN_CLASS_STATE_BIT = 0x08000000;
+/** True for both class words a save can carry for Rynn's record (`0x17081069`, `0x1f081069`). */
+export const isRynnClass = (word: number | undefined): boolean =>
+    word !== undefined && (word & ~RYNN_CLASS_STATE_BIT) >>> 0 === RYNN_CLASS;
+/** Class word match for a record locator: Rynn's class ignores `RYNN_CLASS_STATE_BIT`, every other class is exact. */
+export const classMatches = (word: number, classId: number): boolean =>
+    classId === RYNN_CLASS ? isRynnClass(word) : word >>> 0 === classId >>> 0;
 export const GOLD_CLASS = 0x19001255;
 export const CLASS_OFFSET = 8;
 export const POS_OFFSET = 12;
@@ -457,7 +469,7 @@ function findRecord(
             e.type === TYPE_RECORD &&
             e.data.length >= CLASS_OFFSET + 4 &&
             (loc.classId !== undefined
-                ? u32At(e.data, CLASS_OFFSET) === loc.classId
+                ? classMatches(u32At(e.data, CLASS_OFFSET), loc.classId)
                 : u32At(e.data, 0) === loc.resourceId),
     );
     if (loc.entryId !== undefined && !force) {
@@ -582,7 +594,7 @@ const heapHandle = (w: number): boolean => w > 0x600000 && w < 0x2000000 && w % 
 /** Rynn's record and the offset of inventory cell 0, found by structure (see savetool.py `cell_table`). */
 export function cellTable(save: SaveFile): { entry: SaveEntry; base: number } {
     const rynn = save.entries.filter(
-        (e) => e.type === TYPE_RECORD && e.data.length > 12 && u32At(e.data, CLASS_OFFSET) === RYNN_CLASS,
+        (e) => e.type === TYPE_RECORD && e.data.length > 12 && isRynnClass(u32At(e.data, CLASS_OFFSET)),
     );
     if (rynn.length !== 1) throw new SaveFieldError(`expected one Rynn record, found ${rynn.length}`);
     const entry = rynn[0]!;
@@ -606,7 +618,7 @@ export function cellTable(save: SaveFile): { entry: SaveEntry; base: number } {
 /** The 0x102 record that stores `handle` twice, 0xe0 bytes apart, and the offset of the first copy. */
 export function itemRecord(save: SaveFile, handle: number): { entry: SaveEntry; at: number } {
     for (const e of save.entries) {
-        if (e.type !== TYPE_RECORD || e.data.length < ITEM_PTR_GAP + 16 || u32At(e.data, CLASS_OFFSET) === RYNN_CLASS) {
+        if (e.type !== TYPE_RECORD || e.data.length < ITEM_PTR_GAP + 16 || isRynnClass(u32At(e.data, CLASS_OFFSET))) {
             continue;
         }
         for (let i = 0; i + ITEM_PTR_GAP + 4 <= e.data.length; i++) {
@@ -982,6 +994,7 @@ export function screenshotOf(save: SaveFile): Screenshot | null {
 
 export const KNOWN_CLASSES: Record<number, string> = {
     [RYNN_CLASS]: 'Rynn (player)',
+    [RYNN_CLASS | RYNN_CLASS_STATE_BIT]: 'Rynn (player)',
     [GOLD_CLASS]: 'Gold counter',
 };
 

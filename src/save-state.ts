@@ -3,7 +3,7 @@ import {
     AROKH_RESOURCE,
     CLASS_OFFSET,
     GOLD_CLASS,
-    RYNN_CLASS,
+    isRynnClass,
     LEVEL_NAME_ID,
     SaveFieldError,
     TYPE_RECORD,
@@ -29,7 +29,7 @@ import {
 // ------------------------------------------------------------------------------------------------- labels
 
 export function recordLabel(r: Pick<RecordInfo, 'classId' | 'resource'>): string {
-    if (r.classId === RYNN_CLASS) return 'Rynn (player)';
+    if (isRynnClass(r.classId)) return 'Rynn (player)';
     if (r.resource === AROKH_RESOURCE) return 'Arokh (dragon)';
     if (r.classId === GOLD_CLASS) return 'Gold counter';
     return '';
@@ -95,7 +95,7 @@ export function readItemPanel(save: SaveFile): ItemPanel | null {
         (e) =>
             e.type === TYPE_RECORD &&
             e.data.length > CLASS_OFFSET + 4 &&
-            view(e.data).getUint32(CLASS_OFFSET, true) === RYNN_CLASS,
+            isRynnClass(view(e.data).getUint32(CLASS_OFFSET, true)),
     );
     if (!rec) return null;
     const d = rec.data;
@@ -191,8 +191,7 @@ export function validateSave(save: SaveFile): Issue[] {
         out.push(issue('skills', 'warn', `Skill table not recognised: ${e.message}`));
     }
     const players = save.entries.filter(
-        (e) =>
-            e.type === TYPE_RECORD && e.data.length > 23 && view(e.data).getUint32(CLASS_OFFSET, true) === RYNN_CLASS,
+        (e) => e.type === TYPE_RECORD && e.data.length > 23 && isRynnClass(view(e.data).getUint32(CLASS_OFFSET, true)),
     );
     if (players.length === 0) {
         out.push(issue('player', 'info', 'No Rynn record in this save, so health and position cannot be edited.'));
