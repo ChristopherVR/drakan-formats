@@ -323,20 +323,11 @@ export class OotfAssetBuilder {
                 joints: sk.joints.map((j) => ({ ...j, weights: [(j.weights[0] ?? []).filter((w) => w.vertex < nv)] })),
                 channels: sk.channels.map((c) => ({ ...c, caps: [] })),
                 spheresPerLod: [sk.spheresPerLod[0] ?? []],
-                animIds: (() => {
-                    const mode = process.env['DRAKAN_DBG_LISTMODE'] ?? 'sorted';
-                    const mp = this.animMaps.get(key) ?? new Map<number, number>();
-                    const ordered = sk.animIds.map((x) => mp.get(x)).filter((x): x is number => x !== undefined);
-                    if (mode === 'order') return ordered;
-                    if (mode === 'first') return ordered.slice(0, 1);
-                    if (mode === 'rev') return [...anims.ids].reverse();
-                    if (mode === 'ps2') return [5183, 5181, 5182, 5180, 5237, 5238, 5239, 5240, 5681, 5682, 5708, 5722];
-                    return anims.ids;
-                })(),
+                animIds: anims.ids,
             };
             const remapped = remapSkeletonVertices(base, dl.layout.source, dl.model.polygons.length);
             // Channel 0 (the whole body, joint 0) lists the polygon range of every LOD as a cap {0, 0, firstPoly, polyCount, 0} on the disc
-            // (Scavenger 5055: 1693 + 223, troll 4418: 1229 + 606 + 302). Creature classes draw the body from it; without it nothing draws.
+            // (Scavenger 5055: 1693 + 223, troll 4418: 1229 + 606 + 302). All 154 disc skeletons have them; the converter used to drop them.
             const ps2sk: Skeleton = {
                 ...remapped,
                 channels: remapped.channels.map((c, i) =>
