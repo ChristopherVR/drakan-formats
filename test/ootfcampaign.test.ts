@@ -10,6 +10,7 @@ import {
     TextPlan,
     applyCampaignExits,
     applyMusicTriggers,
+    isOotfArenaPath,
     exitBoxes,
     type TerrainLayer,
     campaignExitStrings,
@@ -500,5 +501,20 @@ describe('exitBoxes', () => {
         const b = exitBoxes([layer(0, 77000)], x, z, 0, 700, 2);
         expect(b[0]).toEqual({ cy: 77700, sizeY: 2 });
         expect(b[1]!.cy).toBeGreaterThan(77700);
+    });
+});
+
+describe('isOotfArenaPath', () => {
+    it('tells arenas (Multiplayer/*) from campaign chapters, either slash style', () => {
+        expect(isOotfArenaPath('Multiplayer/Ground/Relic/Relic.lvl')).toBe(true);
+        expect(isOotfArenaPath('multiplayer\\Air\\Nemesis\\Nemesis.lvl')).toBe(true);
+        expect(isOotfArenaPath('Mountain World/Grotto/grotto.lvl')).toBe(false);
+    });
+
+    it('keeps the campaign plan free of arenas so one conversion holds both', () => {
+        const all = fixture();
+        const withArena = [...all, level('Multiplayer/Ground/Relic/Relic.lvl', '<0x9100>relic', [])];
+        const chapters = withArena.filter((l) => !isOotfArenaPath(l.path));
+        expect(planCampaign(chapters).levels.map((l) => l.title)).toEqual(planCampaign(all).levels.map((l) => l.title));
     });
 });

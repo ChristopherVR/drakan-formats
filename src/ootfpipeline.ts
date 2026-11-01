@@ -279,6 +279,11 @@ function ootfTextureEnv(): Ps2TextureOptions | undefined {
     return { ...(mode ? { mode: mode as TextureMode } : {}), ...(max ? { maxSize: max } : {}) };
 }
 
+/** A PC `Multiplayer/*` level (an arena, not a campaign chapter). */
+export function isOotfArenaPath(path: string): boolean {
+    return /^multiplayer[\\/]/i.test(path);
+}
+
 /** Convert one or more PC levels that share an asset container and class plan. */
 export async function convertOotfLevels(
     src: PcFileSource,
@@ -330,8 +335,12 @@ export async function convertOotfLevels(
     }
 
     // ---- campaign plan, text plan
+    // Multiplayer/* levels are arenas, not campaign chapters: one conversion can hold both (a campaign pack and an arena
+    // pack converted separately collide on RESOURES/WORLDCON/PROCTEES and on the new class ids). The arenas stay out of
+    // the campaign plan (no exits, default titles) and sort after the chapters in `levels`.
+    const campaignPcs = pcs.filter((p) => !isOotfArenaPath(p.path));
     const plan0: CampaignPlan | null =
-        opt.campaign !== false && pcs.length > 1 ? planCampaign(pcs, { prefix: 'OotF' }) : null;
+        opt.campaign !== false && campaignPcs.length > 1 ? planCampaign(campaignPcs, { prefix: 'OotF' }) : null;
     if (plan0) for (const w of plan0.warnings) res.warnings.push(`campaign: ${w}`);
     const textPlan = new TextPlan({ rrc: await loadRrcStrings(src) });
 
