@@ -10,6 +10,7 @@ import {
     levelPropertiesParams,
     mergeDefaults,
     patchRecordModel,
+    PS2_SUBSTITUTES,
     planClassMapping,
     type Ps2OdbIn,
 } from '../src/ootfclass.ts';
@@ -221,6 +222,25 @@ describe('ootfclass', () => {
             [0x103, false],
         ]);
         expect(entries[0]!.id).toBe(s.classId);
+    });
+
+    it('substitutes the PC Water Droplet (144) for the PS2 Water Drip (146) although the PS2 has another class 144', () => {
+        const dripFields: [number, string][] = [
+            [T_ENUM, 'Type'],
+            [T_FLOAT, 'Period (s)'],
+            [T_FLOAT, 'Deviation (+/- s)'],
+            [T_INT, 'Max Particles Per Period'],
+        ];
+        const drip = cls(20, 'Water Drip', 146, dripFields, [0, f32(2), f32(1), 1]);
+        const shield = cls(21, 'Wood Shield', 144, [[T_INT, 'Quantity']], [1]);
+        const o = odb();
+        o.classes.set(20, drip);
+        o.classes.set(21, shield);
+        const pc = [{ db: 1, id: 1, cls: cls(1, 'Water Droplet', 144, dripFields.slice(0, 3), [0, f32(3), f32(0.5)]) }];
+        const plan = planClassMapping(pc, [o], { substituteEngineId: PS2_SUBSTITUTES });
+        expect(plan.unsupported.size).toBe(0);
+        expect(plan.synthesized[0]?.template.name).toBe('Water Drip');
+        expect(plan.synthesized[0]?.cls.data?.[1]).toBe(f32(3));
     });
 
     it('maps an aliased PC creature name to the differently named PS2 class', () => {
