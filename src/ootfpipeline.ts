@@ -1329,6 +1329,21 @@ function ensureSingletons(
         const t = tpl.find((o) => nameOf(o) === 'Procedural Sky');
         if (t) list.objects.push(cloneObject(t, nextId++));
     }
+    // Air arenas (Multiplayer/Air/*) are dragon fights: Rynn on foot has no floor. A Dragon object whose `Initial Mode` is 0
+    // (Ravenshold's, the level where Rynn starts mounted) is placed at her start. Test aid DRAKAN_DBG_DRAGON=0|1 forces it.
+    const dbgDragon = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['DRAKAN_DBG_DRAGON'];
+    if ((/^multiplayer[\\/]air[\\/]/i.test(pc.path) || dbgDragon === '1') && dbgDragon !== '0' && !list.objects.some((o) => rflOf(o) === 28)) {
+        const t = tpl.find((o) => rflOf(o) === 28);
+        const rynn = list.objects.find((o) => rflOf(o) === 9);
+        if (t && rynn) {
+            const d = cloneObject(t, nextId++);
+            d.pos = [rynn.pos[0], rynn.pos[1], rynn.pos[2]];
+            d.rot = [...rynn.rot];
+            list.objects.push(d);
+            const specs = objectParamSpecs(d).map((s) => (/^Initial Mode/.test(s.name) ? { ...s, value: 0 } : s));
+            setObjectParams(list, d.id, specs);
+        }
+    }
 }
 
 export type { ConversionReport };
