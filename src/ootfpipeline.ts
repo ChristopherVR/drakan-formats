@@ -45,6 +45,7 @@ import {
     type CampaignPlan,
 } from './ootfcampaign.ts';
 import { applyMusicTriggers, findMusicTriggers, musicTriggerClassNames } from './ootfmusic.ts';
+import { applyPuzzleLogic } from './ootfpuzzle.ts';
 import { TextPlan, isTextField, parseRrcStrings, rewriteClassTextDefaults, rewriteObjectTexts } from './ootftext.ts';
 import { writePs2Srsc, type Ps2Entry } from './ootfcontainer.ts';
 import {
@@ -939,6 +940,30 @@ export async function convertOotfLevels(
                         fields: musicClass.cls.fields!,
                     },
                 });
+            });
+        }
+        if (dbgEnv0['OOTF_NO_PUZZLE'] !== '1') {
+            await stage(`puzzles ${pc.path}`, async () => {
+                const ps2Class = (o: LvlObject) =>
+                    classes.get(o.dbIndex)?.get(o.classId) ??
+                    plan?.synthesized.find((x) => x.dbIndex === o.dbIndex && x.classId === o.classId)?.cls;
+                const rep = applyPuzzleLogic({
+                    pc,
+                    list: lvl.objects,
+                    title,
+                    classOf: ps2Class,
+                    ...(detectorClass ? { detector: { dbIndex: detectorClass.t.dbIndex, classId: detectorClass.t.classId } } : {}),
+                    ...(timerClass ? { timer: { dbIndex: timerClass.t.dbIndex, classId: timerClass.t.classId } } : {}),
+                    textId: (o, text) => {
+                        const xdb = xdbOf(o);
+                        return xdb ? textPlan.idFor(xdb, text) : null;
+                    },
+                    warnings: res.warnings,
+                });
+                if (rep.plates || rep.bossHeads || rep.markers || rep.messengers)
+                    console.warn(
+                        `puzzles ${title}: ${rep.plates} plates -> ${rep.detectors} detectors, ${rep.bossHeads} boss heads (${rep.deathCounters} counters), ${rep.messengers} messengers, ${rep.markers} markers (${rep.markersSkipped} skipped)`,
+                    );
             });
         }
         const cl = plan0?.byPath.get(normalizeLevelRef(pc.path));

@@ -164,7 +164,9 @@ export const PS2_SUBSTITUTES: ReadonlyMap<number, number> = new Map([
     [101, 30],
     [91, 171],
     [80, 71],
-    [123, 223],
+    // Combination Lock / Class Messenger: the PS2 Combo Lock (223) lives in LEVEL4ON, which no template lists; the Message Relay
+    // (224, LEVEL1ON) is in reach and does what both do in the Rift Crystal puzzle (forward a message to the linked objects).
+    [123, 224],
     [137, 224],
     [130, 17],
     // Pressure Plate: the only PS2 plates live in LEVEL4ON / LEVEL8OS (not reachable from the template); a static plate prop stays.
@@ -172,10 +174,13 @@ export const PS2_SUBSTITUTES: ReadonlyMap<number, number> = new Map([
     [120, 10],
     // PC Water Droplet (144) is the PS2 Water Drip (146: Type / Period / Deviation + Max Particles Per Period); PS2 reuses 144 for shields.
     [144, 146],
+    // Dr. Evil (the four heads of the Rift World boss): the Giant is the largest humanoid creature; the clone keeps the PS2 model
+    // and gets the PC class's stats by field name (Initial Health 250 ...). `BOSS_STANDINS` scales and places the objects.
+    [92, 59],
 ]);
 
-/** PC engine ids whose PS2 class is cloned even though the PS2 has another class under the same number (144 = shields on PS2). */
-export const FORCED_SUBSTITUTES: ReadonlySet<number> = new Set([144]);
+/** PC engine ids whose PS2 class is cloned even though the PS2 has another class under the same number (144 = shields on PS2, 92 = a creature without the Dr. Evil fields). */
+export const FORCED_SUBSTITUTES: ReadonlySet<number> = new Set([144, 92]);
 
 /**
  * Substituted PC engine ids whose clone gets the converted PC model instead of the template's: the Pirate Ship (a spline
@@ -183,6 +188,43 @@ export const FORCED_SUBSTITUTES: ReadonlySet<number> = new Set([144]);
  * plate that cannot be pressed.
  */
 export const MODEL_STANDINS: ReadonlySet<number> = new Set([130, 88, 100, 101, 29]);
+
+/**
+ * Fix-ups of the class record cloned for a PC engine id, by PS2 field name, applied after the field-name merge:
+ * `reset` keeps the template's own defaults (no PC values, so all PC classes of the id share ONE record - the per-object
+ * values are written as object parameters by `ootfpuzzle.ts`), `rename` copies a scalar PC field into a differently named PS2
+ * field, `set` forces a value. Ids listed here are accepted at any field coverage.
+ */
+export const CLONE_ADJUST: ReadonlyMap<
+    number,
+    { reset?: boolean; rename?: readonly (readonly [string, string])[]; set?: readonly (readonly [string, number])[] }
+> = new Map([
+    // Dr. Evil heads: dormant until the level's trigger wakes them (the PC "Emerge only when triggered?"), the PS2 name of it.
+    [92, { set: [['Wait For Trigger', 1]] }],
+    // Combination Lock: forwards the switches' ON to the counters it is linked to.
+    [123, { reset: true, set: [['Incoming Message', 1], ['Outgoing Message', 1]] }],
+    // Class Messenger: relays the message that arrives (ON from the counter) as the PC object's "Message to send".
+    [137, { reset: true, rename: [['Message to send', 'Outgoing Message']], set: [['Incoming Message', 1]] }],
+    // Map Object / Map Trigger (quest markers): one shared PS2 map-marker record, journal text and map position per object.
+    [104, { reset: true }],
+]);
+
+function adjustClone(pc: OdbClass, tpl: OdbClass, m: Merge, adj: NonNullable<ReturnType<typeof CLONE_ADJUST.get>>): Merge {
+    const data = adj.reset ? [...(tpl.data ?? [])] : [...m.data];
+    const tf = tpl.fields ?? [];
+    const idx = (name: string): number => tf.findIndex((f) => f.name.trim().toLowerCase() === name.toLowerCase());
+    for (const [from, to] of adj.rename ?? []) {
+        const i = (pc.fields ?? []).findIndex((f) => f.name.trim().toLowerCase() === from.toLowerCase());
+        const j = idx(to);
+        const v = i >= 0 ? pc.data?.[i] : undefined;
+        if (j >= 0 && v !== undefined && !fieldIsIndirect(tf[j]!.type)) data[j] = v;
+    }
+    for (const [name, value] of adj.set ?? []) {
+        const j = idx(name);
+        if (j >= 0 && !fieldIsIndirect(tf[j]!.type)) data[j] = value >>> 0;
+    }
+    return { ...m, data };
+}
 
 /** Particle emitter engine classes whose clone keeps the template's emitter model (the PC model is not converted). */
 const FX_OWN_MODEL_RFL: ReadonlySet<number> = new Set(
@@ -745,16 +787,25 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
                     console.warn(`TPLRIG ${cls.name} (${mj} joints) cand "${c.cls.name}"#${c.id} joints=${opt.templateJoints?.(c.cls, c.odb.file)} flags=${fl}`);
                 }
         }
-        for (const c of fresh.length ? fresh : pool) {
+        // `reset` classes (map markers) always use one template, so every PC class of the id folds into one record.
+        const resetTemplate = CLONE_ADJUST.get(rfl)?.reset
+            ? [...pool].sort((a, b) => a.odb.dbIndex - b.odb.dbIndex || a.id - b.id).filter((c) => {
+                  const ti = c.cls.fields?.findIndex((f) => f.name.trim().toLowerCase() === 'type') ?? -1;
+                  return ti < 0 || c.cls.data?.[ti] === 1;
+              })
+            : [];
+        for (const c of resetTemplate.length ? resetTemplate.slice(0, 1) : fresh.length ? fresh : pool) {
             const m = mergeDefaults(cls, c.cls, opt.mapClassRef, opt.mapAnimFor?.(cls), wantsModel, opt.modelJoints?.(cls));
             if (!best || m.coverage > best.m.coverage || (m.coverage === best.m.coverage && m.same > best.m.same))
                 best = { c, m };
         }
-        const { c, m } = best!;
+        const { c } = best!;
+        const adj = CLONE_ADJUST.get(rfl);
+        const m = adj ? adjustClone(cls, c.cls, best!.m, adj) : best!.m;
         usedTemplates.add(`${c.odb.file}|${c.id}`);
         if (opt.rewriteText && c.cls.fields) opt.rewriteText(c.odb.file, c.cls.fields, m.data);
         // Model-less scenery (Dragon Detector / Dragon Location Object ... markers) is inert whatever the template's fields are.
-        const floorZero = wantsModel || (substituted && kind === 'mp') || (modelless && kind === 'scenery');
+        const floorZero = wantsModel || (substituted && kind === 'mp') || !!adj || (modelless && kind === 'scenery');
         if (m.coverage < (floorZero ? 0 : minCoverage)) {
             unsupported.set(key, {
                 reason: 'low-coverage',

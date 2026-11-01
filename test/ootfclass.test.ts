@@ -243,6 +243,28 @@ describe('ootfclass', () => {
         expect(plan.synthesized[0]?.cls.data?.[1]).toBe(f32(3));
     });
 
+    it('turns the Combination Lock (123) and Class Messenger (137) into Message Relays and forces the creature wake flag of Dr. Evil (92)', () => {
+        const relayFields: [number, string][] = [
+            [T_ENUM, 'Incoming Message'],
+            [T_ENUM, 'Outgoing Message'],
+        ];
+        const o = odb();
+        (o.classes as Map<number, OdbClass>).set(30, cls(30, 'Message Relay', 224, relayFields, [1, 0]));
+        const lockFields: [number, string][] = [[T_ENUM, "Toggle 'A' Message"], [T_ENUM, 'Fire Message']];
+        const messengerFields: [number, string][] = [[T_INT, 'Receiver Class'], [T_ENUM, 'Message to send']];
+        const pc = [
+            { db: 1, id: 1, cls: cls(1, 'combination lock', 123, lockFields, [1, 2]) },
+            { db: 1, id: 2, cls: cls(2, 'Class Messenger', 137, messengerFields, [3235, 6]) },
+        ];
+        const plan = planClassMapping(pc, [o], { substituteEngineId: PS2_SUBSTITUTES });
+        expect(plan.unsupported.size).toBe(0);
+        const lock = plan.synthesized.find((s) => s.name === 'combination lock')!;
+        expect(lock.cls.data).toEqual([1, 1]); // forwards ON
+        const messenger = plan.synthesized.find((s) => s.name === 'Class Messenger')!;
+        expect(messenger.cls.data).toEqual([1, 6]); // relays the PC "Message to send"
+        expect(PS2_SUBSTITUTES.get(92)).toBe(59);
+    });
+
     it('maps an aliased PC creature name to the differently named PS2 class', () => {
         expect(aliasSquash('Troll Leather')).toBe('leatherwartockcenter');
         expect(aliasSquash('Timer')).toBe('timer');
