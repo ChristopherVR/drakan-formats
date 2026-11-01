@@ -221,6 +221,32 @@ describe('applyCampaignExits', () => {
         expect(added.find((x) => x.data[0] === plan.stringIds.get('OotF 03 - Canyon'))!.scale).toEqual([2, 2, 2]);
     });
 
+    it('adds a linked trigger detector to real exits and turns a non-exit twin into the exit in place', () => {
+        const plan = planCampaign(fixture());
+        const village = plan.levels.find((l) => l.path.endsWith('Ruined Village.lvl'))!;
+        // object 10 is the converted PC exit but of a class that is no exit on PS2 (a synthesized clone)
+        const list: LvlObjectList = { objects: [obj(1, 1), obj(10, 5)], warnings: [] };
+        const r = applyCampaignExits(list, village, plan, {
+            ...ctxFor(() => false),
+            detectorClass: { dbIndex: 2, classId: 3050 },
+        });
+        expect(r.warnings.some((w) => w.includes('replaced it with the exit class'))).toBe(true);
+        // no inert twin: object 10 kept its id and became the exit class
+        const ten = list.objects.find((x) => x.id === 10)!;
+        expect(ten.classId).toBe(966);
+        expect(list.objects.filter((x) => x.classId === 966 && x.dbIndex === 8)).toHaveLength(3); // 10, the exit whose class was dropped, the arrival marker
+        // every real (pc) exit has a detector that links to it; the arrival marker has none
+        const dets = list.objects.filter((x) => x.classId === 3050);
+        expect(dets).toHaveLength(r.detectors);
+        expect(dets.length).toBeGreaterThanOrEqual(1);
+        for (const d of dets) {
+            expect(d.scale).toEqual([3, 3, 3]);
+            const target = list.objects.find((x) => x.id === d.links[0])!;
+            expect(target.classId).toBe(966);
+        }
+        expect(dets.length).toBe(village.exits.filter((e) => e.reason === 'pc' && e.destTitle).length);
+    });
+
     it('setExitDestinationId keeps string payloads of other parameters intact', () => {
         const o = obj(1, 1, {
             params: [{ fieldIndex: 3, type: FIELD_STRING, name: 'Name', nameRaw: new Uint8Array(6) }],

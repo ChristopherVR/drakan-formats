@@ -170,6 +170,21 @@ function rynnStart(pc: PcLevel): Vec3 | null {
     return null;
 }
 
+/** The PC intro's closing trigger: a detector object of the class "Stomp" (position grounded on the terrain), or null. */
+function introEnd(pc: PcLevel | undefined): Vec3 | null {
+    if (!pc) return null;
+    for (const o of pc.list.objects) {
+        const cls = pc.classes.get(o.dbIndex)?.get(o.classId);
+        if (cls && /^stomp$/i.test(cls.name.trim())) {
+            const p: Vec3 = [...o.pos];
+            const g = terrainGroundBelow(pc.terrain, p[0], p[2], p[1] + 2000);
+            if (Number.isFinite(g)) p[1] = g;
+            return p;
+        }
+    }
+    return null;
+}
+
 function nameStringId(h: PcLevel['header']): number | null {
     const m = /^<0x([0-9a-fA-F]+)>/.exec(h.name.text);
     return m ? parseInt(m[1]!, 16) : null;
@@ -304,7 +319,9 @@ export function planCampaign(levels: readonly PcLevel[], opt: CampaignOptions = 
     const start = out[0];
     const first = opt.firstPath ? find(opt.firstPath) : (out.find((l) => /^ruined village$/i.test(l.pcName)) ?? out[1] ?? null);
     if (start && first && start !== first && !start.exits.some((e) => e.destPath)) {
-        const at = start.rynn ?? [0, 0, 0];
+        // Where the PC intro ends: the "Stomp" detector the player walks into (it plays the closing sequence). Without one the
+        // hand-over sits at the Rynn start.
+        const at = introEnd(pcByPath.get(normalizeLevelRef(start.path))) ?? start.rynn ?? [0, 0, 0];
         start.exits.push(synth(start, first, 'intro-next', at, opt.arrivalOffset));
     }
 
@@ -448,6 +465,15 @@ export interface ApplyExitsContext {
     exitFieldOf(o: LvlObject): ExitField | null;
     /** Exit class used for added exits (`ps2ClassTables` entry whose engine class is 55; a "Level Transition from 1 to 2" class). */
     exitClass: { dbIndex: number; classId: number; field: ExitField };
+    /**
+     * "Trigger Detector" class of the template (engine class 0x1003d). On PS2 nothing fires an exit by the player standing on it:
+     * every exit of the disc is the link target of a detector box (docs/journal/2026-11-01/level-exit-walk-in.md), while a PC exit
+     * is touched itself. When given, every real exit (`reason` pc) gets a detector box centred on it that links to the exit.
+     */
+    detectorClass?: { dbIndex: number; classId: number };
+    /** Size of that box in cells of 2048 units (default 3 x 3 x 3), centre lifted by `detectorLift` units (default 700). */
+    detectorSize?: Vec3;
+    detectorLift?: number;
 }
 
 export interface ApplyExitsResult {
@@ -457,6 +483,8 @@ export interface ApplyExitsResult {
     added: number;
     /** PC exits whose destination is not in the campaign (left as converted). */
     external: number;
+    /** Trigger detectors added in front of exits. */
+    detectors: number;
     warnings: string[];
 }
 
@@ -495,36 +523,65 @@ export function setExitDestinationId(o: LvlObject, field: ExitField, id: number)
  * whose PC class was dropped, and the synthesized exits (intro hand-over, arrival markers), are added with the exit class.
  */
 export function applyCampaignExits(list: LvlObjectList, level: CampaignLevel, plan: CampaignPlan, ctx: ApplyExitsContext): ApplyExitsResult {
-    const res: ApplyExitsResult = { rewritten: 0, added: 0, external: 0, warnings: [] };
+    const res: ApplyExitsResult = { rewritten: 0, added: 0, external: 0, detectors: 0, warnings: [] };
+    const converted = new Set(list.objects.map((o) => o.id)); // objects added below take ids above every PC id and must not be mistaken for one
     for (const e of level.exits) {
         if (!e.destTitle) {
             res.external++;
             continue;
         }
         const id = plan.stringIds.get(e.destTitle)!;
-        const existing = !e.synthetic ? list.objects.find((o) => o.id === e.pcObjectId) : undefined;
+        const existing = !e.synthetic && converted.has(e.pcObjectId) ? list.objects.find((o) => o.id === e.pcObjectId) : undefined;
         const field = existing ? ctx.exitFieldOf(existing) : null;
+        let exitObj: LvlObject | undefined;
         if (existing && field) {
             setExitDestinationId(existing, field, id);
             res.rewritten++;
-            continue;
+            exitObj = existing;
+        } else {
+            const tpl = list.objects.find((o) => o.classId === ctx.exitClass.classId && o.dbIndex === ctx.exitClass.dbIndex);
+            const { object } = addObject(list, {
+                classId: ctx.exitClass.classId,
+                dbIndex: ctx.exitClass.dbIndex,
+                pos: e.pos,
+                rot: e.rot,
+                ...(tpl ? { templateId: tpl.id } : {}),
+            });
+            if (e.scale) {
+                object.flags |= FLAG_SCALED;
+                object.scale = [...e.scale];
+            }
+            // A fresh body must not inherit the template exit's destination override.
+            setExitDestinationId(object, ctx.exitClass.field, id);
+            if (existing) {
+                // The converted object is of a synthesized class that is no exit on PS2 (a second exit at the same spot would leave an
+                // inert twin with no destination). Keep its id (detectors / plates link to it), position and scale; make it the exit.
+                existing.classId = object.classId;
+                existing.dbIndex = object.dbIndex;
+                existing.params = object.params;
+                existing.data = object.data;
+                list.objects.splice(list.objects.indexOf(object), 1);
+                res.rewritten++;
+                res.warnings.push(`${level.title}: object ${existing.id} is not an exit class on PS2; replaced it with the exit class`);
+                exitObj = existing;
+            } else {
+                res.added++;
+                exitObj = object;
+            }
         }
-        const tpl = list.objects.find((o) => o.classId === ctx.exitClass.classId && o.dbIndex === ctx.exitClass.dbIndex);
-        const { object } = addObject(list, {
-            classId: ctx.exitClass.classId,
-            dbIndex: ctx.exitClass.dbIndex,
-            pos: e.pos,
-            rot: e.rot,
-            ...(tpl ? { templateId: tpl.id } : {}),
-        });
-        if (e.scale) {
-            object.flags |= FLAG_SCALED;
-            object.scale = [...e.scale];
+        if (ctx.detectorClass && exitObj && (e.reason === 'pc' || e.reason === 'intro-next')) {
+            const size = ctx.detectorSize ?? [3, 3, 3];
+            const { object: det } = addObject(list, {
+                classId: ctx.detectorClass.classId,
+                dbIndex: ctx.detectorClass.dbIndex,
+                pos: [exitObj.pos[0], exitObj.pos[1] + (ctx.detectorLift ?? 700), exitObj.pos[2]],
+                rot: [0, 0, 0],
+            });
+            det.flags |= FLAG_SCALED;
+            det.scale = [...size];
+            det.links = [exitObj.id];
+            res.detectors++;
         }
-        // A fresh body must not inherit the template exit's destination override.
-        setExitDestinationId(object, ctx.exitClass.field, id);
-        res.added++;
-        if (existing) res.warnings.push(`${level.title}: object ${existing.id} is not an exit class on PS2; added a new exit`);
     }
     return res;
 }

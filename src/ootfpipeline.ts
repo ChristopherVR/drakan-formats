@@ -690,6 +690,7 @@ export async function convertOotfLevels(
     };
     const musicClass = findPs2Class((c) => /^triggered music loop$/i.test(c.name.trim()) && !!c.fields);
     const exitClass = findPs2Class((c) => c.rflClass === 55 && transitionFieldIndex(c.fields) >= 0);
+    const detectorClass = findPs2Class((c) => c.rflClass === 61 && /^trigger detector$/i.test(c.name.trim()));
     // Audit: music triggers never go through the class plan (the resolver below maps them to the Triggered Music Loop class and
     // `applyMusicTriggers` rewrites them), and multiplayer pads / crystals have no PS2 object at all (the editor exports them as
     // arena spawns and markers: `ootfArenaFromPc`). Say so instead of reporting them as unsupported.
@@ -950,6 +951,7 @@ export async function convertOotfLevels(
                 const i = transitionFieldIndex(exitClass.cls.fields);
                 const r = applyCampaignExits(lvl.objects, cl, plan0, {
                     exitFieldOf: exitField,
+                    ...(detectorClass ? { detectorClass: { dbIndex: detectorClass.t.dbIndex, classId: detectorClass.t.classId } } : {}),
                     exitClass: {
                         dbIndex: exitClass.t.dbIndex,
                         classId: exitClass.t.classId,
@@ -1070,6 +1072,12 @@ export async function convertOotfLevels(
         const lf = Number((globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['DRAKAN_TERRAIN_LAYERFLAGS'] ?? 0);
         if (lf) parts.terrain = parts.terrain.map((L) => ({ ...L, flags: L.flags | lf }));
         res.levels.push({ pcPath: pc.path, title, parts, splats: tex ? { TXD: tex.txd } : {} });
+    }
+    // The pack lists the levels in this order (mod.toml `levels`, whose first entry is the campaign start): play order,
+    // not the order the caller passed them in (a directory listing is alphabetical).
+    if (plan0) {
+        const at = (l: OotfLevelOut): number => plan0.byPath.get(normalizeLevelRef(l.pcPath))?.index ?? Number.MAX_SAFE_INTEGER;
+        res.levels.sort((a, b) => at(a) - at(b));
     }
 
     // ---- files
