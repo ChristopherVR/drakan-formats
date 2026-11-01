@@ -19,7 +19,7 @@ import { decodeFieldValue, fieldBase, fieldIsArray, fieldIsIndirect, FIELD_STRIN
 import { mangleComponent } from './levellist.ts';
 import { FLAG_SCALED, FLAG_VISIBLE, addObject, type LvlObject, type LvlObjectList, type LvlParam, type Vec3 } from './lvl.ts';
 import type { PcLevel } from './pc.ts';
-import { terrainGroundBelow } from './terrain.ts';
+import { layerHeightAt, terrainGroundBelow, type TerrainLayer } from './terrain.ts';
 import { pcDependencyKey, pcLevelName, resolvePcPath } from './pc.ts';
 
 // ---------------------------------------------------------------- types
@@ -496,6 +496,57 @@ export interface ApplyExitsContext {
     detectorParams?: readonly { fieldIndex: number; type: number; name: string; value: number }[];
     /** "Timer" class of the template (engine class 0x1003e): exits with `autoSeconds` get one that fires them (Trigger Message 5, as on the disc). */
     timerClass?: { dbIndex: number; classId: number; fields: readonly Pick<ClassFieldDef, 'name' | 'type'>[] };
+    /** Terrain of the PC level: lets exits that hang far from the walkable surface get boxes down to the real floor (see `exitBoxes`). */
+    terrain?: readonly TerrainLayer[];
+}
+
+/** One detector box for an exit: centre height and height in cells of 2048 units (the x / z size stays the configured one). */
+export interface ExitBox {
+    cy: number;
+    sizeY: number;
+}
+
+/** An exit this far (or less) above the floor under it is reached by a box that spans floor to exit. */
+export const EXIT_SPAN_MAX = 16000;
+const EXIT_NEAR = 1500;
+
+/**
+ * Detector boxes for an exit at height `y` over (x, z). The PC exit is touched where it hangs, but many sit above (a doorway
+ * layer 10000 over the floor in the Succubus Lair, 42000 in Volcanic) or below the surface a walker can stand on (Islands: the
+ * exit at height 0 lies 77000 under the island), so the default box centred 700 over the exit is never entered. Cases:
+ *   * exit within `EXIT_NEAR` of the floor, or no terrain under it: one default box at `y + lift` (unchanged behaviour);
+ *   * exit up to `EXIT_SPAN_MAX` above the floor: a box spanning floor to `y` plus a default box at `floor + lift`;
+ *   * exit higher: a default box at every walkable surface (floor / in-between layers) in the 60000 below it, plus a box that
+ *     spans from the lowest of them up to `y`;
+ *   * exit under the surface: boxes over the nearest surface (default one plus a tall one for a flier).
+ */
+export function exitBoxes(
+    terrain: readonly TerrainLayer[] | undefined,
+    x: number,
+    z: number,
+    y: number,
+    lift: number,
+    sizeY: number,
+): ExitBox[] {
+    const plain = (cy: number): ExitBox => ({ cy, sizeY });
+    if (!terrain?.length) return [plain(y + lift)];
+    const floor = terrainGroundBelow(terrain, x, z, y);
+    if (Number.isNaN(floor)) return [plain(y + lift)];
+    const gap = y - floor;
+    const span = (lo: number, hi: number): ExitBox => ({ cy: (lo + hi) / 2, sizeY: (hi - lo) / 2048 });
+    if (gap >= -EXIT_NEAR && gap <= EXIT_NEAR) return [plain(y + lift)];
+    if (gap < 0) return [plain(floor + lift), span(floor, floor + 6144)];
+    if (gap <= EXIT_SPAN_MAX) return [span(floor, y + 1024), plain(floor + lift)];
+    const surfaces: number[] = [];
+    for (const L of terrain) {
+        if (L.type === 1) continue;
+        const h = layerHeightAt(L, x, z);
+        if (!Number.isNaN(h) && h <= y + 600 && h >= y - 60000) surfaces.push(h);
+    }
+    const lowest = Math.min(floor, ...surfaces);
+    const out: ExitBox[] = [span(lowest, y + 1024)];
+    for (const h of [...new Set(surfaces.map((v) => Math.round(v)))].sort((a, b) => a - b)) out.push(plain(h + lift));
+    return out;
 }
 
 export interface ApplyExitsResult {
@@ -608,36 +659,40 @@ export function applyCampaignExits(list: LvlObjectList, level: CampaignLevel, pl
             // Centred on the exit's own height: the terrain function picks other layers under many exits (the real floor is the exit
             // height, 6000 to 10000 above the layer it finds); a box stretched down to that layer was not touched by a walker standing in it.
             const size: Vec3 = [...(ctx.detectorSize ?? [2, 2, 2])] as Vec3;
-            const cy = exitObj.pos[1] + (ctx.detectorLift ?? 700);
-            const { object: det } = addObject(list, {
-                classId: ctx.detectorClass.classId,
-                dbIndex: ctx.detectorClass.dbIndex,
-                pos: [exitObj.pos[0], cy, exitObj.pos[2]],
-                rot: [0, 0, 0],
-            });
-            // `addObject` copies the body of the first object of the class in the list: in levels that have converted PC detectors
-            // that carried their parameters over (Trigger Message 0, Detect Only Once, Task ...) and the exit never got its message.
-            det.flags = FLAG_VISIBLE | FLAG_SCALED;
-            det.initialEvents = 1;
-            det.radius = null;
-            det.scale = size;
-            setScalarParams(det, ctx.detectorParams ?? []);
-            det.links = [exitObj.id];
-            res.detectors++;
-            if (ctx.mountDetector) {
-                const { object: md } = addObject(list, {
+            const boxes = exitBoxes(ctx.terrain, exitObj.pos[0], exitObj.pos[2], exitObj.pos[1], ctx.detectorLift ?? 700, size[1]);
+            for (const box of boxes) {
+                const pos: Vec3 = [exitObj.pos[0], box.cy, exitObj.pos[2]];
+                const sc: Vec3 = [size[0], box.sizeY, size[2]];
+                const { object: det } = addObject(list, {
                     classId: ctx.detectorClass.classId,
                     dbIndex: ctx.detectorClass.dbIndex,
-                    pos: [exitObj.pos[0], cy, exitObj.pos[2]],
+                    pos,
                     rot: [0, 0, 0],
                 });
-                md.flags = FLAG_VISIBLE | FLAG_SCALED;
-                md.initialEvents = 1;
-                md.radius = null;
-                md.scale = [...size];
-                setScalarParams(md, [{ ...ctx.mountDetector, value: 1 }]);
-                md.links = [exitObj.id];
+                // `addObject` copies the body of the first object of the class in the list: in levels that have converted PC detectors
+                // that carried their parameters over (Trigger Message 0, Detect Only Once, Task ...) and the exit never got its message.
+                det.flags = FLAG_VISIBLE | FLAG_SCALED;
+                det.initialEvents = 1;
+                det.radius = null;
+                det.scale = sc;
+                setScalarParams(det, ctx.detectorParams ?? []);
+                det.links = [exitObj.id];
                 res.detectors++;
+                if (ctx.mountDetector) {
+                    const { object: md } = addObject(list, {
+                        classId: ctx.detectorClass.classId,
+                        dbIndex: ctx.detectorClass.dbIndex,
+                        pos,
+                        rot: [0, 0, 0],
+                    });
+                    md.flags = FLAG_VISIBLE | FLAG_SCALED;
+                    md.initialEvents = 1;
+                    md.radius = null;
+                    md.scale = [...sc];
+                    setScalarParams(md, [{ ...ctx.mountDetector, value: 1 }]);
+                    md.links = [exitObj.id];
+                    res.detectors++;
+                }
             }
         }
         if (ctx.timerClass && exitObj && e.autoSeconds) {

@@ -268,8 +268,17 @@ export type TextureMode = 'auto' | 'indexed' | 'truecolor';
 export interface Ps2TextureOptions {
     /** `auto`: 8 bpp when at most 256 colours, else 16 bpp (1:5:5:5), or quantised 8 bpp with alpha when alpha is graded.
      * `indexed`: always 8 bpp (smaller; quantises). `truecolor`: 8 bpp only when at most 256 colours (exact), else 32 bpp
-     * RGBA (flags word 7, alpha 0..0x80), no quantising or 5-bit reduction. Default `truecolor` (the PC is not memory bound). */
+     * RGBA (flags word 7, alpha 0..0x80), no quantising or 5-bit reduction, but only up to `maxTruecolorPixels` (see there).
+     * Default `truecolor` (the PC is not memory bound). */
     mode?: TextureMode;
+    /**
+     * `truecolor` only: the largest texture (w x h) written as 32 bpp when it has more than 256 colours; bigger ones are
+     * quantised to 8 bpp (median cut, alpha kept in the palette; mean error 0.2..0.4 of 255 on 256 px sources, offline
+     * measure of 2026-11-01). Default 128 x 128. Cause: the guest builds mip maps of every texture it uploads, and ~33
+     * 256 x 256 32 bpp (or 16 bpp) object textures made Ruined Village Book load for 60 s instead of 6 s (journal
+     * 2026-11-01/ootf-book-slow-load.md). Terrain passes Infinity: its 256 px 32 bpp textures load in time and carry the visible detail.
+     */
+    maxTruecolorPixels?: number;
     /** Largest edge written (default 256, the largest size on the disc). */
     maxSize?: number;
     /**
@@ -296,6 +305,9 @@ export interface Ps2Texture {
     /** True when the source had to be quantised or reduced (colour loss). */
     lossy: boolean;
 }
+
+/** Largest 32 bpp texture (pixels) of an object / creature texture: 128 x 128. */
+export const DEFAULT_MAX_TRUECOLOR_PIXELS = 128 * 128;
 
 const PS2_OPAQUE = 0x7f; // palette alpha of opaque colours on the disc (201 of 207 palettes)
 
@@ -356,7 +368,8 @@ export function encodePs2Texture(src: RgbaImage, opt: Ps2TextureOptions = {}): P
     // An enlarged texture is stored 8 bpp (median cut): 128 px at 32 bpp is 64 KB and thrashes the GS texture memory
     // (80k texture decodes in Ruined Village instead of 3k, a 30 s level load); the disc's 128 px ground is 8 bpp too.
     const mode = enlarged && opt.mode !== 'auto' ? 'indexed' : (opt.mode ?? 'truecolor');
-    const indexed = colors.size <= 256 || mode === 'indexed' || (translucent > 0 && mode !== 'truecolor');
+    const tooBig = mode === 'truecolor' && px > (opt.maxTruecolorPixels ?? DEFAULT_MAX_TRUECOLOR_PIXELS);
+    const indexed = colors.size <= 256 || mode === 'indexed' || tooBig || (translucent > 0 && mode !== 'truecolor');
     if (indexed) {
         let lossy = false;
         let palette: number[];

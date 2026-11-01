@@ -46,6 +46,7 @@ import {
 } from './ootfcampaign.ts';
 import { applyMusicTriggers, findMusicTriggers, musicTriggerClassNames } from './ootfmusic.ts';
 import { applyPuzzleLogic } from './ootfpuzzle.ts';
+import type { Ps2TextureOptions, TextureMode } from './ootftex.ts';
 import { TextPlan, isTextField, parseRrcStrings, rewriteClassTextDefaults, rewriteObjectTexts } from './ootftext.ts';
 import { writePs2Srsc, type Ps2Entry } from './ootfcontainer.ts';
 import {
@@ -269,6 +270,15 @@ function owner(pc: PcLevel, db: number): string | null {
     return p ? p.replace(/\.odb$/i, '') : null;
 }
 
+/** Test aid: OOTF_TEXMODE=auto|indexed|truecolor and OOTF_TEXMAX=<edge> override the texture writer defaults. */
+function ootfTextureEnv(): Ps2TextureOptions | undefined {
+    const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
+    const mode = env?.['OOTF_TEXMODE'];
+    const max = Number(env?.['OOTF_TEXMAX'] ?? 0);
+    if (!mode && !max) return undefined;
+    return { ...(mode ? { mode: mode as TextureMode } : {}), ...(max ? { maxSize: max } : {}) };
+}
+
 /** Convert one or more PC levels that share an asset container and class plan. */
 export async function convertOotfLevels(
     src: PcFileSource,
@@ -340,6 +350,7 @@ export async function convertOotfLevels(
         firstAnimId:
             Math.max(maxId(ps2.hostAdb, 0x0501), ...[...(ps2.adbs?.values() ?? [])].map((a) => maxId(a, 0x0501)), 99) + 1,
         skinned: opt.skinned,
+        texture: ootfTextureEnv(),
         displayList:
             opt.displayListAll ?? (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_DL_ALL'] === '1'
                 ? /./
@@ -962,7 +973,7 @@ export async function convertOotfLevels(
                 });
                 if (rep.plates || rep.bossHeads || rep.markers || rep.messengers)
                     console.warn(
-                        `puzzles ${title}: ${rep.plates} plates -> ${rep.detectors} detectors, ${rep.bossHeads} boss heads (${rep.deathCounters} counters), ${rep.messengers} messengers, ${rep.markers} markers (${rep.markersSkipped} skipped)`,
+                        `puzzles ${title}: ${rep.plates} plates -> ${rep.detectors} detectors, ${rep.bossHeads} boss heads (${rep.deathCounters} counters), ${rep.messengers} messengers, ${rep.markers} markers (${rep.markersSkipped} skipped), ${rep.quieted} cloud ring links removed`,
                     );
             });
         }
@@ -977,6 +988,7 @@ export async function convertOotfLevels(
                 const i = transitionFieldIndex(exitClass.cls.fields);
                 const r = applyCampaignExits(lvl.objects, cl, plan0, {
                     exitFieldOf: exitField,
+                    terrain: pc.terrain,
                     ...(detectorClass ? { detectorClass: { dbIndex: detectorClass.t.dbIndex, classId: detectorClass.t.classId } } : {}),
                     ...(detectorClass
                         ? (() => {
@@ -1084,6 +1096,11 @@ export async function convertOotfLevels(
                     return sn ? i % sn === sk : true;
                 }),
             };
+        }
+        if (dbgEnv['DRAKAN_DBG_DROPIDS']) {
+            // Test aid: DRAKAN_DBG_DROPIDS=<id>,<id>... drops those objects (ids are PC ids).
+            const ids = new Set(dbgEnv['DRAKAN_DBG_DROPIDS'].split(',').filter(Boolean).map(Number));
+            parts.objects = { ...parts.objects, objects: parts.objects.objects.filter((o) => !ids.has(o.id)) };
         }
         if (dbgEnv['DRAKAN_DBG_MAXNAME']) {
             // Test aid: DRAKAN_DBG_MAXNAME=<regex>=<n> keeps only the first n objects whose class name matches.

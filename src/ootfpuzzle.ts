@@ -45,6 +45,8 @@ export interface PuzzleReport {
     messengers: number;
     markers: number;
     markersSkipped: number;
+    /** Links to rift cloud rings that were removed (see `quietCloudRings`). */
+    quieted: number;
 }
 
 const norm = (s: string): string => s.trim().toLowerCase();
@@ -281,12 +283,36 @@ function testWake(env: PuzzleEnv): void {
 }
 
 /** Apply every converter step of this module to one converted level. */
+/** The rift's cloud rings (Volcanic, Rift World): large spinning movers that the PC engine culls but the PS2 engine animates everywhere. */
+const CLOUD_RING = /^(cloud\s*ring|clowd\s*ring)\s*\d*$/i;
+
+/**
+ * Volcanic's Rift Timer (Start Mode 0, links read as positions since 2026-11-01) switches 17 rift effect objects on at the start,
+ * 8 of them cloud rings: from then on the guest ran at 2 frames per second (4 flips per 2 s against 270). Dropping the timer, or only the
+ * cloud rings, restored 270 and 90 flips (journal 2026-11-01/ootf-link-regression.md). The rings stay in the level as scenery; nothing
+ * switches them on.
+ */
+function quietCloudRings(env: PuzzleEnv, rep: PuzzleReport): void {
+    const rings = new Set<number>();
+    for (const o of env.pc.list.objects) {
+        const name = env.pc.classes.get(o.dbIndex)?.get(o.classId)?.name ?? '';
+        if (CLOUD_RING.test(name.trim())) rings.add(o.id);
+    }
+    if (!rings.size) return;
+    for (const o of env.list.objects) {
+        const keep = o.links.filter((l) => !rings.has(l));
+        rep.quieted += o.links.length - keep.length;
+        if (keep.length !== o.links.length) o.links = keep;
+    }
+}
+
 export function applyPuzzleLogic(env: PuzzleEnv): PuzzleReport {
-    const rep: PuzzleReport = { plates: 0, detectors: 0, bossHeads: 0, deathCounters: 0, messengers: 0, markers: 0, markersSkipped: 0 };
+    const rep: PuzzleReport = { plates: 0, detectors: 0, bossHeads: 0, deathCounters: 0, messengers: 0, markers: 0, markersSkipped: 0, quieted: 0 };
     platesToDetectors(env, rep);
     messengers(env, rep);
     bossHeads(env, rep);
     markers(env, rep);
+    quietCloudRings(env, rep);
     const counters = new Set<number>();
     for (const o of env.pc.list.objects) if (rflOf(env.pc, o) === 92) for (const l of env.list.objects.find((x) => x.id === o.id)?.links ?? []) counters.add(l);
     testEnding(env, counters);

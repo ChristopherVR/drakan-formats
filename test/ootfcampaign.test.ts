@@ -10,6 +10,8 @@ import {
     TextPlan,
     applyCampaignExits,
     applyMusicTriggers,
+    exitBoxes,
+    type TerrainLayer,
     campaignExitStrings,
     campaignRegistration,
     cleanGameText,
@@ -455,5 +457,48 @@ describe('music', () => {
         // the untouched silent trigger stays as converted
         expect(list.objects.find((o) => o.id === 52)!.classId).toBe(99);
         expect(r.tracks.get(115)).toBe(1);
+    });
+});
+
+describe('exitBoxes', () => {
+    const layer = (type: number, h: number): TerrainLayer =>
+        ({
+            type,
+            width: 4,
+            height: 4,
+            originX: 0,
+            originZ: 0,
+            heights: new Float32Array(25).fill(h),
+            cellFlags: new Uint16Array(16),
+            cellTexLeft: new Uint32Array(16),
+            cellTexRight: new Uint32Array(16),
+        }) as unknown as TerrainLayer;
+    const x = 4096;
+    const z = 4096;
+
+    it('keeps the single box for an exit on the floor and for no terrain', () => {
+        expect(exitBoxes(undefined, x, z, 5000, 700, 2)).toEqual([{ cy: 5700, sizeY: 2 }]);
+        expect(exitBoxes([layer(0, 5000)], x, z, 5000, 700, 2)).toEqual([{ cy: 5700, sizeY: 2 }]);
+    });
+
+    it('spans floor to exit for a doorway exit and adds a box on the floor', () => {
+        const b = exitBoxes([layer(0, 209000), layer(2, 219000)], x, z, 219000, 700, 2);
+        expect(b).toHaveLength(2);
+        expect(b[0]!.cy).toBeCloseTo((209000 + 220024) / 2);
+        expect(b[0]!.sizeY).toBeCloseTo((220024 - 209000) / 2048);
+        expect(b[1]).toEqual({ cy: 209700, sizeY: 2 });
+    });
+
+    it('puts a box on every surface under an exit that hangs far above them', () => {
+        const b = exitBoxes([layer(0, 73000), layer(2, 91000)], x, z, 115000, 700, 2);
+        expect(b.map((v) => v.cy)).toContain(73700);
+        expect(b.map((v) => v.cy)).toContain(91700);
+        expect(b[0]!.sizeY).toBeGreaterThan(20);
+    });
+
+    it('moves the boxes onto the surface for an exit under the ground', () => {
+        const b = exitBoxes([layer(0, 77000)], x, z, 0, 700, 2);
+        expect(b[0]).toEqual({ cy: 77700, sizeY: 2 });
+        expect(b[1]!.cy).toBeGreaterThan(77700);
     });
 });

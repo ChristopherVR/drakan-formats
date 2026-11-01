@@ -208,6 +208,7 @@ export class TerrainTextureBuilder {
                 minSize: opt.minSize ?? env('DRAKAN_TERRAIN_TEX_MIN') ?? 128,
                 slot: opt.slot ?? env('DRAKAN_TERRAIN_SLOT') ?? TERRAIN_TEXTURE_SLOT,
                 mode: ({ 0: 'indexed', 1: 'auto', 2: 'truecolor' } as const)[env('DRAKAN_TERRAIN_TEX_MODE') ?? 2] ?? 'truecolor',
+                maxTruecolorPixels: Infinity, // the 256 px terrain stays 32 bpp (see Ps2TextureOptions.maxTruecolorPixels)
                 ...opt.texture,
             });
             const id = this.nextId++;

@@ -169,6 +169,13 @@ describe('PS2 texture encode', () => {
         expect(encodePs2Texture(img(8, 8, () => [1, 2, 3, 255]), { mode: 'truecolor' }).bpp).toBe(8);
     });
 
+    it('truecolor mode quantises textures above the 32 bpp pixel budget, unless it is lifted', () => {
+        const big = img(256, 256, (x, y) => [x, y, (x * y) & 255, 255]);
+        expect(encodePs2Texture(big, { mode: 'truecolor' })).toMatchObject({ width: 256, height: 256, bpp: 8, lossy: true });
+        expect(encodePs2Texture(big, { mode: 'truecolor', maxTruecolorPixels: Infinity }).bpp).toBe(32);
+        expect(encodePs2Texture(img(128, 128, (x, y) => [x, y, (x * y) & 255, 255]), { mode: 'truecolor' }).bpp).toBe(32);
+    });
+
     it('rounds odd sizes to powers of two and clamps to the maximum', () => {
         expect(encodePs2Texture(img(40, 20, () => [1, 2, 3, 255]))).toMatchObject({ width: 64, height: 32 });
         expect(
