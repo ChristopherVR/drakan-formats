@@ -225,6 +225,9 @@ export interface OotfPipelineResult {
     warnings: string[];
 }
 
+/** PC multiplayer-only engine ids (launch pads, Soul Crystal, dragon invulnerability) that become arena data, not objects. */
+const ARENA_EXPORT_RFL: ReadonlySet<number> = new Set([18, 86, 126, 127, 128]);
+
 const hex4 = (n: number): string => n.toString(16).padStart(4, '0');
 
 function cloneObject(o: LvlObject, id: number): LvlObject {
@@ -687,6 +690,22 @@ export async function convertOotfLevels(
     };
     const musicClass = findPs2Class((c) => /^triggered music loop$/i.test(c.name.trim()) && !!c.fields);
     const exitClass = findPs2Class((c) => c.rflClass === 55 && transitionFieldIndex(c.fields) >= 0);
+    // Audit: music triggers never go through the class plan (the resolver below maps them to the Triggered Music Loop class and
+    // `applyMusicTriggers` rewrites them), and multiplayer pads / crystals have no PS2 object at all (the editor exports them as
+    // arena spawns and markers: `ootfArenaFromPc`). Say so instead of reporting them as unsupported.
+    for (const row of res.classAudit) {
+        if (row.outcome !== 'unsupported') continue;
+        const pc = pcs.find((p) => p.path === row.pcPath);
+        if (opt.music !== false && musicClass && pc && musicTriggerClassNames(pc).includes(row.name)) {
+            row.outcome = 'name-mapped';
+            row.ps2Name = musicClass.cls.name;
+            row.reason = undefined;
+            row.detail = 'music trigger: rewritten to the Triggered Music Loop class';
+        } else if (ARENA_EXPORT_RFL.has(row.rfl) && /^multiplayer[\\/]/i.test(row.pcPath)) {
+            row.reason = 'arena-export';
+            row.detail = 'no PS2 engine class; the editor exports it as an arena spawn / marker (maps/*.ini)';
+        }
+    }
     const resolverFor = (pc: PcLevel): ((db: number, id: number) => ClassTarget | null) | undefined => {
         if (!plan) return undefined;
         const music = opt.music !== false && musicClass ? new Set(musicTriggerClassNames(pc)) : null;

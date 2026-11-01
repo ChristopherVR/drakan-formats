@@ -167,6 +167,8 @@ export const PS2_SUBSTITUTES: ReadonlyMap<number, number> = new Map([
     [123, 223],
     [137, 224],
     [130, 17],
+    // Pressure Plate: the only PS2 plates live in LEVEL4ON / LEVEL8OS (not reachable from the template); a static plate prop stays.
+    [29, 17],
     [120, 10],
     // PC Water Droplet (144) is the PS2 Water Drip (146: Type / Period / Deviation + Max Particles Per Period); PS2 reuses 144 for shields.
     [144, 146],
@@ -177,9 +179,10 @@ export const FORCED_SUBSTITUTES: ReadonlySet<number> = new Set([144]);
 
 /**
  * Substituted PC engine ids whose clone gets the converted PC model instead of the template's: the Pirate Ship (a spline
- * vehicle on the PC) becomes a static Ground Object showing the ship.
+ * vehicle on the PC) becomes a static Ground Object showing the ship, and a Pressure Plate (29, no PS2 class reachable) a static
+ * plate that cannot be pressed.
  */
-export const MODEL_STANDINS: ReadonlySet<number> = new Set([130]);
+export const MODEL_STANDINS: ReadonlySet<number> = new Set([130, 29]);
 
 export const RETARGET_KINDS: ReadonlySet<ClassKind> = new Set(['logic', 'light', 'sound', 'waypoint', 'spawn']);
 
