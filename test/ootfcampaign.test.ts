@@ -229,6 +229,7 @@ describe('applyCampaignExits', () => {
         const r = applyCampaignExits(list, village, plan, {
             ...ctxFor(() => false),
             detectorClass: { dbIndex: 2, classId: 3050 },
+            mountDetector: { fieldIndex: 1, type: 7, name: 'Detect Which?' },
         });
         expect(r.warnings.some((w) => w.includes('replaced it with the exit class'))).toBe(true);
         // no inert twin: object 10 kept its id and became the exit class
@@ -244,7 +245,9 @@ describe('applyCampaignExits', () => {
             const target = list.objects.find((x) => x.id === d.links[0])!;
             expect(target.classId).toBe(966);
         }
-        expect(dets.length).toBe(village.exits.filter((e) => e.reason === 'pc' && e.destTitle).length);
+        // one detector for Rynn on foot (class default) and one for Rynn on a mount (Detect Which? = 1) per real exit
+        expect(dets.length).toBe(2 * village.exits.filter((e) => e.reason === 'pc' && e.destTitle).length);
+        expect(dets.filter((d) => d.data[0] === 1 && d.params[0]?.name === 'Detect Which?')).toHaveLength(dets.length / 2);
     });
 
     it('fires the intro hand-over from a linked timer (nobody walks into an exit of a cut-scene level)', () => {
@@ -265,9 +268,10 @@ describe('applyCampaignExits', () => {
         const timer = list.objects.find((o) => o.classId === 128)!;
         const exit = list.objects.find((o) => o.id === timer.links[0])!;
         expect(exit.classId).toBe(966);
-        expect(timer.params.map((p) => p.name)).toEqual(['Time Until Trigger', 'Trigger Message']);
+        expect(timer.params.map((p) => p.name)).toEqual(['Time Until Trigger', 'Start Mode', 'Trigger Message']);
         expect(new DataView(new Uint32Array([timer.data[0]!]).buffer).getFloat32(0, true)).toBeCloseTo(44, 3);
-        expect(timer.data[1]).toBe(5);
+        expect(timer.data[1]).toBe(0); // Start Mode: at once
+        expect(timer.data[2]).toBe(5);
     });
 
     it('setExitDestinationId keeps string payloads of other parameters intact', () => {

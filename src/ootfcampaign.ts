@@ -487,6 +487,11 @@ export interface ApplyExitsContext {
     /** Size of that box in cells of 2048 units (default 2 x 2 x 2), centre lifted by `detectorLift` units (default 700). */
     detectorSize?: Vec3;
     detectorLift?: number;
+    /**
+     * "Detect Which?" field of the detector class. With it every exit gets a second detector with the value 1 (Rynn on a mount): the
+     * class default does not fire while Rynn rides Arokh (the Islands hub is flown), value 1 does not fire on foot.
+     */
+    mountDetector?: { fieldIndex: number; type: number; name: string };
     /** Parameter overrides for the added exit detectors (e.g. Detect Which?); other fields keep the class default. */
     detectorParams?: readonly { fieldIndex: number; type: number; name: string; value: number }[];
     /** "Timer" class of the template (engine class 0x1003e): exits with `autoSeconds` get one that fires them (Trigger Message 5, as on the disc). */
@@ -615,11 +620,25 @@ export function applyCampaignExits(list: LvlObjectList, level: CampaignLevel, pl
             if (ctx.detectorParams?.length) setScalarParams(det, ctx.detectorParams);
             det.links = [exitObj.id];
             res.detectors++;
+            if (ctx.mountDetector) {
+                const { object: md } = addObject(list, {
+                    classId: ctx.detectorClass.classId,
+                    dbIndex: ctx.detectorClass.dbIndex,
+                    pos: [exitObj.pos[0], cy, exitObj.pos[2]],
+                    rot: [0, 0, 0],
+                });
+                md.flags |= FLAG_SCALED;
+                md.scale = [...size];
+                setScalarParams(md, [{ ...ctx.mountDetector, value: 1 }]);
+                md.links = [exitObj.id];
+                res.detectors++;
+            }
         }
         if (ctx.timerClass && exitObj && e.autoSeconds) {
             const fi = (name: string): number => ctx.timerClass!.fields.findIndex((f) => f.name.trim().toLowerCase() === name);
             const iTime = fi('time until trigger');
             const iMsg = fi('trigger message');
+            const iMode = fi('start mode'); // 0 = start at once (the class default 1 waits for a message: the Intro timer never ran)
             if (iTime < 0 || iMsg < 0) res.warnings.push(`${level.title}: the Timer class lacks Time Until Trigger / Trigger Message`);
             else {
                 const { object: tm } = addObject(list, {
@@ -633,6 +652,7 @@ export function applyCampaignExits(list: LvlObjectList, level: CampaignLevel, pl
                 setScalarParams(tm, [
                     { fieldIndex: iTime, type: ctx.timerClass.fields[iTime]!.type, name: ctx.timerClass.fields[iTime]!.name, value: f32.getUint32(0) },
                     { fieldIndex: iMsg, type: ctx.timerClass.fields[iMsg]!.type, name: ctx.timerClass.fields[iMsg]!.name, value: 5 },
+                    ...(iMode >= 0 ? [{ fieldIndex: iMode, type: ctx.timerClass.fields[iMode]!.type, name: ctx.timerClass.fields[iMode]!.name, value: 0 }] : []),
                 ]);
                 tm.links = [exitObj.id];
                 res.timers++;

@@ -953,6 +953,14 @@ export async function convertOotfLevels(
                 const r = applyCampaignExits(lvl.objects, cl, plan0, {
                     exitFieldOf: exitField,
                     ...(detectorClass ? { detectorClass: { dbIndex: detectorClass.t.dbIndex, classId: detectorClass.t.classId } } : {}),
+                    ...(detectorClass
+                        ? (() => {
+                              const wi = detectorClass.cls.fields!.findIndex((f) => /^detect which\?$/i.test(f.name.trim()));
+                              return wi >= 0
+                                  ? { mountDetector: { fieldIndex: wi, type: detectorClass.cls.fields![wi]!.type, name: detectorClass.cls.fields![wi]!.name } }
+                                  : {};
+                          })()
+                        : {}),
                     ...(detectorClass && dbgEnv0['OOTF_DETECT_WHICH'] !== undefined
                         ? {
                               // Test aid: Detect Which? of the exit detectors (0 Rynn on ground, 1 on mount, 2 both = class default).
