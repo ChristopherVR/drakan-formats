@@ -12,6 +12,7 @@ import {
     parsePcPalette,
     quantizeRgba,
     resampleNearest,
+    setExactSink,
 } from '../src/ootftex.ts';
 import type { PcFileSource, PcLevel } from '../src/pc.ts';
 
@@ -104,6 +105,24 @@ describe('PS2 texture encode', () => {
         for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) rgba.set(f(x, y), (y * w + x) * 4);
         return { width: w, height: h, rgba };
     };
+
+    it('hands the lossless pixels of a quantised texture to the exact sink (and only those)', () => {
+        const got: Array<{ n: number; w: number }> = [];
+        setExactSink((body, exact) => got.push({ n: body.length, w: exact.width }));
+        try {
+            const many = img(32, 32, (x, y) => [x * 8, y * 8, (x * y) & 255, 255]); // > 256 colours, 1024 px: forced 8 bpp below
+            const q = encodePs2Texture(many, { mode: 'indexed' });
+            expect(q.lossy).toBe(true);
+            expect(q.exact?.rgba).toEqual(many.rgba);
+            const flat = encodePs2Texture(img(8, 8, () => [1, 2, 3, 255]), { mode: 'indexed' });
+            expect(flat.lossy).toBe(false);
+            expect(flat.exact).toBeUndefined();
+        } finally {
+            setExactSink(null);
+        }
+        expect(got).toHaveLength(1);
+        expect(got[0]!.w).toBe(32);
+    });
 
     it('enlarges an opaque texture to minSize with a smooth, tileable filter and keeps cut-outs hard', () => {
         const ramp = img(8, 8, (x) => [x * 30, 100, 50, 255]);

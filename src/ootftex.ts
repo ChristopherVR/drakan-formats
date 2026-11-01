@@ -304,6 +304,22 @@ export interface Ps2Texture {
     hasAlpha: boolean;
     /** True when the source had to be quantised or reduced (colour loss). */
     lossy: boolean;
+    /** The lossless pixels (the final size, before quantising / 5 bit reduction); set only when `lossy`. */
+    exact?: RgbaImage;
+}
+
+/**
+ * Receiver for the lossless pixels of every lossy encode (`body` is the finished 0x0040 record). The HD pack tooling keys them by
+ * the body's SHA-1 and upscales them instead of the quantised guest texture, so the engine (HD replacement by content hash)
+ * shows the full-quality picture while the guest keeps the cheap 8 bpp texture it can load fast. Unset = ignored.
+ */
+let exactSink: ((body: Uint8Array, exact: RgbaImage) => void) | null = null;
+export function setExactSink(fn: ((body: Uint8Array, exact: RgbaImage) => void) | null): void {
+    exactSink = fn;
+}
+function lossyResult(t: Ps2Texture, exact: RgbaImage): Ps2Texture {
+    exactSink?.(t.body, exact);
+    return { ...t, exact };
 }
 
 /** Largest 32 bpp texture (pixels) of an object / creature texture: 128 x 128. */
@@ -399,7 +415,8 @@ export function encodePs2Texture(src: RgbaImage, opt: Ps2TextureOptions = {}): P
         }
         for (let i = palette.length / 4; i < 256; i++) body[0x40 + 16 + i * 4 + 3] = PS2_OPAQUE;
         for (let i = 0; i < px; i++) body[0x40 + 16 + 1024 + i] = lookup(i);
-        return { body, width: w, height: h, bpp: 8, hasAlpha, lossy };
+        const t8: Ps2Texture = { body, width: w, height: h, bpp: 8, hasAlpha, lossy };
+        return lossy ? lossyResult(t8, img) : t8;
     }
     if (mode === 'truecolor') {
         const body = new Uint8Array(0x40 + px * 4);
@@ -422,7 +439,7 @@ export function encodePs2Texture(src: RgbaImage, opt: Ps2TextureOptions = {}): P
         const b = img.rgba[i * 4 + 2]! >> 3;
         dv.setUint16(0x40 + i * 2, r | (g << 5) | (b << 10) | (img.rgba[i * 4 + 3]! >= 128 ? 0x8000 : 0), true);
     }
-    return { body, width: w, height: h, bpp: 16, hasAlpha, lossy: true };
+    return lossyResult({ body, width: w, height: h, bpp: 16, hasAlpha, lossy: true }, img);
 }
 
 /** Does the PS2 record already fit the PS2 rules (used to decide whether a PC texture needs re-encoding). */
