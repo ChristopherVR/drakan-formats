@@ -328,10 +328,8 @@ export function encodePs2Texture(src: RgbaImage, opt: Ps2TextureOptions = {}): P
     const grow = (n: number): number => Math.min(maxSize, opaque ? Math.max(pow2Ceil(n), minSize) : pow2Ceil(n));
     const w = grow(src.width);
     const h = grow(src.height);
-    const img =
-        opaque && w >= src.width && h >= src.height && (w > src.width || h > src.height)
-            ? resampleSmooth(src, w, h)
-            : resampleNearest(src, w, h);
+    const enlarged = opaque && w >= src.width && h >= src.height && (w > src.width || h > src.height);
+    const img = enlarged ? resampleSmooth(src, w, h) : resampleNearest(src, w, h);
     const px = w * h;
     const fps = opt.fps ?? 10;
     const colors = new Map<number, number>();
@@ -352,7 +350,9 @@ export function encodePs2Texture(src: RgbaImage, opt: Ps2TextureOptions = {}): P
         colors.set(k, (colors.get(k) ?? 0) + 1);
     }
     const hasAlpha = transparent + translucent > 0;
-    const mode = opt.mode ?? 'truecolor';
+    // An enlarged texture is stored 8 bpp (median cut): 128 px at 32 bpp is 64 KB and thrashes the GS texture memory
+    // (80k texture decodes in Ruined Village instead of 3k, a 30 s level load); the disc's 128 px ground is 8 bpp too.
+    const mode = enlarged && opt.mode !== 'auto' ? 'indexed' : (opt.mode ?? 'truecolor');
     const indexed = colors.size <= 256 || mode === 'indexed' || (translucent > 0 && mode !== 'truecolor');
     if (indexed) {
         let lossy = false;
