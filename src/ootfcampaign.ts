@@ -19,6 +19,7 @@ import { decodeFieldValue, fieldBase, fieldIsArray, fieldIsIndirect, FIELD_STRIN
 import { mangleComponent } from './levellist.ts';
 import { FLAG_SCALED, addObject, type LvlObject, type LvlObjectList, type LvlParam, type Vec3 } from './lvl.ts';
 import type { PcLevel } from './pc.ts';
+import { terrainGroundBelow } from './terrain.ts';
 import { pcDependencyKey, pcLevelName, resolvePcPath } from './pc.ts';
 
 // ---------------------------------------------------------------- types
@@ -157,7 +158,14 @@ export function pcExits(pc: PcLevel): PcExit[] {
 function rynnStart(pc: PcLevel): Vec3 | null {
     for (const o of pc.list.objects) {
         const cls = pc.classes.get(o.dbIndex)?.get(o.classId);
-        if (cls?.name.trim().toLowerCase() === 'rynn') return [...o.pos];
+        if (cls?.name.trim().toLowerCase() === 'rynn') {
+            // The converted level starts Rynn 400 units over the ground under the PC start (convert.ts); the arrival marker has to
+            // match, or the respawned player hangs at the raw PC height (inside the rock or high in the sky) and the camera with her.
+            const p: Vec3 = [...o.pos];
+            const g = terrainGroundBelow(pc.terrain, p[0], p[2], p[1]);
+            if (Number.isFinite(g)) p[1] = g + 400;
+            return p;
+        }
     }
     return null;
 }
