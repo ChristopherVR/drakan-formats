@@ -1,3 +1,4 @@
+import { splitClassRecord } from './odbwrite.ts';
 import { strToU8 } from 'fflate';
 import {
     convertPcLevel,
@@ -1165,7 +1166,7 @@ export async function convertOotfLevels(
             const re = new RegExp(dbgEnv['DRAKAN_DBG_CLSINFO'], 'i');
             for (const s of plan?.synthesized ?? []) {
                 if (!re.test(s.name)) continue;
-                console.warn(`CLSINFO ${s.name} -> ${s.file}#${s.classId} rfl=${s.rfl} template="${s.template.name}"#${s.template.classId} model=${JSON.stringify(s.cls.model)} cov=${s.coverage.toFixed(2)} data=${s.cls.data?.join(',')}`);
+                console.warn(`CLSINFO ${s.name} -> ${s.file}#${s.classId} rfl=${s.rfl} template="${s.template.name}"#${s.template.classId} model=${JSON.stringify(s.cls.model)} cov=${s.coverage.toFixed(2)} tskin=${(() => { const o = ps2Odbs.find((x) => x.dbIndex === s.template.dbIndex); const tc = o?.classes.get(s.template.classId); const st = tc?.model && o ? containerStem(o.file.replace(/\.ODB$/i, ''), tc.model.db) : null; return !!tc?.model && !!st && !!modOf(st)?.find(0x0208, tc.model.id); })()} flags=${(() => { const bd = splitClassRecord(s.record).body; return bd.length >= 10 ? new DataView(bd.buffer, bd.byteOffset, bd.byteLength).getUint32(6, true) : -1; })()} data=${s.cls.data?.join(',')}`);
                 if (dbgEnv['DRAKAN_DBG_CLSFIELDS'])
                     (s.cls.fields ?? []).forEach((f, i) => console.warn(`  F ${i} ${f.name} t=${f.type} v=${s.cls.data?.[i]}`));
             }

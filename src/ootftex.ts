@@ -322,8 +322,11 @@ function lossyResult(t: Ps2Texture, exact: RgbaImage): Ps2Texture {
     return { ...t, exact };
 }
 
-/** Largest 32 bpp texture (pixels) of an object / creature texture: 128 x 128. */
-export const DEFAULT_MAX_TRUECOLOR_PIXELS = 128 * 128;
+/**
+ * Largest 32 bpp texture (pixels) of an object / creature texture. Unlimited: the engine's native mip filter (drakan_texscale)
+ * makes truecolor uploads as cheap as 8 bpp ones, so nothing is quantised. `OOTF_TEXPIX=<n>` / `maxTruecolorPixels` still cap it.
+ */
+export const DEFAULT_MAX_TRUECOLOR_PIXELS = Infinity;
 
 const PS2_OPAQUE = 0x7f; // palette alpha of opaque colours on the disc (201 of 207 palettes)
 
@@ -381,9 +384,8 @@ export function encodePs2Texture(src: RgbaImage, opt: Ps2TextureOptions = {}): P
         colors.set(k, (colors.get(k) ?? 0) + 1);
     }
     const hasAlpha = transparent + translucent > 0;
-    // An enlarged texture is stored 8 bpp (median cut): 128 px at 32 bpp is 64 KB and thrashes the GS texture memory
-    // (80k texture decodes in Ruined Village instead of 3k, a 30 s level load); the disc's 128 px ground is 8 bpp too.
-    const mode = enlarged && opt.mode !== 'auto' ? 'indexed' : (opt.mode ?? 'truecolor');
+    // An enlarged texture stays truecolor too (it was 8 bpp while the guest's mip loop made 32 bpp uploads 10x slower).
+    const mode = opt.mode ?? 'truecolor';
     const tooBig = mode === 'truecolor' && px > (opt.maxTruecolorPixels ?? DEFAULT_MAX_TRUECOLOR_PIXELS);
     const indexed = colors.size <= 256 || mode === 'indexed' || tooBig || (translucent > 0 && mode !== 'truecolor');
     if (indexed) {
