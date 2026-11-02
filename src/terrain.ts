@@ -222,37 +222,71 @@ function decodePs2Block(def: TerrainLayerDef, raw: Uint8Array): TerrainLayer {
     return L;
 }
 
-/** Decode a PS2 LVL 0x0001 payload. */
-export function parsePs2Terrain(data: Uint8Array): TerrainLayer[] {
+/** Byte layout of a PS2 LVL 0x0001 payload, per layer (offsets into the payload). */
+export interface Ps2TerrainSpans {
+    layers: {
+        /** Definition start and end; the inline blob runs from `defEnd` to `blobEnd` (the next definition or the data marker). */
+        defStart: number;
+        defEnd: number;
+        blobEnd: number;
+        /** The `{u32 size, zlib}` record of the layer's block (offset of the size word, total length incl. the size word). */
+        blockAt: number;
+        blockLen: number;
+    }[];
+    /** Offset of the `u32 1` data marker. */
+    dataStart: number;
+    /** Inflated blocks, one per layer. */
+    blocks: Uint8Array[];
+}
+
+/** Locate every definition, inline blob and zlib block of a PS2 LVL 0x0001 payload (the parser and the writer share it). */
+export function splitPs2Terrain(data: Uint8Array): Ps2TerrainSpans {
     if (data.length < 4) throw new TerrainError('layer table is empty');
-    const count = view(data).getUint32(0, true);
+    const dv = view(data);
+    const count = dv.getUint32(0, true);
     if (count > 100000) throw new TerrainError(`implausible layer count ${count}`);
     const found = findPs2Blocks(data, count);
     if (!found) throw new TerrainError('PS2 terrain data section not found');
     const { blocks, start } = found;
-    const out: TerrainLayer[] = [];
+    const spans: Ps2TerrainSpans['layers'] = [];
+    let q = start + 4;
     let o = 4;
     for (let i = 0; i < count; i++) {
-        const { def, end } = readDef(data, o, i);
+        const end = defEnd(data, o);
+        if (end < 0) throw new TerrainError(`layer ${i}: definition runs past the end`);
+        const cs = dv.getUint32(q, true);
+        let next = start;
+        if (i < count - 1) {
+            // The inline data between this definition and the next is variable length: find the next definition whose
+            // dimensions match the next block.
+            next = -1;
+            for (let p = end + 8; p < start; p++) {
+                if (plausibleDefForBlock(data, p, blocks[i + 1]!.length)) {
+                    next = p;
+                    break;
+                }
+            }
+            if (next < 0) throw new TerrainError(`layer ${i + 1}: definition not found`);
+        }
+        spans.push({ defStart: o, defEnd: end, blobEnd: next, blockAt: q, blockLen: 4 + cs });
+        q += 4 + cs;
+        o = next;
+    }
+    return { layers: spans, dataStart: start, blocks };
+}
+
+/** Decode a PS2 LVL 0x0001 payload. */
+export function parsePs2Terrain(data: Uint8Array): TerrainLayer[] {
+    const { layers: spans, blocks } = splitPs2Terrain(data);
+    const out: TerrainLayer[] = [];
+    for (let i = 0; i < spans.length; i++) {
+        const { def } = readDef(data, spans[i]!.defStart, i);
         if (ps2TerrainBlockSize(def.width, def.height) !== blocks[i]!.length) {
             throw new TerrainError(
                 `layer ${i}: block is ${blocks[i]!.length} bytes, ${def.width}x${def.height} needs more`,
             );
         }
         out.push(decodePs2Block(def, blocks[i]!));
-        if (i === count - 1) break;
-        // The inline data between this definition and the next is variable length and not decoded: find the next
-        // definition whose dimensions match the next block.
-        const next = blocks[i + 1]!.length;
-        let p = end + 8;
-        let found2 = -1;
-        for (; p < start; p++) {
-            if (!plausibleDefForBlock(data, p, next)) continue;
-            found2 = p;
-            break;
-        }
-        if (found2 < 0) throw new TerrainError(`layer ${i + 1}: definition not found`);
-        o = found2;
     }
     return out;
 }

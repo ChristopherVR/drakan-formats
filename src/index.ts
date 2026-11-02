@@ -12,6 +12,7 @@ export * from './terrain.ts';
 export * from './pc.ts';
 export * from './convert.ts';
 export * from './terrainblob.ts';
+export * from './terrainwrite.ts';
 export * from './model.ts';
 export * from './resources.ts';
 export * from './xdb.ts';
