@@ -179,6 +179,26 @@ export function writePs2Blob(x: Ps2Blob): Uint8Array {
 
 const isSpecial = (ref: number): boolean => ref === TEX_HOLE || ref === TEX_INVISIBLE;
 
+/**
+ * The blend count of texture `ref` at layer vertex (gx, gz): how many of the four cells around the vertex use it (by the
+ * cell's left-triangle ref), 0..4. Cells outside the layer count as matching when `outsideAny` (level-format.md 10.1).
+ * This is the `count` part of the PS2 per-chunk weight bytes, so an editor preview that blends by it matches the game.
+ */
+export function textureCountAt(L: TerrainLayer, ref: number, gx: number, gz: number, outsideAny = false): number {
+    const w = L.width;
+    const h = L.height;
+    let count = 0;
+    for (let dz = -1; dz <= 0; dz++) {
+        for (let dx = -1; dx <= 0; dx++) {
+            const cx = gx + dx;
+            const cz = gz + dz;
+            const outside = cx < 0 || cx >= w || cz < 0 || cz >= h;
+            if (outside ? outsideAny : L.cellTexLeft[cz * w + cx] === ref) count++;
+        }
+    }
+    return count;
+}
+
 /** The weight byte of texture `ref` at chunk vertex (gx, gz): `count | near` (level-format.md 10.1). */
 function weightByte(
     L: TerrainLayer,
@@ -193,15 +213,7 @@ function weightByte(
     const h = L.height;
     const uses = (cx: number, cz: number): boolean =>
         cx >= 0 && cx < w && cz >= 0 && cz < h && L.cellTexLeft[cz * w + cx] === ref;
-    let count = 0;
-    for (let dz = -1; dz <= 0; dz++) {
-        for (let dx = -1; dx <= 0; dx++) {
-            const cx = gx + dx;
-            const cz = gz + dz;
-            const outside = cx < 0 || cx >= w || cz < 0 || cz >= h;
-            if (outside ? outsideAny : uses(cx, cz)) count++;
-        }
-    }
+    const count = textureCountAt(L, ref, gx, gz, outsideAny);
     let near = false;
     if (gx < x1 && gz < z1) {
         for (let dz = -1; dz <= 1 && !near; dz++)
