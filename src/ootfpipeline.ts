@@ -1078,6 +1078,30 @@ export async function convertOotfLevels(
         const pullArr = dbgEnv['DRAKAN_DBG_PULLIDS'] ? dbgEnv['DRAKAN_DBG_PULLIDS'].split(',').map(Number) : null;
         const pullIds = pullArr ? new Set(pullArr) : null;
         const pullIdOk = (o: LvlObject): boolean => !pullIds || pullIds.has(o.id);
+        {
+            // PC creatures whose "visible" flag (0x01) is clear start hidden: a Detect and Execute / timer link shows them later (Death Mages,
+            // Hueges: proven in game). One that nothing links to would stay invisible for ever (the Queen has no links at all), so it is shown.
+            const linked = new Set(parts.objects.objects.flatMap((x) => x.links));
+            let shown = 0;
+            parts.objects = {
+                ...parts.objects,
+                objects: parts.objects.objects.map((o) => {
+                    const rfl =
+                        classes.get(o.dbIndex)?.get(o.classId)?.rflClass ??
+                        plan?.synthesized.find((x) => x.dbIndex === o.dbIndex && x.classId === o.classId)?.rfl ??
+                        -1;
+                    if (o.flags & 1 || linked.has(o.id) || ENGINE_CLASSES.get(rfl)?.kind !== 'creature') return o;
+                    shown++;
+                    return { ...o, flags: o.flags | 1 };
+                }),
+            };
+            if (shown) res.warnings.push(`${pc.path}: ${shown} hidden creature(s) nothing links to made visible`);
+        }
+        if (dbgEnv['DRAKAN_DBG_DROP']) {
+            // Test aid: remove every object whose class name matches the regex (bisecting a crash to a class).
+            const re = new RegExp(dbgEnv['DRAKAN_DBG_DROP'], 'i');
+            parts.objects = { ...parts.objects, objects: parts.objects.objects.filter((o) => !re.test(dbgName(o))) };
+        }
         if (dbgEnv['DRAKAN_DBG_NOOBJ']) {
             const keep = (o: LvlObject): boolean =>
                 [9, 27, 54].includes(classes.get(o.dbIndex)?.get(o.classId)?.rflClass ?? -1) || classes.get(o.dbIndex)?.get(o.classId)?.name === 'Procedural Sky' ||
@@ -1180,6 +1204,8 @@ export async function convertOotfLevels(
                                   ...o,
                                   // DRAKAN_DBG_PULLROT=<deg> adds degrees to the pulled objects' yaw (rot[1]); a door seen face-on shows its swing.
                                   rot: [o.rot[0], o.rot[1] + Number(dbgEnv['DRAKAN_DBG_PULLROT'] ?? 0), o.rot[2]] as typeof o.rot,
+                                  // DRAKAN_DBG_PULLFLAGS=<hex> ORs object flags (1 = the PC "visible" bit): objects of flags 0 start hidden.
+                                  flags: o.flags | Number.parseInt(dbgEnv['DRAKAN_DBG_PULLFLAGS'] ?? '0', 16),
                                   pos: [
                                       start.pos[0] + [pd!, -pd!, 0, 0][slotOf(o) % 4]! * (1 + (slotOf(o) >> 2) * 0.5),
                                       start.pos[1] + (pdy ?? 0),
