@@ -189,6 +189,13 @@ export const FORCED_SUBSTITUTES: ReadonlySet<number> = new Set([144, 92]);
  */
 export const MODEL_STANDINS: ReadonlySet<number> = new Set([130, 88, 100, 101, 29]);
 
+/** The IEEE-754 single bit pattern of a value (PS2 float fields are stored as raw dwords). */
+function floatBits(v: number): number {
+    const b = new DataView(new ArrayBuffer(4));
+    b.setFloat32(0, v, true);
+    return b.getUint32(0, true);
+}
+
 /**
  * Fix-ups of the class record cloned for a PC engine id, by PS2 field name, applied after the field-name merge:
  * `reset` keeps the template's own defaults (no PC values, so all PC classes of the id share ONE record - the per-object
@@ -200,7 +207,9 @@ export const CLONE_ADJUST: ReadonlyMap<
     { reset?: boolean; rename?: readonly (readonly [string, string])[]; set?: readonly (readonly [string, number])[] }
 > = new Map([
     // Dr. Evil heads: dormant until the level's trigger wakes them (the PC "Emerge only when triggered?"), the PS2 name of it.
-    [92, { set: [['Wait For Trigger', 1]] }],
+    // The four heads stand up to ~23000 units apart around the altar and the one that faces away never noticed the player (journal
+    // 2026-11-02/ootf-drevil-fourth-head.md): they see and hear all around and far, so every head comes for the player once woken.
+    [92, { set: [['Wait For Trigger', 1], ['Detect Radius (lu)', floatBits(400)], ['Hearing Distance (lu)', floatBits(400)], ['Field of Vision', floatBits(360)], ['Break Off Radius (lu)', floatBits(400)]] }],
     // Combination Lock: forwards the switches' ON to the counters it is linked to.
     [123, { reset: true, set: [['Incoming Message', 1], ['Outgoing Message', 1]] }],
     // Class Messenger: relays the message that arrives (ON from the counter) as the PC object's "Message to send".
