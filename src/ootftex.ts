@@ -1,4 +1,5 @@
 import { view } from './bytes.ts';
+import { ootfDebugFlag } from './ootfdebug.ts';
 import { type Ps2Entry, writePs2Srsc } from './ootfcontainer.ts';
 import { inflate } from './inflate.ts';
 import type { SrscReader } from './srsc.ts';
@@ -192,7 +193,8 @@ export function resampleSmooth(img: RgbaImage, w: number, h: number): RgbaImage 
                 let acc = 0;
                 for (let j = 0; j < 4; j++) {
                     const row = wrap(y0 - 1 + j, img.height) * img.width;
-                    for (let i = 0; i < 4; i++) acc += wy[j]! * wx[i]! * img.rgba[(row + wrap(x0 - 1 + i, img.width)) * 4 + c]!;
+                    for (let i = 0; i < 4; i++)
+                        acc += wy[j]! * wx[i]! * img.rgba[(row + wrap(x0 - 1 + i, img.width)) * 4 + c]!;
                 }
                 out[(y * w + x) * 4 + c] = Math.max(0, Math.min(255, Math.round(acc)));
             }
@@ -334,7 +336,15 @@ function ps2Alpha(a: number): number {
     return a >= 255 ? PS2_OPAQUE : Math.round((a * PS2_OPAQUE) / 255);
 }
 
-function header(w: number, h: number, bpp: number, flagsWord: number, alpha: boolean, fps: number, slot = 0): Uint8Array {
+function header(
+    w: number,
+    h: number,
+    bpp: number,
+    flagsWord: number,
+    alpha: boolean,
+    fps: number,
+    slot = 0,
+): Uint8Array {
     const out = new Uint8Array(0x40);
     const dv = view(out);
     dv.setUint32(0, w, true);
@@ -344,7 +354,7 @@ function header(w: number, h: number, bpp: number, flagsWord: number, alpha: boo
     dv.setUint32(16, flagsWord, true);
     dv.setUint32(20, 0xffffffff, true);
     out[36] = fps;
-    out[37] = alpha ? 0x02 : 0;
+    out[37] = alpha && !ootfDebugFlag('OOTF_NO_ALPHA_FLAG') ? 0x02 : 0;
     out[38] = bpp > 8 ? 0x80 : 0;
     dv.setUint32(40, slot, true);
     dv.setFloat32(44, 4, true);

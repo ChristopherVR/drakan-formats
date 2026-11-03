@@ -9,6 +9,7 @@
 //
 // Added records ship as `new/<FILE>.ODB/0102_<id>_<sub>.bin` plus a replaced 0x0103 field-list entry (modding.md).
 
+import { ootfClassDebug } from './ootfdebug.ts';
 import {
     FIELD_ANIMATION,
     FIELD_CHANNEL,
@@ -209,16 +210,41 @@ export const CLONE_ADJUST: ReadonlyMap<
     // Dr. Evil heads: dormant until the level's trigger wakes them (the PC "Emerge only when triggered?"), the PS2 name of it.
     // The four heads stand up to ~23000 units apart around the altar and the one that faces away never noticed the player (journal
     // 2026-11-02/ootf-drevil-fourth-head.md): they see and hear all around and far, so every head comes for the player once woken.
-    [92, { set: [['Wait For Trigger', 1], ['Detect Radius (lu)', floatBits(400)], ['Hearing Distance (lu)', floatBits(400)], ['Field of Vision', floatBits(360)], ['Break Off Radius (lu)', floatBits(400)]] }],
+    [
+        92,
+        {
+            set: [
+                ['Wait For Trigger', 1],
+                ['Detect Radius (lu)', floatBits(400)],
+                ['Hearing Distance (lu)', floatBits(400)],
+                ['Field of Vision', floatBits(360)],
+                ['Break Off Radius (lu)', floatBits(400)],
+            ],
+        },
+    ],
     // Combination Lock: forwards the switches' ON to the counters it is linked to.
-    [123, { reset: true, set: [['Incoming Message', 1], ['Outgoing Message', 1]] }],
+    [
+        123,
+        {
+            reset: true,
+            set: [
+                ['Incoming Message', 1],
+                ['Outgoing Message', 1],
+            ],
+        },
+    ],
     // Class Messenger: relays the message that arrives (ON from the counter) as the PC object's "Message to send".
     [137, { reset: true, rename: [['Message to send', 'Outgoing Message']], set: [['Incoming Message', 1]] }],
     // Map Object / Map Trigger (quest markers): one shared PS2 map-marker record, journal text and map position per object.
     [104, { reset: true }],
 ]);
 
-function adjustClone(pc: OdbClass, tpl: OdbClass, m: Merge, adj: NonNullable<ReturnType<typeof CLONE_ADJUST.get>>): Merge {
+function adjustClone(
+    pc: OdbClass,
+    tpl: OdbClass,
+    m: Merge,
+    adj: NonNullable<ReturnType<typeof CLONE_ADJUST.get>>,
+): Merge {
     const data = adj.reset ? [...(tpl.data ?? [])] : [...m.data];
     const tf = tpl.fields ?? [];
     const idx = (name: string): number => tf.findIndex((f) => f.name.trim().toLowerCase() === name.toLowerCase());
@@ -237,7 +263,9 @@ function adjustClone(pc: OdbClass, tpl: OdbClass, m: Merge, adj: NonNullable<Ret
 
 /** Particle emitter engine classes whose clone keeps the template's emitter model (the PC model is not converted). */
 const FX_OWN_MODEL_RFL: ReadonlySet<number> = new Set(
-    (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_FX_PCMODEL'] === '1' ? [] : [43, 71, 97],
+    (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_FX_PCMODEL'] === '1'
+        ? []
+        : [43, 71, 97],
 );
 
 export const RETARGET_KINDS: ReadonlySet<ClassKind> = new Set(['logic', 'light', 'sound', 'waypoint', 'spawn']);
@@ -414,7 +442,9 @@ function animFallback(
     data: readonly number[],
     animMap: ReadonlyMap<number, number>,
 ): number | undefined {
-    const idle = pf.findIndex((f) => f.name === 'Base Idle' && fieldBase(f.type) === FIELD_ANIMATION && !fieldIsArray(f.type));
+    const idle = pf.findIndex(
+        (f) => f.name === 'Base Idle' && fieldBase(f.type) === FIELD_ANIMATION && !fieldIsArray(f.type),
+    );
     const own = idle >= 0 ? animMap.get((data[idle] ?? 0) & 0xffff) : undefined;
     return own ?? [...animMap.values()].sort((a, b) => a - b)[0];
 }
@@ -610,11 +640,7 @@ export function buildPlainClassRecord(opt: {
 }
 
 /** Point a model-carrying class record at another model (`u16 id` at body +2, `u16 db` at +4). */
-export function patchRecordModel(
-    rec: Uint8Array,
-    model: { id: number; db: number },
-    bounds?: Uint8Array,
-): Uint8Array {
+export function patchRecordModel(rec: Uint8Array, model: { id: number; db: number }, bounds?: Uint8Array): Uint8Array {
     const { name, body } = splitClassRecord(rec);
     const b = body.slice();
     const dv = view(b);
@@ -644,7 +670,11 @@ function freeIds(taken: ReadonlySet<number>, reserved?: ReadonlySet<number>): nu
     // Ids above the ODB maximum sort last, so file order, index order and id order agree and the appended 0x0103 field
     // lists pair with their records whichever way the guest pairs them (ootf-odb-class-count.md). Below-max ids are the
     // old behaviour, kept behind OOTF_IDS_BELOW_MAX=1 for comparison.
-    if ((globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_IDS_BELOW_MAX'] === '1') {
+    if (
+        (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.[
+            'OOTF_IDS_BELOW_MAX'
+        ] === '1'
+    ) {
         for (let id = max - 1; id > min; id--) if (!taken.has(id) && !reserved?.has(id)) out.push(id);
         return out;
     }
@@ -662,6 +692,7 @@ function dataSignature(c: OdbClass): string {
  * all levels of one pack so that every level uses the same ids. `ps2` is the set of ODBs reachable from the template.
  */
 export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbIn[], opt: PlanOptions = {}): ClassPlan {
+    const debug = ootfClassDebug();
     const minCoverage = opt.minCoverage ?? 0.5;
     const mapped = new Map<string, ClassTarget>();
     const synthesized: Synthesized[] = [];
@@ -705,7 +736,13 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
             cands
                 .filter((c) => squash(c.cls.name) === want)
                 .sort((a, b) => a.odb.dbIndex - b.odb.dbIndex || a.id - b.id)[0];
-        const named = opt.keepOwnModel?.(cls) ? undefined : (pickNamed(loose) ?? pickNamed(aliasSquash(cls.name)));
+        // Test aid: DRAKAN_DBG_NAMEMAP="PC class=PS2 class;..." maps a PC class straight onto an existing PS2 class (no clone).
+        const nameMap = debug.names.get(cls.name.trim().toLowerCase());
+        const named = nameMap
+            ? pickNamed(squash(nameMap))
+            : opt.keepOwnModel?.(cls)
+              ? undefined
+              : (pickNamed(loose) ?? pickNamed(aliasSquash(cls.name)));
         if (named) {
             mapped.set(key, { dbIndex: named.odb.dbIndex, classId: named.id, cls: named.cls });
             continue;
@@ -721,9 +758,20 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
         const modelStandIn = substituted && MODEL_STANDINS.has(rfl);
         // Particle emitters (43, 71, 97): the PC model is only an emitter box. The clone keeps the template's own emitter model.
         const ownFxModel =
-            !substituted && FX_OWN_MODEL_RFL.has(rfl) && !!opt.modelFor && !!cls.model && cands.some((c) => !!c.odb.raw?.(c.id));
+            !substituted &&
+            FX_OWN_MODEL_RFL.has(rfl) &&
+            !!opt.modelFor &&
+            !!cls.model &&
+            cands.some((c) => !!c.odb.raw?.(c.id));
+        const noModel = debug.noModel?.test(cls.name) ?? false;
         const wantsModel =
-            (!substituted || modelStandIn) && !ownFxModel && !!kind && !!opt.modelFor && !!cls.model && !RETARGET_KINDS.has(kind);
+            (!substituted || modelStandIn) &&
+            !ownFxModel &&
+            !!kind &&
+            !!opt.modelFor &&
+            !!cls.model &&
+            !RETARGET_KINDS.has(kind) &&
+            !noModel; // test aid: keep the template's own model
         // A model-less PC class of a mechanism / scenery / fx engine class (Break Brick floor, Fire Fly Axis ...) is cloned from a
         // model-less PS2 class of the same engine id: the clone shows nothing it should not.
         const modelless =
@@ -731,7 +779,18 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
             !cls.model &&
             (kind === 'mechanism' || kind === 'scenery' || kind === 'fx') &&
             cands.some((c) => !c.cls.model && !!c.odb.raw?.(c.id));
-        if (!kind || !(RETARGET_KINDS.has(kind) || substituted || opt.borrowModelKinds?.has(kind) || wantsModel || modelless || ownFxModel)) {
+        if (
+            !kind ||
+            !(
+                RETARGET_KINDS.has(kind) ||
+                substituted ||
+                opt.borrowModelKinds?.has(kind) ||
+                wantsModel ||
+                modelless ||
+                ownFxModel ||
+                noModel
+            )
+        ) {
             unsupported.set(key, {
                 reason: 'needs-model',
                 detail: `${info?.name ?? `engine class ${rfl}`} (${kind ?? 'unknown'}) needs a model; none can be taken from the PC data`,
@@ -741,7 +800,9 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
         // 2. clone the PS2 class of the same engine id whose defaults are closest to the PC class
         let best: { c: Cand; m: Merge } | null = null;
         const hostPool = wantsModel
-            ? cands.filter((c) => c.cls.model && c.odb.raw?.(c.id) && (!opt.modelOdbFile || c.odb.file === opt.modelOdbFile))
+            ? cands.filter(
+                  (c) => c.cls.model && c.odb.raw?.(c.id) && (!opt.modelOdbFile || c.odb.file === opt.modelOdbFile),
+              )
             : [];
         // No template with a model in the host ODB (doors, switches, ladders, ropes, fx ...): take one from an ODB that lists the host
         // in its .DB; the converted model is then named with that ODB's own 'db' index of the host ('modelFor').
@@ -752,7 +813,11 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
             : modelless
               ? cands.filter((c) => !c.cls.model && !!c.odb.raw?.(c.id))
               : ownFxModel
-                ? cands.filter((c) => !!c.odb.raw?.(c.id) && (c.odb.file === opt.modelOdbFile || !!opt.modelOdbFiles?.has(c.odb.file)))
+                ? cands.filter(
+                      (c) =>
+                          !!c.odb.raw?.(c.id) &&
+                          (c.odb.file === opt.modelOdbFile || !!opt.modelOdbFiles?.has(c.odb.file)),
+                  )
                 : cands;
         if (wantsModel && opt.modelSkinned?.(cls) && opt.templateSkinned) {
             // Skinned templates also come from the ODBs that list the host (their `modelFor` names the host with its `db` there).
@@ -780,31 +845,58 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
             if (plain.length) pool.splice(0, pool.length, ...plain);
         }
         if (!pool.length) {
-            unsupported.set(key, { reason: 'no-raw-record', detail: `no PS2 class of engine class ${rfl} carries a model` });
+            unsupported.set(key, {
+                reason: 'no-raw-record',
+                detail: `no PS2 class of engine class ${rfl} carries a model`,
+            });
             continue;
         }
         // Two new records cloned from the same template broke the ODB load in game (ootf-ingame.md bisect, K=3 vs K=2), so a
         // template is reused only when no other candidate of that engine class is left.
         const fresh = pool.filter((c) => !usedTemplates.has(`${c.odb.file}|${c.id}`));
-        if ((globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['DRAKAN_DBG_TPLRIG']) {
+        if (
+            (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.[
+                'DRAKAN_DBG_TPLRIG'
+            ]
+        ) {
             // Test aid: rig size of the converted model against each candidate template (flags = body u32 at 6).
             const mj = opt.modelJoints?.(cls);
             if (mj !== undefined)
                 for (const c of pool) {
                     const raw = c.odb.raw?.(c.id);
                     const fl = raw ? view(splitClassRecord(raw).body).getUint32(6, true) : -1;
-                    console.warn(`TPLRIG ${cls.name} (${mj} joints) cand "${c.cls.name}"#${c.id} joints=${opt.templateJoints?.(c.cls, c.odb.file)} flags=${fl}`);
+                    console.warn(
+                        `TPLRIG ${cls.name} (${mj} joints) cand "${c.cls.name}"#${c.id} joints=${opt.templateJoints?.(c.cls, c.odb.file)} flags=${fl}`,
+                    );
                 }
         }
         // `reset` classes (map markers) always use one template, so every PC class of the id folds into one record.
         const resetTemplate = CLONE_ADJUST.get(rfl)?.reset
-            ? [...pool].sort((a, b) => a.odb.dbIndex - b.odb.dbIndex || a.id - b.id).filter((c) => {
-                  const ti = c.cls.fields?.findIndex((f) => f.name.trim().toLowerCase() === 'type') ?? -1;
-                  return ti < 0 || c.cls.data?.[ti] === 1;
-              })
+            ? [...pool]
+                  .sort((a, b) => a.odb.dbIndex - b.odb.dbIndex || a.id - b.id)
+                  .filter((c) => {
+                      const ti = c.cls.fields?.findIndex((f) => f.name.trim().toLowerCase() === 'type') ?? -1;
+                      return ti < 0 || c.cls.data?.[ti] === 1;
+                  })
             : [];
-        for (const c of resetTemplate.length ? resetTemplate.slice(0, 1) : fresh.length ? fresh : pool) {
-            const m = mergeDefaults(cls, c.cls, opt.mapClassRef, opt.mapAnimFor?.(cls), wantsModel, opt.modelJoints?.(cls));
+        // Test aid: DRAKAN_DBG_TPLFORCE="PC class=PS2 template;..." pins the template of a class (to tell template traits from model traits).
+        const forced = debug.templates.get(cls.name.trim().toLowerCase())?.toLowerCase();
+        const forcedPool = forced ? pool.filter((c) => c.cls.name.trim().toLowerCase() === forced) : [];
+        for (const c of forcedPool.length
+            ? forcedPool
+            : resetTemplate.length
+              ? resetTemplate.slice(0, 1)
+              : fresh.length
+                ? fresh
+                : pool) {
+            const m = mergeDefaults(
+                cls,
+                c.cls,
+                opt.mapClassRef,
+                opt.mapAnimFor?.(cls),
+                wantsModel,
+                opt.modelJoints?.(cls),
+            );
             if (!best || m.coverage > best.m.coverage || (m.coverage === best.m.coverage && m.same > best.m.same))
                 best = { c, m };
         }
@@ -832,7 +924,10 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
         if (wantsModel) {
             modelRef = opt.modelFor!(cls, c.odb.file);
             if (!modelRef) {
-                unsupported.set(key, { reason: 'needs-model', detail: `the PC model of "${cls.name}" was not converted` });
+                unsupported.set(key, {
+                    reason: 'needs-model',
+                    detail: `the PC model of "${cls.name}" was not converted`,
+                });
                 continue;
             }
         }
@@ -1092,9 +1187,12 @@ export function levelPropertiesParams(pc: OdbClass, ps2: OdbClass): { specs: Par
     if (timeIdx >= 0 && fogIdx >= 0) {
         const fog = Number(decodeFieldValue(pf[fogIdx]!.type, pc.data?.[fogIdx] ?? 0, pc.data ?? []));
         const lum = ((fog & 255) + ((fog >> 8) & 255) + ((fog >> 16) & 255)) / 3;
-        const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['DRAKAN_LEVEL_TIME'];
+        const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.[
+            'DRAKAN_LEVEL_TIME'
+        ];
         const hour = env !== undefined && env !== '' ? Number(env) : lum < NIGHT_FOG_LUMINANCE ? NIGHT_HOUR : undefined;
-        if (hour !== undefined) specs.push({ fieldIndex: timeIdx, type: sf[timeIdx]!.type, name: sf[timeIdx]!.name, value: hour });
+        if (hour !== undefined)
+            specs.push({ fieldIndex: timeIdx, type: sf[timeIdx]!.type, name: sf[timeIdx]!.name, value: hour });
     }
     return { specs, left };
 }

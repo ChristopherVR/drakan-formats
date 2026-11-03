@@ -1,4 +1,5 @@
 import { splitClassRecord } from './odbwrite.ts';
+import { ootfDebugFlag } from './ootfdebug.ts';
 import { strToU8 } from 'fflate';
 import {
     convertPcLevel,
@@ -299,7 +300,15 @@ export async function convertOotfLevels(
 ): Promise<OotfPipelineResult> {
     const log = opt.log ?? (() => {});
     const dbgEnv0 = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {};
-    const res: OotfPipelineResult = { classAudit: [], levels: [], files: {}, stages: [], assets: null, classPlan: null, warnings: [] };
+    const res: OotfPipelineResult = {
+        classAudit: [],
+        levels: [],
+        files: {},
+        stages: [],
+        assets: null,
+        classPlan: null,
+        warnings: [],
+    };
     const stage = async <T>(name: string, fn: () => Promise<T>): Promise<T | null> => {
         try {
             const v = await fn();
@@ -363,11 +372,14 @@ export async function convertOotfLevels(
         firstTextureId: maxId(ps2.hostTxd, 0x0040) + 1,
         // Past every clip id of the host ADB and of the ADBs of ODBs that may host clones (the clips ship to each of them).
         firstAnimId:
-            Math.max(maxId(ps2.hostAdb, 0x0501), ...[...(ps2.adbs?.values() ?? [])].map((a) => maxId(a, 0x0501)), 99) + 1,
+            Math.max(maxId(ps2.hostAdb, 0x0501), ...[...(ps2.adbs?.values() ?? [])].map((a) => maxId(a, 0x0501)), 99) +
+            1,
         skinned: opt.skinned,
         texture: ootfTextureEnv(),
         displayList:
-            opt.displayListAll ?? (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_DL_ALL'] === '1'
+            (opt.displayListAll ??
+            (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_DL_ALL'] ===
+                '1')
                 ? /./
                 : undefined,
     });
@@ -452,7 +464,8 @@ export async function convertOotfLevels(
             }
             // Creatures with a same-named PS2 class: retarget onto its rig when it fits, else convert the PC model (PlanOptions.keepOwnModel).
             if (opt.retarget !== false && opt.models !== false && hostOk) {
-                const norm = (c: OdbClass): string => `${c.rflClass}|${c.name.toLowerCase().replace(/[^a-z0-9]+/g, '')}`;
+                const norm = (c: OdbClass): string =>
+                    `${c.rflClass}|${c.name.toLowerCase().replace(/[^a-z0-9]+/g, '')}`;
                 const byName = new Map<string, { odb: Ps2OdbIn; cls: OdbClass }>();
                 for (const odb of [...ps2Odbs].sort((a, b) => b.dbIndex - a.dbIndex))
                     for (const cls of odb.classes.values()) byName.set(norm(cls), { odb, cls });
@@ -471,13 +484,21 @@ export async function convertOotfLevels(
                     const sk = parseSkeleton(await modOf(mStem)!.readRaw(rec), 'ps2');
                     const choice = chooseRetargetTarget(src.skeleton, [{ id: hit.cls.model.id, skeleton: sk }]);
                     if (choice) {
-                        retargetTodo.push({ pc: i.cls, ps2Stem: mStem, modelId: hit.cls.model.id, sk, key: `${i.db}:${i.id}` });
+                        retargetTodo.push({
+                            pc: i.cls,
+                            ps2Stem: mStem,
+                            modelId: hit.cls.model.id,
+                            sk,
+                            key: `${i.db}:${i.id}`,
+                        });
                         retargetNotes.push(
                             `retarget ${i.cls.name}: PC ${src.skeleton.joints.length} joints -> PS2 model ${hit.cls.model.id} (${choice.match.matched} matched)`,
                         );
                     } else {
                         convertOwn.add(i.cls);
-                        retargetNotes.push(`convert ${i.cls.name}: no PS2 rig above 50% (PS2 model ${hit.cls.model.id})`);
+                        retargetNotes.push(
+                            `convert ${i.cls.name}: no PS2 rig above 50% (PS2 model ${hit.cls.model.id})`,
+                        );
                     }
                 }
                 res.warnings.push(...retargetNotes);
@@ -488,7 +509,8 @@ export async function convertOotfLevels(
             for (const odb of ps2Odbs) {
                 const st = odb.file.replace(/\.ODB$/i, '');
                 if (st === hostStem) continue;
-                if (crossOn && ps2.hostFiles?.has(st) && (!crossOnly || crossOnly.includes(st))) modelFiles.add(odb.file);
+                if (crossOn && ps2.hostFiles?.has(st) && (!crossOnly || crossOnly.includes(st)))
+                    modelFiles.add(odb.file);
                 else if (hostDbForStem(st) !== null && ps2.mods?.has(st)) modelFiles.add(odb.file);
             }
             const crossWant: { stem: string; cls: OdbClass }[] = [];
@@ -496,7 +518,7 @@ export async function convertOotfLevels(
                 modelOdbFiles: modelFiles,
                 keepOwnModel: (cls) => convertOwn.has(cls),
                 rewriteText:
-                    opt.texts === false
+                    opt.texts === false || ootfDebugFlag('OOTF_NO_CLSTEXT')
                         ? undefined
                         : (file, fields, data) => {
                               const xdb = file.replace(/\.ODB$/i, '.XDB');
@@ -520,7 +542,9 @@ export async function convertOotfLevels(
                 modelBounds: (id) => (dbgEnv0['OOTF_NO_BOUNDS'] ? builder.skeletonBounds(id) : builder.modelBounds(id)),
                 mapAnimFor: (cls) => {
                     const ow = ownerOf.get(cls);
-                    return ow && cls.model ? (builder.mapAnimRef(cls.model.db, cls.model.id, ow) ?? undefined) : undefined;
+                    return ow && cls.model
+                        ? (builder.mapAnimRef(cls.model.db, cls.model.id, ow) ?? undefined)
+                        : undefined;
                 },
                 modelFor: hostOk
                     ? (cls, file) => {
@@ -555,7 +579,8 @@ export async function convertOotfLevels(
                     const rec = st ? modOf(st)?.find(0x0208, c.model.id) : undefined;
                     if (!st || !rec) continue;
                     const k = `${st}#${c.model.id}`;
-                    if (!tplJoints.has(k)) tplJoints.set(k, parseSkeleton(await modOf(st)!.readRaw(rec), 'ps2').joints.length);
+                    if (!tplJoints.has(k))
+                        tplJoints.set(k, parseSkeleton(await modOf(st)!.readRaw(rec), 'ps2').joints.length);
                 }
             planOpts.templateJoints = (c, file) => {
                 const st = c.model ? containerStem(file.replace(/\.ODB$/i, ''), c.model.db) : null;
@@ -620,7 +645,11 @@ export async function convertOotfLevels(
                 const sub = input.filter(
                     (i) => keep.has(`${i.db}:${i.id}`) || mapped.has(`${i.db}:${i.id}`) || convertOwn.has(i.cls),
                 );
-                const dropped = [...convertOwn].filter((c) => !sub.some((i) => i.cls === c) || !keep.has(`${input.find((i) => i.cls === c)!.db}:${input.find((i) => i.cls === c)!.id}`));
+                const dropped = [...convertOwn].filter(
+                    (c) =>
+                        !sub.some((i) => i.cls === c) ||
+                        !keep.has(`${input.find((i) => i.cls === c)!.db}:${input.find((i) => i.cls === c)!.id}`),
+                );
                 for (const c of dropped) convertOwn.delete(c);
                 if (opt.preferCreatures)
                     res.warnings.push(
@@ -642,7 +671,12 @@ export async function convertOotfLevels(
                     const inp = [...used.values()].find((u) => u.cls === t.pc);
                     const m = t.pc.model;
                     const ow = ownerOf.get(t.pc);
-                    if (!inp || !m || !ow || !plan!.mapped.has(`${planKey.get(sig(t.pc))?.db}:${planKey.get(sig(t.pc))?.id}`))
+                    if (
+                        !inp ||
+                        !m ||
+                        !ow ||
+                        !plan!.mapped.has(`${planKey.get(sig(t.pc))?.db}:${planKey.get(sig(t.pc))?.id}`)
+                    )
                         continue;
                     const src = await builder.creatureSource(ow, m.db, m.id);
                     const adb = adbOf(t.ps2Stem);
@@ -667,7 +701,9 @@ export async function convertOotfLevels(
                         res.files[`overrides/${t.ps2Stem}.ADB/0502_${id}_${e2.sub}.bin`] = w.data;
                         n++;
                     }
-                    res.warnings.push(`retarget ${t.pc.name}: ${n} PS2 clips of ${t.ps2Stem}.ADB replaced (${res2.anims.length} converted, ${res2.skipped.length} skipped)`);
+                    res.warnings.push(
+                        `retarget ${t.pc.name}: ${n} PS2 clips of ${t.ps2Stem}.ADB replaced (${res2.anims.length} converted, ${res2.skipped.length} skipped)`,
+                    );
                 }
             });
         }
@@ -815,7 +851,8 @@ export async function convertOotfLevels(
             const hostSounds = new Set((host?.entries ?? []).filter((e) => e.type === 0x302).map((e) => e.id));
             const hostMax = [...hostSounds].reduce((m, i) => Math.max(m, i), 0);
             const perGroup = new Map<number, number>();
-            for (const e of host?.entries ?? []) if (e.type === 0x302) perGroup.set(e.sub, (perGroup.get(e.sub) ?? 0) + 1);
+            for (const e of host?.entries ?? [])
+                if (e.type === 0x302) perGroup.set(e.sub, (perGroup.get(e.sub) ?? 0) + 1);
             const group = [...perGroup].sort((a, b) => b[1] - a[1])[0]?.[0] ?? 1;
             let cursor = 0;
             const freeId = host
@@ -835,9 +872,10 @@ export async function convertOotfLevels(
                 for (const r of ps2SoundEntries(conv.sounds))
                     res.files[`new/${hostStem}.SDB/${hex4(r.type)}_${r.id}_${r.sub}.bin`] = r.data;
             } else {
-                res.files[`files/${hostDir ?? 'ENGLISH/COMMON/RESOURES'}/${hostStem}.SDB.new`] = writePs2Sdb(conv.sounds, [
-                    conv.group,
-                ]);
+                res.files[`files/${hostDir ?? 'ENGLISH/COMMON/RESOURES'}/${hostStem}.SDB.new`] = writePs2Sdb(
+                    conv.sounds,
+                    [conv.group],
+                );
             }
             soundLookup = (ow, ref) => {
                 const c = builder.resolveContainer(ow, ref >>> 16);
@@ -978,7 +1016,9 @@ export async function convertOotfLevels(
                     list: lvl.objects,
                     title,
                     classOf: ps2Class,
-                    ...(detectorClass ? { detector: { dbIndex: detectorClass.t.dbIndex, classId: detectorClass.t.classId } } : {}),
+                    ...(detectorClass
+                        ? { detector: { dbIndex: detectorClass.t.dbIndex, classId: detectorClass.t.classId } }
+                        : {}),
                     ...(timerClass ? { timer: { dbIndex: timerClass.t.dbIndex, classId: timerClass.t.classId } } : {}),
                     textId: (o, text) => {
                         const xdb = xdbOf(o);
@@ -1004,12 +1044,22 @@ export async function convertOotfLevels(
                 const r = applyCampaignExits(lvl.objects, cl, plan0, {
                     exitFieldOf: exitField,
                     terrain: pc.terrain,
-                    ...(detectorClass ? { detectorClass: { dbIndex: detectorClass.t.dbIndex, classId: detectorClass.t.classId } } : {}),
+                    ...(detectorClass
+                        ? { detectorClass: { dbIndex: detectorClass.t.dbIndex, classId: detectorClass.t.classId } }
+                        : {}),
                     ...(detectorClass
                         ? (() => {
-                              const wi = detectorClass.cls.fields!.findIndex((f) => /^detect which\?$/i.test(f.name.trim()));
+                              const wi = detectorClass.cls.fields!.findIndex((f) =>
+                                  /^detect which\?$/i.test(f.name.trim()),
+                              );
                               return wi >= 0
-                                  ? { mountDetector: { fieldIndex: wi, type: detectorClass.cls.fields![wi]!.type, name: detectorClass.cls.fields![wi]!.name } }
+                                  ? {
+                                        mountDetector: {
+                                            fieldIndex: wi,
+                                            type: detectorClass.cls.fields![wi]!.type,
+                                            name: detectorClass.cls.fields![wi]!.name,
+                                        },
+                                    }
                                   : {};
                           })()
                         : {}),
@@ -1023,7 +1073,13 @@ export async function convertOotfLevels(
                           }
                         : {}),
                     ...(timerClass
-                        ? { timerClass: { dbIndex: timerClass.t.dbIndex, classId: timerClass.t.classId, fields: timerClass.cls.fields! } }
+                        ? {
+                              timerClass: {
+                                  dbIndex: timerClass.t.dbIndex,
+                                  classId: timerClass.t.classId,
+                                  fields: timerClass.cls.fields!,
+                              },
+                          }
                         : {}),
                     exitClass: {
                         dbIndex: exitClass.t.dbIndex,
@@ -1044,7 +1100,8 @@ export async function convertOotfLevels(
             parts.terrain = parts.terrain.map((L) => ({ ...L, cellFlags: ps2CellFlags(L) }));
         parts.terrain = limitVisibleEntries(parts.terrain);
         const dbgEnv = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {};
-        if (dbgEnv['DRAKAN_DBG_MAXLAYERS']) parts.terrain = parts.terrain.slice(0, Number(dbgEnv['DRAKAN_DBG_MAXLAYERS']));
+        if (dbgEnv['DRAKAN_DBG_MAXLAYERS'])
+            parts.terrain = parts.terrain.slice(0, Number(dbgEnv['DRAKAN_DBG_MAXLAYERS']));
         const dbgName = (o: LvlObject): string =>
             classes.get(o.dbIndex)?.get(o.classId)?.name ??
             plan?.synthesized.find((x) => x.dbIndex === o.dbIndex && x.classId === o.classId)?.name ??
@@ -1058,7 +1115,8 @@ export async function convertOotfLevels(
                 const sy = plan?.synthesized.find((x) => x.dbIndex === o.dbIndex && x.classId === o.classId);
                 return !!sy && sy.rfl === 17 && /^NPCS\.ODB$/i.test(sy.file);
             };
-            for (const o of parts.objects.objects) if (skinnedProp(o)) console.warn(`DROPPED skinned prop ${dbgName(o)}`);
+            for (const o of parts.objects.objects)
+                if (skinnedProp(o)) console.warn(`DROPPED skinned prop ${dbgName(o)}`);
             parts.objects = { ...parts.objects, objects: parts.objects.objects.filter((o) => !skinnedProp(o)) };
         }
         if (dbgEnv['DRAKAN_DBG_LINKS']) {
@@ -1072,7 +1130,10 @@ export async function convertOotfLevels(
             for (const o of objs)
                 if (re.test(dbgName(o)))
                     console.warn(
-                        `LINKS ${dbgName(o)}#${o.id} at ${o.pos.map(Math.round)} -> [${o.links.map(nm).join(', ')}] <- [${objs.filter((x) => x.links.includes(o.id)).map((x) => nm(x.id)).join(', ')}]`,
+                        `LINKS ${dbgName(o)}#${o.id} at ${o.pos.map(Math.round)} -> [${o.links.map(nm).join(', ')}] <- [${objs
+                            .filter((x) => x.links.includes(o.id))
+                            .map((x) => nm(x.id))
+                            .join(', ')}]`,
                     );
         }
         // DRAKAN_DBG_PULLIDS=<id,id,...> restricts DRAKAN_DBG_PULL to those object ids (limit 8), the i-th id goes to ring slot i (+x, -x, +z, -z).
@@ -1105,8 +1166,11 @@ export async function convertOotfLevels(
         }
         if (dbgEnv['DRAKAN_DBG_NOOBJ']) {
             const keep = (o: LvlObject): boolean =>
-                [9, 27, 54].includes(classes.get(o.dbIndex)?.get(o.classId)?.rflClass ?? -1) || classes.get(o.dbIndex)?.get(o.classId)?.name === 'Procedural Sky' ||
-                (!!dbgEnv['DRAKAN_DBG_PULL'] && new RegExp(dbgEnv['DRAKAN_DBG_PULL'], 'i').test(dbgName(o)) && pullIdOk(o));
+                [9, 27, 54].includes(classes.get(o.dbIndex)?.get(o.classId)?.rflClass ?? -1) ||
+                classes.get(o.dbIndex)?.get(o.classId)?.name === 'Procedural Sky' ||
+                (!!dbgEnv['DRAKAN_DBG_PULL'] &&
+                    new RegExp(dbgEnv['DRAKAN_DBG_PULL'], 'i').test(dbgName(o)) &&
+                    pullIdOk(o));
             parts.objects = { ...parts.objects, objects: parts.objects.objects.filter(keep) };
         }
         if (dbgEnv['DRAKAN_DBG_STOMP'] !== undefined) {
@@ -1114,8 +1178,13 @@ export async function convertOotfLevels(
             const want = Number(dbgEnv['DRAKAN_DBG_STOMP']);
             for (const o of parts.objects.objects) {
                 if (dbgName(o) !== 'Stomp Player') continue;
-                console.warn(`stomp obj ${o.id} pos ${o.pos.map(Math.round)} params ${o.params.map((p, i) => `${p.name}=${o.data[i]}`).join(' ')}`);
-                if (want >= 0) o.params.forEach((p, i) => { if (p.name.startsWith('Initial State')) o.data[i] = want; });
+                console.warn(
+                    `stomp obj ${o.id} pos ${o.pos.map(Math.round)} params ${o.params.map((p, i) => `${p.name}=${o.data[i]}`).join(' ')}`,
+                );
+                if (want >= 0)
+                    o.params.forEach((p, i) => {
+                        if (p.name.startsWith('Initial State')) o.data[i] = want;
+                    });
             }
         }
         if (dbgEnv['DRAKAN_DBG_OBJSPLIT'] || dbgEnv['DRAKAN_DBG_DROPRFL'] || dbgEnv['DRAKAN_DBG_DROPNAME']) {
@@ -1147,14 +1216,19 @@ export async function convertOotfLevels(
             const re = new RegExp(dbgEnv['DRAKAN_DBG_MAXNAME'].slice(0, cut), 'i');
             const max = Number(dbgEnv['DRAKAN_DBG_MAXNAME'].slice(cut + 1));
             let seen = 0;
-            parts.objects = { ...parts.objects, objects: parts.objects.objects.filter((o) => !re.test(dbgName(o)) || seen++ < max) };
+            parts.objects = {
+                ...parts.objects,
+                objects: parts.objects.objects.filter((o) => !re.test(dbgName(o)) || seen++ < max),
+            };
         }
         if (dbgEnv['DRAKAN_DBG_DUMPNAME']) {
             // Test aid: print every object whose class name matches the regex (id, position, field values by name).
             const re = new RegExp(dbgEnv['DRAKAN_DBG_DUMPNAME'], 'i');
             for (const o of parts.objects.objects)
                 if (re.test(dbgName(o)))
-                    console.warn(`DUMP ${o.id} ${dbgName(o)} pos=${o.pos.map(Math.round)} ${o.params.map((p, i) => `${p.name}=${o.data[i]}`).join(' ')}`);
+                    console.warn(
+                        `DUMP ${o.id} ${dbgName(o)} pos=${o.pos.map(Math.round)} ${o.params.map((p, i) => `${p.name}=${o.data[i]}`).join(' ')}`,
+                    );
         }
         if (dbgEnv['DRAKAN_DBG_LIST']) {
             const h = new Map<string, number>();
@@ -1166,21 +1240,42 @@ export async function convertOotfLevels(
             const re = new RegExp(dbgEnv['DRAKAN_DBG_CLSINFO'], 'i');
             for (const s of plan?.synthesized ?? []) {
                 if (!re.test(s.name)) continue;
-                console.warn(`CLSINFO ${s.name} -> ${s.file}#${s.classId} rfl=${s.rfl} template="${s.template.name}"#${s.template.classId} model=${JSON.stringify(s.cls.model)} cov=${s.coverage.toFixed(2)} tskin=${(() => { const o = ps2Odbs.find((x) => x.dbIndex === s.template.dbIndex); const tc = o?.classes.get(s.template.classId); const st = tc?.model && o ? containerStem(o.file.replace(/\.ODB$/i, ''), tc.model.db) : null; return !!tc?.model && !!st && !!modOf(st)?.find(0x0208, tc.model.id); })()} flags=${(() => { const bd = splitClassRecord(s.record).body; return bd.length >= 10 ? new DataView(bd.buffer, bd.byteOffset, bd.byteLength).getUint32(6, true) : -1; })()} data=${s.cls.data?.join(',')}`);
+                console.warn(
+                    `CLSINFO ${s.name} -> ${s.file}#${s.classId} rfl=${s.rfl} template="${s.template.name}"#${s.template.classId} model=${JSON.stringify(s.cls.model)} cov=${s.coverage.toFixed(2)} tskin=${(() => {
+                        const o = ps2Odbs.find((x) => x.dbIndex === s.template.dbIndex);
+                        const tc = o?.classes.get(s.template.classId);
+                        const st = tc?.model && o ? containerStem(o.file.replace(/\.ODB$/i, ''), tc.model.db) : null;
+                        return !!tc?.model && !!st && !!modOf(st)?.find(0x0208, tc.model.id);
+                    })()} flags=${(() => {
+                        const bd = splitClassRecord(s.record).body;
+                        return bd.length >= 10
+                            ? new DataView(bd.buffer, bd.byteOffset, bd.byteLength).getUint32(6, true)
+                            : -1;
+                    })()} data=${s.cls.data?.join(',')}`,
+                );
                 if (dbgEnv['DRAKAN_DBG_CLSFIELDS'])
-                    (s.cls.fields ?? []).forEach((f, i) => console.warn(`  F ${i} ${f.name} t=${f.type} v=${s.cls.data?.[i]}`));
+                    (s.cls.fields ?? []).forEach((f, i) =>
+                        console.warn(`  F ${i} ${f.name} t=${f.type} v=${s.cls.data?.[i]}`),
+                    );
             }
         }
         if (dbgEnv['DRAKAN_DBG_LISTCLS']) {
             // Test aid: histogram of the placed objects' class names (after the other filters), to compare passing and failing splits.
             const h = new Map<string, number>();
             for (const o of parts.objects.objects) h.set(dbgName(o), (h.get(dbgName(o)) ?? 0) + 1);
-            console.warn(`LISTCLS ${[...h].sort().map(([k, v]) => `${k}=${v}`).join('; ')}`);
+            console.warn(
+                `LISTCLS ${[...h]
+                    .sort()
+                    .map(([k, v]) => `${k}=${v}`)
+                    .join('; ')}`,
+            );
         }
         if (dbgEnv['DRAKAN_DBG_AT']) {
             // Test aid: DRAKAN_DBG_AT=<x>,<y>,<z> puts Rynn at that world position (terrain lookups pick the wrong layer on multi-layer levels).
             const [ax, ay, az] = dbgEnv['DRAKAN_DBG_AT'].split(',').map(Number);
-            const rynn = parts.objects.objects.find((o) => (classes.get(o.dbIndex)?.get(o.classId)?.rflClass ?? -1) === 9);
+            const rynn = parts.objects.objects.find(
+                (o) => (classes.get(o.dbIndex)?.get(o.classId)?.rflClass ?? -1) === 9,
+            );
             if (rynn && ax !== undefined && ay !== undefined && az !== undefined) rynn.pos = [ax, ay, az];
         }
         if (dbgEnv['DRAKAN_DBG_PULL']) {
@@ -1191,7 +1286,12 @@ export async function convertOotfLevels(
             // DRAKAN_DBG_PULLAT=x,y,z centres the ring there instead of on the PC start object (the PS2 player can start elsewhere,
             // e.g. mounted on a dragon: read her position from a world dump).
             const at = (dbgEnv['DRAKAN_DBG_PULLAT'] ?? '').split(',').map(Number);
-            const start = at.length === 3 && at.every(Number.isFinite) ? ({ pos: [at[0]!, at[1]!, at[2]!] } as { pos: typeof found extends undefined ? never : NonNullable<typeof found>['pos'] }) : found;
+            const start =
+                at.length === 3 && at.every(Number.isFinite)
+                    ? ({ pos: [at[0]!, at[1]!, at[2]!] } as {
+                          pos: typeof found extends undefined ? never : NonNullable<typeof found>['pos'];
+                      })
+                    : found;
             let n = 0;
             const slotOf = (o: LvlObject): number => (pullArr ? pullArr.indexOf(o.id) : n - 1);
             // DRAKAN_DBG_PULLDIST=<d>,<dy>: ring distance (default 1200) and height offset (default 0) of the pulled objects.
@@ -1200,11 +1300,22 @@ export async function convertOotfLevels(
                 parts.objects = {
                     ...parts.objects,
                     objects: parts.objects.objects.map((o) =>
-                        n < (pullIds ? 8 : 4) && re.test(dbgName(o)) && pullIdOk(o) && (n++, console.warn(`pull ${dbgName(o)} obj ${o.id} rot=${o.rot.map(Math.round)} from ${o.pos.map(Math.round)}${dbgEnv['DRAKAN_DBG_PULLP'] ? ` r=${o.radius} flags=${o.flags.toString(16)} links=${o.links} ` + o.params.map((p, i) => `${p.name}=${o.data[i]}`).join(' ') : ''}`), true)
+                        n < (pullIds ? 8 : 4) &&
+                        re.test(dbgName(o)) &&
+                        pullIdOk(o) &&
+                        (n++,
+                        console.warn(
+                            `pull ${dbgName(o)} obj ${o.id} rot=${o.rot.map(Math.round)} from ${o.pos.map(Math.round)}${dbgEnv['DRAKAN_DBG_PULLP'] ? ` r=${o.radius} flags=${o.flags.toString(16)} links=${o.links} ` + o.params.map((p, i) => `${p.name}=${o.data[i]}`).join(' ') : ''}`,
+                        ),
+                        true)
                             ? {
                                   ...o,
                                   // DRAKAN_DBG_PULLROT=<deg> adds degrees to the pulled objects' yaw (rot[1]); a door seen face-on shows its swing.
-                                  rot: [o.rot[0], o.rot[1] + Number(dbgEnv['DRAKAN_DBG_PULLROT'] ?? 0), o.rot[2]] as typeof o.rot,
+                                  rot: [
+                                      o.rot[0],
+                                      o.rot[1] + Number(dbgEnv['DRAKAN_DBG_PULLROT'] ?? 0),
+                                      o.rot[2],
+                                  ] as typeof o.rot,
                                   // DRAKAN_DBG_PULLFLAGS=<hex> ORs object flags (1 = the PC "visible" bit): objects of flags 0 start hidden.
                                   flags: o.flags | Number.parseInt(dbgEnv['DRAKAN_DBG_PULLFLAGS'] ?? '0', 16),
                                   pos: [
@@ -1225,14 +1336,19 @@ export async function convertOotfLevels(
                 if (o && to !== undefined && !o.links.includes(to)) o.links = [...o.links, to];
             }
         }
-        const lf = Number((globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['DRAKAN_TERRAIN_LAYERFLAGS'] ?? 0);
+        const lf = Number(
+            (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.[
+                'DRAKAN_TERRAIN_LAYERFLAGS'
+            ] ?? 0,
+        );
         if (lf) parts.terrain = parts.terrain.map((L) => ({ ...L, flags: L.flags | lf }));
         res.levels.push({ pcPath: pc.path, title, parts, splats: tex ? { TXD: tex.txd } : {} });
     }
     // The pack lists the levels in this order (mod.toml `levels`, whose first entry is the campaign start): play order,
     // not the order the caller passed them in (a directory listing is alphabetical).
     if (plan0) {
-        const at = (l: OotfLevelOut): number => plan0.byPath.get(normalizeLevelRef(l.pcPath))?.index ?? Number.MAX_SAFE_INTEGER;
+        const at = (l: OotfLevelOut): number =>
+            plan0.byPath.get(normalizeLevelRef(l.pcPath))?.index ?? Number.MAX_SAFE_INTEGER;
         res.levels.sort((a, b) => at(a) - at(b));
     }
 
@@ -1309,7 +1425,8 @@ export async function convertOotfLevels(
                 }
                 res.files[`files/${dir}/${stem}.MOD`] = writePs2Srsc([...modEntries, ...add.models]);
                 const txdEntries: Ps2Entry[] = [];
-                for (const e of hf.txd.entries) txdEntries.push({ type: e.type, id: e.id, sub: e.sub, data: await hf.txd.readRaw(e) });
+                for (const e of hf.txd.entries)
+                    txdEntries.push({ type: e.type, id: e.id, sub: e.sub, data: await hf.txd.readRaw(e) });
                 res.files[`files/${dir}/${stem}.TXD`] = writePs2Srsc([...txdEntries, ...add.textures]);
                 res.warnings.push(
                     `template ODB ${stem}: ${cb.report.models.converted} models, ${cb.report.textures.converted} textures added to its own MOD / TXD`,
@@ -1393,8 +1510,14 @@ function ensureSingletons(
     }
     // Air arenas (Multiplayer/Air/*) are dragon fights: Rynn on foot has no floor. A Dragon object whose `Initial Mode` is 0
     // (Ravenshold's, the level where Rynn starts mounted) is placed at her start. Test aid DRAKAN_DBG_DRAGON=0|1 forces it.
-    const dbgDragon = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['DRAKAN_DBG_DRAGON'];
-    if ((/^multiplayer[\\/]air[\\/]/i.test(pc.path) || dbgDragon === '1') && dbgDragon !== '0' && !list.objects.some((o) => rflOf(o) === 28)) {
+    const dbgDragon = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.[
+        'DRAKAN_DBG_DRAGON'
+    ];
+    if (
+        (/^multiplayer[\\/]air[\\/]/i.test(pc.path) || dbgDragon === '1') &&
+        dbgDragon !== '0' &&
+        !list.objects.some((o) => rflOf(o) === 28)
+    ) {
         const t = tpl.find((o) => rflOf(o) === 28);
         const rynn = list.objects.find((o) => rflOf(o) === 9);
         if (t && rynn) {

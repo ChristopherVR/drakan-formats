@@ -44,6 +44,25 @@ node --experimental-transform-types --no-warnings scripts/pc-level-to-ps2.ts \
 
 ## Development
 
+### Converter investigation switches (Node only)
+
+Unset by default and inert in the browser. Use only for controlled comparisons; generated packs still contain the
+player's game data and must not be committed. `OOTF_*` boolean switches accept `1` to enable and `0`/empty to disable.
+
+| Variable                                          | Effect                                                                           |
+| ------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `DRAKAN_DBG_NAMEMAP="PC class=PS2 class;..."`     | Map named PC classes to existing PS2 classes without cloning.                    |
+| `DRAKAN_DBG_TPLFORCE="PC class=PS2 template;..."` | Select a matching template from the class's eligible template pool.              |
+| `DRAKAN_DBG_NOMODEL="regex"`                      | Keep template models for matching PC classes instead of converting their models. |
+| `OOTF_SYNTH_BOUNDS=1`                             | Ignore the source model bounds and synthesize them from geometry.                |
+| `OOTF_NO_CLSTEXT=1`                               | Disable class-text rewriting in the pipeline.                                    |
+| `OOTF_NO_ALPHA_FLAG=1`                            | Suppress the output texture alpha header flag without changing pixel bytes.      |
+
+Mapping source names are case-insensitive and trimmed. Duplicate/malformed mappings and invalid regular expressions
+fail with an explicit diagnostic. A template override that is not eligible falls back to normal selection; compare
+the conversion report rather than assuming the override was applied. These switches are not fixes for weapon or
+controller lifecycle problems. Tests: `test/ootfdebug.test.ts`, plus the converter/model/texture regression suites.
+
 ```sh
 npm run typecheck && npm test && npm run format:check
 ```

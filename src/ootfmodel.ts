@@ -1,4 +1,5 @@
 import { view } from './bytes.ts';
+import { ootfDebugFlag } from './ootfdebug.ts';
 import { type Ps2Entry, ps2String, writePs2Srsc } from './ootfcontainer.ts';
 import {
     MOD_BOUNDS,
@@ -287,7 +288,8 @@ export function buildPs2Mod(
         { type: MOD_GROUP, id: groupId, sub: 0, data: ps2String(opt.group ?? 'OotF') },
     ];
     for (const { id, model, records } of models)
-        for (const r of records ?? writePs2ModelRecords(model)) entries.push({ type: r.type, id, sub: groupId, data: r.data });
+        for (const r of records ?? writePs2ModelRecords(model))
+            entries.push({ type: r.type, id, sub: groupId, data: r.data });
     return writePs2Srsc(entries);
 }
 
@@ -526,7 +528,7 @@ export function pcToNeutral(pc: PcModel, opt: PcToPs2Options = {}): { model: Neu
         stats.flatToSmooth = true;
     }
     let bounds: Uint8Array | null = null;
-    if (pc.bounds && pc.bounds.length >= 72) {
+    if (pc.bounds && pc.bounds.length >= 72 && !ootfDebugFlag('OOTF_SYNTH_BOUNDS')) {
         bounds = new Uint8Array(8 + pc.bounds.length);
         bounds.set(pc.bounds, 8);
     }
