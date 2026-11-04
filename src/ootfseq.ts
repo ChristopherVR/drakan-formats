@@ -55,6 +55,20 @@ export interface PcSequence {
 
 export class PcSequenceError extends Error {}
 
+/** Sounds referenced by selected cinematic records, including speech absent from any placed sound object's fields. */
+export async function sequenceSoundRefs(reader: SrscReader, only?: ReadonlySet<number>): Promise<number[]> {
+    const refs = new Set<number>();
+    for (const entry of reader.entries) {
+        if (entry.type !== SSD_SEQUENCE || (only && !only.has(entry.id))) continue;
+        const sequence = parsePcSequence(entry.id, entry.sub, (await reader.read(entry)).data);
+        for (const actor of sequence.actors)
+            for (const action of actor.actions) {
+                if (action.type === 3) refs.add(view(action.payload).getUint32(0, true));
+            }
+    }
+    return [...refs];
+}
+
 /** Parse one PC 0x0311 body; throws PcSequenceError on an unknown action type or leftover bytes. */
 export function parsePcSequence(id: number, group: number, b: Uint8Array): PcSequence {
     const dv = view(b);
@@ -136,7 +150,7 @@ export interface SequenceConvertOptions {
     folderName?: string;
     /** PS2 db word written into `idMap` values (0 = the SSD's own stem, which is what a Stomp Player of that stem resolves). */
     ps2Db?: number;
-    /** PS2 object ids standing in for PC actors that are not level objects (matched by actor name). */
+    /** PS2 ids of the player/mount/camera; also identify aliased actor names such as the opening scene's "Wrynn". */
     playerObjectId?: number;
     dragonObjectId?: number;
     cameraObjectId?: number;
@@ -272,6 +286,10 @@ export async function convertPcSequences(pc: SrscReader, opts: SequenceConvertOp
         idMap.set(((pcDb << 16) | e.id) >>> 0, ((ps2Db << 16) | newId) >>> 0);
         report.sequencesOut++;
     }
+    for (const [kind, count] of report.droppedActions) {
+        if (['sound', 'animation', 'music'].includes(kind))
+            report.warnings.push(`${kind}: ${count} cinematic action(s) had no compatible resource mapping`);
+    }
     return { entries, idMap, report };
 }
 
@@ -306,7 +324,7 @@ function resolveObject(
     a: PcSeqActor,
     opts: SequenceConvertOptions,
 ): { ref: number; special: 'rynn' | 'dragon' | 'camera' | null } | null {
-    const special = RYNN_RE.test(a.name)
+    let special: 'rynn' | 'dragon' | 'camera' | null = RYNN_RE.test(a.name)
         ? 'rynn'
         : DRAGON_RE.test(a.name)
           ? 'dragon'
@@ -314,6 +332,11 @@ function resolveObject(
             ? 'camera'
             : null;
     const mapped = a.actorType === 1 ? opts.maps.objectIdMap.get(a.objectId) : undefined;
+    if (mapped !== undefined) {
+        if (mapped === opts.playerObjectId) special = 'rynn';
+        else if (mapped === opts.dragonObjectId) special = 'dragon';
+        else if (mapped === opts.cameraObjectId) special = 'camera';
+    }
     if (mapped !== undefined) return { ref: mapped, special };
     const fallback =
         special === 'rynn'
@@ -370,6 +393,11 @@ const lookup = (m: RefLookup | undefined, k: number): number | undefined => m?.g
 export function convertAction(x: PcAction, opts: SequenceConvertOptions, report: SequenceReport): Uint8Array | null {
     const p = view(x.payload);
     const drop = (kind: string): null => (bump(report.droppedActions, kind), null);
+    const unmapped = (kind: string, ref: number): null => {
+        const warning = `${kind} 0x${ref.toString(16)}: no compatible resource mapping`;
+        if (!report.warnings.includes(warning)) report.warnings.push(warning);
+        return drop(kind);
+    };
     switch (x.type) {
         case 0: {
             // quat(16) pos(12) relativeActor(4) options(4) -> same bytes, then scale 1,1,1 (PS2 has 12 more bytes)
@@ -382,7 +410,7 @@ export function convertAction(x: PcAction, opts: SequenceConvertOptions, report:
         case 1: {
             // channel, ref, begin, transition, speed, flags: the PS2 action is the same six words
             const ref = lookup(opts.maps.animMap, p.getUint32(4, true));
-            if (ref === undefined) return drop('animation');
+            if (ref === undefined) return unmapped('animation', p.getUint32(4, true));
             const out = pcBytes(1, x.time, 24);
             out.set(x.payload, 6);
             view(out).setUint32(10, ref >>> 0, true);
@@ -391,7 +419,7 @@ export function convertAction(x: PcAction, opts: SequenceConvertOptions, report:
         case 3: {
             // PC: ref, f32 duration, u16 volume, u16 flags -> PS2: ref, u32 (volume | flags << 16); the duration is dropped
             const ref = lookup(opts.maps.soundMap, p.getUint32(0, true));
-            if (ref === undefined) return drop('sound');
+            if (ref === undefined) return unmapped('sound', p.getUint32(0, true));
             const out = pcBytes(3, x.time, 8);
             const dv = view(out);
             dv.setUint32(6, ref >>> 0, true);
@@ -427,7 +455,7 @@ export function convertAction(x: PcAction, opts: SequenceConvertOptions, report:
             const id = p.getUint32(0, true);
             const stop = id === 0;
             const ref = stop ? 0 : lookup(opts.maps.musicMap, id);
-            if (ref === undefined) return drop('music');
+            if (ref === undefined) return unmapped('music', id);
             const out = pcBytes(8, x.time, 28);
             const dv = view(out);
             dv.setUint32(6, ref >>> 0, true);

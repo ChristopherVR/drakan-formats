@@ -9,6 +9,7 @@ import {
     retargetCreature,
     retargetCreatureAssets,
     retargetPcAnim,
+    retargetPs2Anim,
     rigSize,
 } from '../src/ootfretarget.ts';
 import { buildRig, invertMat12, mulMat12, quatToMat12 } from '../src/skeleton.ts';
@@ -214,5 +215,54 @@ describe('choose target and assets', () => {
             [10, 12],
         ]); // 5 and 10 are taken in the ADB -> next free ids
         expect(r.reason).toMatch(/5 joints matched/);
+    });
+});
+
+describe('PS2 character motion retargeting', () => {
+    const source = buildRig(skeleton(['root', 'Lthigh', 'Lcalf'], [-1, 0, 1], [rotY(0.3), rotZ(-0.5), rotY(0.7)]), 0);
+    const target = buildRig(
+        skeleton(['root', 'Lthigh', 'Lcalf', 'tail'], [-1, 0, 1, 0], [rotZ(-0.2), rotY(0.8), rotZ(0.4), I3], 2),
+        0,
+    );
+    const pc = pcAnim([
+        [
+            { t: 0, rot: I3, pos: [0, 0, 0] },
+            { t: 1, rot: rotZ(0.8), pos: [1, 2, 3] },
+        ],
+        [
+            { t: 0, rot: I3 },
+            { t: 1, rot: rotY(-0.9) },
+        ],
+        [
+            { t: 0, rot: I3 },
+            { t: 1, rot: rotZ(1.1) },
+        ],
+    ]);
+    const original = retargetPcAnim(pc, source, source, matchJoints(source, source), { scale: 1 });
+    it('preserves joint rotations and key times on the same rig', () => {
+        const result = retargetPs2Anim(original, source, source, matchJoints(source, source), { scale: 1 });
+        result.tracks.forEach((track, j) =>
+            track.keys.forEach((key, k) => {
+                expect(key.time).toBe(original.tracks[j]!.keys[k]!.time);
+                expect(quatAngle(key.q, original.tracks[j]!.keys[k]!.q)).toBeLessThan(0.001);
+            }),
+        );
+    });
+    it('removes duplicate root translation for a controller-driven visual actor while retaining rotation', () => {
+        const result = retargetPs2Anim(original, source, target, matchJoints(source, target), { inPlace: true });
+        expect(result.tracks[0]!.hasPos).toBe(false);
+        expect(result.tracks[0]!.keys.every((key) => key.pos === null)).toBe(true);
+        expect(quatAngle(result.tracks[0]!.keys[0]!.q, result.tracks[0]!.keys.at(-1)!.q)).toBeGreaterThan(0.1);
+    });
+    it('matches independent delta conversion across different parent bind rotations', () => {
+        const result = retargetPs2Anim(original, source, target, matchJoints(source, target), { scale: 2 });
+        const expected = retargetPcAnim(pc, source, target, matchJoints(source, target), { scale: 2 });
+        result.tracks.forEach((track, j) =>
+            track.keys.forEach((key, k) => {
+                expect(quatAngle(key.q, expected.tracks[j]!.keys[k]!.q)).toBeLessThan(0.001);
+            }),
+        );
+        expect(result.tracks[0]!.keys.at(-1)!.pos).toEqual(expected.tracks[0]!.keys.at(-1)!.pos);
+        expect(result.tracks[3]!.keys).toHaveLength(1);
     });
 });

@@ -11,7 +11,7 @@
  */
 import { type PcAnim, type Ps2Anim, type Skeleton, writePs2Anim } from './ootfanim.ts';
 import { type ConvertAnimOptions, bindBasis, convertPcAnimToPs2 } from './ootfcreature.ts';
-import { buildRig, invertMat12, type Rig } from './skeleton.ts';
+import { buildRig, invertMat12, mulMat12, quatToMat12, mat12ToQuat, type Rig } from './skeleton.ts';
 
 // ------------------------------------------------------------------------------------------------ name matching
 
@@ -221,6 +221,58 @@ export function chooseRetargetTarget(
 export interface RetargetAnimOptions extends ConvertAnimOptions {
     /** Root translation scale. Default: target rig size / source rig size. */
     scale?: number;
+    /** Render-only actor: its controller already supplies world motion, so retain root bind translation. */
+    inPlace?: boolean;
+}
+
+/** PS2 absolute parent-relative tracks -> another PS2 bind skeleton, preserving each source key and timing. */
+export function retargetPs2Anim(
+    source: Ps2Anim,
+    src: Rig,
+    dst: Rig,
+    match: JointMatch,
+    opt: RetargetAnimOptions = {},
+): Ps2Anim {
+    if (source.tracks.length !== src.jointCount) throw new Error('source animation does not fit its skeleton');
+    const sb = bindBasis(src);
+    const tb = bindBasis(dst);
+    const scale = opt.scale ?? (rigSize(src) > 1e-9 ? rigSize(dst) / rigSize(src) : 1);
+    const rotation = (r: ArrayLike<number>) => Float32Array.from([...Array.from(r).slice(0, 9), 0, 0, 0]);
+    const tracks = dst.names.map((_, d) => {
+        const s = match.map[d]!;
+        const base = tb.translation[d]!;
+        if (s < 0)
+            return { base, hasPos: false, keys: [{ time: 0, q: mat12ToQuat([...tb.local[d]!, 0, 0, 0]), pos: null }] };
+        const original = source.tracks[s]!;
+        const root = dst.parents[d]! < 0;
+        // Qsource = Bsource * WparentSource * delta * inverse(WparentSource).
+        // Recover that model-axis delta and apply it in the target bind basis. Cache both sides per joint.
+        const left = mulMat12(
+            mulMat12(
+                mulMat12(rotation(tb.local[d]!), rotation(tb.parentWorld[d]!)),
+                invertMat12(rotation(sb.parentWorld[s]!)),
+            ),
+            invertMat12(rotation(sb.local[s]!)),
+        );
+        const right = mulMat12(rotation(sb.parentWorld[s]!), invertMat12(rotation(tb.parentWorld[d]!)));
+        const keys = original.keys.map((k) => {
+            const q = mat12ToQuat(mulMat12(mulMat12(left, quatToMat12(k.q, [0, 0, 0])), right));
+            const length = Math.hypot(...q);
+            const pos =
+                root && !opt.inPlace && k.pos
+                    ? (k.pos.map((v, i) => base[i]! + (v - original.base[i]!) * scale) as [number, number, number])
+                    : null;
+            return { time: k.time, q: q.map((v) => v / length) as [number, number, number, number], pos };
+        });
+        return { base, hasPos: root && original.hasPos && !opt.inPlace, keys };
+    });
+    return {
+        ...source,
+        name: opt.name ?? source.name,
+        frames: dst.jointCount,
+        channels: opt.channels ?? source.channels,
+        tracks,
+    };
 }
 
 /**

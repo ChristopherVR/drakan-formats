@@ -15,9 +15,24 @@
 
 import { cp1252Byte } from './xdb.ts';
 import { encodeXdbString } from './xdbwrite.ts';
-import { decodeFieldValue, fieldBase, fieldIsArray, fieldIsIndirect, FIELD_STRING, type ClassFieldDef } from './fields.ts';
+import {
+    decodeFieldValue,
+    fieldBase,
+    fieldIsArray,
+    fieldIsIndirect,
+    FIELD_STRING,
+    type ClassFieldDef,
+} from './fields.ts';
 import { mangleComponent } from './levellist.ts';
-import { FLAG_SCALED, FLAG_VISIBLE, addObject, type LvlObject, type LvlObjectList, type LvlParam, type Vec3 } from './lvl.ts';
+import {
+    FLAG_SCALED,
+    FLAG_VISIBLE,
+    addObject,
+    type LvlObject,
+    type LvlObjectList,
+    type LvlParam,
+    type Vec3,
+} from './lvl.ts';
 import type { PcLevel } from './pc.ts';
 import { layerHeightAt, terrainGroundBelow, type TerrainLayer } from './terrain.ts';
 import { pcDependencyKey, pcLevelName, resolvePcPath } from './pc.ts';
@@ -263,9 +278,7 @@ export function planCampaign(levels: readonly PcLevel[], opt: CampaignOptions = 
     });
     // Start: explicit, else a level called Intro, else the first.
     const startPath =
-        opt.startPath ??
-        sorted.find((l) => /intro/i.test(l.path) && !/book/i.test(l.path))?.path ??
-        sorted[0]?.path;
+        opt.startPath ?? sorted.find((l) => /intro/i.test(l.path) && !/book/i.test(l.path))?.path ?? sorted[0]?.path;
     if (startPath) {
         const i = sorted.findIndex((l) => normalizeLevelRef(l.path) === normalizeLevelRef(startPath));
         if (i > 0) sorted.unshift(...sorted.splice(i, 1));
@@ -309,7 +322,10 @@ export function planCampaign(levels: readonly PcLevel[], opt: CampaignOptions = 
         const pc = pcByPath.get(normalizeLevelRef(lv.path))!;
         for (const e of pcExits(pc)) {
             const dest = find(e.text);
-            if (!dest) warnings.push(`${lv.title}: exit ${e.obj.id} "${e.className}" leads to "${e.text}", which is not in the campaign`);
+            if (!dest)
+                warnings.push(
+                    `${lv.title}: exit ${e.obj.id} "${e.className}" leads to "${e.text}", which is not in the campaign`,
+                );
             lv.exits.push({
                 ...(/book/i.test(lv.pcName) ? { autoSeconds: BOOK_SECONDS } : {}),
                 reason: 'pc',
@@ -328,7 +344,9 @@ export function planCampaign(levels: readonly PcLevel[], opt: CampaignOptions = 
 
     // The intro has no exit of its own: Interface.odb hands over to the first level.
     const start = out[0];
-    const first = opt.firstPath ? find(opt.firstPath) : (out.find((l) => /^ruined village$/i.test(l.pcName)) ?? out[1] ?? null);
+    const first = opt.firstPath
+        ? find(opt.firstPath)
+        : (out.find((l) => /^ruined village$/i.test(l.pcName)) ?? out[1] ?? null);
     if (start && first && start !== first && !start.exits.some((e) => e.destPath)) {
         // Where the PC intro ends: the "Stomp" detector the player walks into (it plays the closing sequence). Without one the
         // hand-over sits at the Rynn start.
@@ -343,7 +361,11 @@ export function planCampaign(levels: readonly PcLevel[], opt: CampaignOptions = 
         for (const e of [...a.exits]) {
             if (!e.destPath || e.reason === 'arrival') continue;
             const b = byPath.get(normalizeLevelRef(e.destPath))!;
-            if (b === a || b.exits.some((x) => x.destPath && normalizeLevelRef(x.destPath) === normalizeLevelRef(a.path))) continue;
+            if (
+                b === a ||
+                b.exits.some((x) => x.destPath && normalizeLevelRef(x.destPath) === normalizeLevelRef(a.path))
+            )
+                continue;
             const at = b.rynn ?? [0, 0, 0];
             b.exits.push(synth(b, a, 'arrival', at, opt.arrivalOffset));
         }
@@ -352,8 +374,11 @@ export function planCampaign(levels: readonly PcLevel[], opt: CampaignOptions = 
     // Edges, reachability, roles.
     const edges: CampaignEdge[] = [];
     for (const a of out) {
-        for (const e of a.exits) if (e.destPath && !e.synthetic) edges.push({ from: a.path, to: e.destPath, reason: e.reason, objectId: e.pcObjectId });
-        for (const e of a.exits) if (e.reason === 'intro-next') edges.push({ from: a.path, to: e.destPath!, reason: e.reason, objectId: 0 });
+        for (const e of a.exits)
+            if (e.destPath && !e.synthetic)
+                edges.push({ from: a.path, to: e.destPath, reason: e.reason, objectId: e.pcObjectId });
+        for (const e of a.exits)
+            if (e.reason === 'intro-next') edges.push({ from: a.path, to: e.destPath!, reason: e.reason, objectId: 0 });
     }
     const reach = new Set<string>();
     const queue = out.length ? [out[0]!] : [];
@@ -361,7 +386,8 @@ export function planCampaign(levels: readonly PcLevel[], opt: CampaignOptions = 
         const l = queue.pop()!;
         if (reach.has(l.path)) continue;
         reach.add(l.path);
-        for (const e of l.exits) if (e.destPath && e.reason !== 'arrival') queue.push(byPath.get(normalizeLevelRef(e.destPath))!);
+        for (const e of l.exits)
+            if (e.destPath && e.reason !== 'arrival') queue.push(byPath.get(normalizeLevelRef(e.destPath))!);
     }
     const unreachable = out.filter((l) => !reach.has(l.path)).map((l) => l.path);
     for (const l of out) {
@@ -373,12 +399,19 @@ export function planCampaign(levels: readonly PcLevel[], opt: CampaignOptions = 
         // A level only entered from one level and leading straight back to it (the book, Alwarren): a side level.
         const incoming = edges.filter((e) => normalizeLevelRef(e.to) === normalizeLevelRef(l.path));
         const outgoing = l.exits.filter((e) => e.destPath && e.reason !== 'arrival');
-        if (l.role === 'level' && incoming.length === 1 && outgoing.length === 1 && normalizeLevelRef(outgoing[0]!.destPath!) === normalizeLevelRef(incoming[0]!.from)) {
+        if (
+            l.role === 'level' &&
+            incoming.length === 1 &&
+            outgoing.length === 1 &&
+            normalizeLevelRef(outgoing[0]!.destPath!) === normalizeLevelRef(incoming[0]!.from)
+        ) {
             l.role = 'side';
         }
     }
 
-    const destinationTitles = [...new Set(out.flatMap((l) => l.exits.map((e) => e.destTitle).filter((t): t is string => !!t)))].sort();
+    const destinationTitles = [
+        ...new Set(out.flatMap((l) => l.exits.map((e) => e.destTitle).filter((t): t is string => !!t))),
+    ].sort();
     const stringIds = new Map(destinationTitles.map((t, i) => [t, stringBase + i]));
     const shared = planSharedDependencies(sorted);
     for (const s of shared) {
@@ -389,7 +422,13 @@ export function planCampaign(levels: readonly PcLevel[], opt: CampaignOptions = 
     return { levels: out, edges, unreachable, destinationTitles, stringIds, stringBase, shared, warnings, byPath };
 }
 
-function synth(at: CampaignLevel, to: CampaignLevel, reason: ExitReason, pos: readonly number[], offset?: readonly number[]): CampaignExit {
+function synth(
+    at: CampaignLevel,
+    to: CampaignLevel,
+    reason: ExitReason,
+    pos: readonly number[],
+    offset?: readonly number[],
+): CampaignExit {
     const o = offset ?? [0, 0, 0];
     return {
         reason,
@@ -500,6 +539,22 @@ export interface ApplyExitsContext {
     terrain?: readonly TerrainLayer[];
 }
 
+/** Exit detectors must send the exit's touch message, regardless of which template database supplied the class. */
+export function exitDetectorParams(
+    fields: readonly Pick<ClassFieldDef, 'name' | 'type'>[],
+    which = 0,
+): { fieldIndex: number; type: number; name: string; value: number }[] {
+    const values = new Map([
+        ['task', 6],
+        ['trigger message', 5],
+        ['detect which?', which],
+    ]);
+    return fields.flatMap((field, fieldIndex) => {
+        const value = values.get(field.name.trim().toLowerCase());
+        return value === undefined ? [] : [{ fieldIndex, type: field.type, name: field.name, value }];
+    });
+}
+
 /** One detector box for an exit: centre height and height in cells of 2048 units (the x / z size stays the configured one). */
 export interface ExitBox {
     cy: number;
@@ -568,7 +623,9 @@ export interface ApplyExitsResult {
  * the form of the 12 overrides on the disc. Other parameters, including strings and arrays, are kept.
  */
 export function setExitDestinationId(o: LvlObject, field: ExitField, id: number): void {
-    const old = o.params.map((p, i) => ({ p, dword: o.data[i]!, i })).filter((x) => x.p.fieldIndex !== field.fieldIndex);
+    const old = o.params
+        .map((p, i) => ({ p, dword: o.data[i]!, i }))
+        .filter((x) => x.p.fieldIndex !== field.fieldIndex);
     const items: { p: LvlParam; dword: number; words: number[] | null }[] = old.map((x) => {
         const indirect = fieldIsIndirect(x.p.type);
         const len = x.dword >>> 16;
@@ -577,7 +634,11 @@ export function setExitDestinationId(o: LvlObject, field: ExitField, id: number)
     });
     const nameRaw = new Uint8Array(field.name.length + 1 + ((field.name.length + 1) % 2));
     for (let i = 0; i < field.name.length; i++) nameRaw[i] = field.name.charCodeAt(i) & 0xff;
-    items.push({ p: { fieldIndex: field.fieldIndex, type: field.type, name: field.name, nameRaw }, dword: id >>> 0, words: null });
+    items.push({
+        p: { fieldIndex: field.fieldIndex, type: field.type, name: field.name, nameRaw },
+        dword: id >>> 0,
+        words: null,
+    });
     items.sort((a, b) => a.p.fieldIndex - b.p.fieldIndex);
     const n = items.length;
     const data: number[] = new Array<number>(n).fill(0);
@@ -593,7 +654,10 @@ export function setExitDestinationId(o: LvlObject, field: ExitField, id: number)
 }
 
 /** Give a freshly added object (no parameters yet) these plain one-dword parameters. */
-export function setScalarParams(o: LvlObject, set: readonly { fieldIndex: number; type: number; name: string; value: number }[]): void {
+export function setScalarParams(
+    o: LvlObject,
+    set: readonly { fieldIndex: number; type: number; name: string; value: number }[],
+): void {
     const sorted = [...set].sort((a, b) => a.fieldIndex - b.fieldIndex);
     o.params = sorted.map((p) => {
         const nameRaw = new Uint8Array(p.name.length + 1 + ((p.name.length + 1) % 2));
@@ -608,7 +672,12 @@ export function setScalarParams(o: LvlObject, set: readonly { fieldIndex: number
  * first occurrence of a duplicate keeps its id). Real exits get the destination string id of their destination level; exits
  * whose PC class was dropped, and the synthesized exits (intro hand-over, arrival markers), are added with the exit class.
  */
-export function applyCampaignExits(list: LvlObjectList, level: CampaignLevel, plan: CampaignPlan, ctx: ApplyExitsContext): ApplyExitsResult {
+export function applyCampaignExits(
+    list: LvlObjectList,
+    level: CampaignLevel,
+    plan: CampaignPlan,
+    ctx: ApplyExitsContext,
+): ApplyExitsResult {
     const res: ApplyExitsResult = { rewritten: 0, added: 0, external: 0, detectors: 0, timers: 0, warnings: [] };
     const converted = new Set(list.objects.map((o) => o.id)); // objects added below take ids above every PC id and must not be mistaken for one
     for (const e of level.exits) {
@@ -617,7 +686,8 @@ export function applyCampaignExits(list: LvlObjectList, level: CampaignLevel, pl
             continue;
         }
         const id = plan.stringIds.get(e.destTitle)!;
-        const existing = !e.synthetic && converted.has(e.pcObjectId) ? list.objects.find((o) => o.id === e.pcObjectId) : undefined;
+        const existing =
+            !e.synthetic && converted.has(e.pcObjectId) ? list.objects.find((o) => o.id === e.pcObjectId) : undefined;
         const field = existing ? ctx.exitFieldOf(existing) : null;
         let exitObj: LvlObject | undefined;
         if (existing && field) {
@@ -625,7 +695,9 @@ export function applyCampaignExits(list: LvlObjectList, level: CampaignLevel, pl
             res.rewritten++;
             exitObj = existing;
         } else {
-            const tpl = list.objects.find((o) => o.classId === ctx.exitClass.classId && o.dbIndex === ctx.exitClass.dbIndex);
+            const tpl = list.objects.find(
+                (o) => o.classId === ctx.exitClass.classId && o.dbIndex === ctx.exitClass.dbIndex,
+            );
             const { object } = addObject(list, {
                 classId: ctx.exitClass.classId,
                 dbIndex: ctx.exitClass.dbIndex,
@@ -648,7 +720,9 @@ export function applyCampaignExits(list: LvlObjectList, level: CampaignLevel, pl
                 existing.data = object.data;
                 list.objects.splice(list.objects.indexOf(object), 1);
                 res.rewritten++;
-                res.warnings.push(`${level.title}: object ${existing.id} is not an exit class on PS2; replaced it with the exit class`);
+                res.warnings.push(
+                    `${level.title}: object ${existing.id} is not an exit class on PS2; replaced it with the exit class`,
+                );
                 exitObj = existing;
             } else {
                 res.added++;
@@ -659,7 +733,14 @@ export function applyCampaignExits(list: LvlObjectList, level: CampaignLevel, pl
             // Centred on the exit's own height: the terrain function picks other layers under many exits (the real floor is the exit
             // height, 6000 to 10000 above the layer it finds); a box stretched down to that layer was not touched by a walker standing in it.
             const size: Vec3 = [...(ctx.detectorSize ?? [2, 2, 2])] as Vec3;
-            const boxes = exitBoxes(ctx.terrain, exitObj.pos[0], exitObj.pos[2], exitObj.pos[1], ctx.detectorLift ?? 700, size[1]);
+            const boxes = exitBoxes(
+                ctx.terrain,
+                exitObj.pos[0],
+                exitObj.pos[2],
+                exitObj.pos[1],
+                ctx.detectorLift ?? 700,
+                size[1],
+            );
             for (const box of boxes) {
                 const pos: Vec3 = [exitObj.pos[0], box.cy, exitObj.pos[2]];
                 const sc: Vec3 = [size[0], box.sizeY, size[2]];
@@ -689,18 +770,22 @@ export function applyCampaignExits(list: LvlObjectList, level: CampaignLevel, pl
                     md.initialEvents = 1;
                     md.radius = null;
                     md.scale = [...sc];
-                    setScalarParams(md, [{ ...ctx.mountDetector, value: 1 }]);
+                    const mountParams = new Map((ctx.detectorParams ?? []).map((p) => [p.fieldIndex, p]));
+                    mountParams.set(ctx.mountDetector.fieldIndex, { ...ctx.mountDetector, value: 1 });
+                    setScalarParams(md, [...mountParams.values()]);
                     md.links = [exitObj.id];
                     res.detectors++;
                 }
             }
         }
         if (ctx.timerClass && exitObj && e.autoSeconds) {
-            const fi = (name: string): number => ctx.timerClass!.fields.findIndex((f) => f.name.trim().toLowerCase() === name);
+            const fi = (name: string): number =>
+                ctx.timerClass!.fields.findIndex((f) => f.name.trim().toLowerCase() === name);
             const iTime = fi('time until trigger');
             const iMsg = fi('trigger message');
             const iMode = fi('start mode'); // 0 = start at once (the class default 1 waits for a message: the Intro timer never ran)
-            if (iTime < 0 || iMsg < 0) res.warnings.push(`${level.title}: the Timer class lacks Time Until Trigger / Trigger Message`);
+            if (iTime < 0 || iMsg < 0)
+                res.warnings.push(`${level.title}: the Timer class lacks Time Until Trigger / Trigger Message`);
             else {
                 const { object: tm } = addObject(list, {
                     classId: ctx.timerClass.classId,
@@ -711,9 +796,28 @@ export function applyCampaignExits(list: LvlObjectList, level: CampaignLevel, pl
                 const f32 = new DataView(new ArrayBuffer(4));
                 f32.setFloat32(0, e.autoSeconds);
                 setScalarParams(tm, [
-                    { fieldIndex: iTime, type: ctx.timerClass.fields[iTime]!.type, name: ctx.timerClass.fields[iTime]!.name, value: f32.getUint32(0) },
-                    { fieldIndex: iMsg, type: ctx.timerClass.fields[iMsg]!.type, name: ctx.timerClass.fields[iMsg]!.name, value: 5 },
-                    ...(iMode >= 0 ? [{ fieldIndex: iMode, type: ctx.timerClass.fields[iMode]!.type, name: ctx.timerClass.fields[iMode]!.name, value: 0 }] : []),
+                    {
+                        fieldIndex: iTime,
+                        type: ctx.timerClass.fields[iTime]!.type,
+                        name: ctx.timerClass.fields[iTime]!.name,
+                        value: f32.getUint32(0),
+                    },
+                    {
+                        fieldIndex: iMsg,
+                        type: ctx.timerClass.fields[iMsg]!.type,
+                        name: ctx.timerClass.fields[iMsg]!.name,
+                        value: 5,
+                    },
+                    ...(iMode >= 0
+                        ? [
+                              {
+                                  fieldIndex: iMode,
+                                  type: ctx.timerClass.fields[iMode]!.type,
+                                  name: ctx.timerClass.fields[iMode]!.name,
+                                  value: 0,
+                              },
+                          ]
+                        : []),
                 ]);
                 tm.links = [exitObj.id];
                 res.timers++;

@@ -8,6 +8,7 @@ import {
     parsePcSequence,
     remapSequenceRefs,
     ssdEntryPath,
+    sequenceSoundRefs,
     type PcSeqActor,
 } from '../src/ootfseq.ts';
 
@@ -30,7 +31,17 @@ function actor(name: string, id: number, obj: number, actions: number[][]): numb
 function pcSeq(): Uint8Array {
     const cam = actor('Camera', 1, 100, [
         act(5, 0, u32(0)),
-        act(0, 1, [...f32(0), ...f32(0), ...f32(0), ...f32(1), ...f32(10), ...f32(20), ...f32(30), ...u32(0), ...u32(0x10)]),
+        act(0, 1, [
+            ...f32(0),
+            ...f32(0),
+            ...f32(0),
+            ...f32(1),
+            ...f32(10),
+            ...f32(20),
+            ...f32(30),
+            ...u32(0),
+            ...u32(0x10),
+        ]),
         act(8, 2, [...u32(4), ...u32(0x103), ...f32(0.5), ...f32(3)]),
         act(5, 9, u32(1)),
     ]);
@@ -52,6 +63,38 @@ const stub = (data: Uint8Array): SrscReader =>
     }) as unknown as SrscReader;
 
 describe('ootfseq', () => {
+    it('collects cinematic-only sound references from selected records', async () => {
+        expect(await sequenceSoundRefs(stub(pcSeq()), new Set([410]))).toEqual([0x00040385, 0x99999]);
+        expect(await sequenceSoundRefs(stub(pcSeq()), new Set([999]))).toEqual([]);
+    });
+    it('recognizes cinematic player and camera aliases by mapped object identity', async () => {
+        const bytes = w(
+            str('Release'),
+            u32(126),
+            u32(0),
+            u32(2),
+            u32(2),
+            actor('Wrynn', 1, 1740, [act(5, 90, u32(1))]),
+            actor('Final view', 2, 385, [act(5, 90, u32(1))]),
+        );
+        const result = await convertPcSequences(stub(bytes), {
+            maps: {
+                objectIdMap: new Map([
+                    [1740, 42],
+                    [385, 43],
+                ]),
+            },
+            usedIds: new Set(),
+            playerObjectId: 42,
+            cameraObjectId: 43,
+        });
+        const entry = result.entries.find((e) => e.type === 0x311)!;
+        const sequence = parseSequence(entry.id, entry.sub, entry.data)!;
+        expect(sequence.actors[0]!.mode).toBe(1); // current controlled actor, including a carried/restored player
+        expect(sequence.actors[0]!.ref).toBe(42);
+        expect(parseActions(sequence.actors[0]!)![0]!.fields[0]!.value).toBe(1);
+        expect(parseActions(sequence.actors[1]!)!.some((a) => a.type === 9)).toBe(true);
+    });
     it('parses the PC layout', () => {
         const s = parsePcSequence(410, 1, pcSeq());
         expect(s.flags).toBe(126);
@@ -98,6 +141,8 @@ describe('ootfseq', () => {
         expect(da[1]!.fields.find((f) => f.name === 'params')!.value).toBe(10000 | (0x18 << 16));
         expect(r.report.droppedActors.get('Lost')).toBe(1);
         expect(r.report.droppedActions.get('sound')).toBe(1);
+        expect(r.report.warnings).toContain('sound: 1 cinematic action(s) had no compatible resource mapping');
+        expect(r.report.warnings).toContain('sound 0x99999: no compatible resource mapping');
         expect(r.report.unverifiedMessages.get(25)).toBe(1);
         expect(used.has(seqEntry.id)).toBe(true);
     });

@@ -25,7 +25,7 @@ import { ODB_CLASS_TYPE, ODB_FIELDS_TYPE, buildOdbIndex, parseOdbClasses, type O
 import { resourceKind, type ResourceContext, type ResourceKind } from './convert.ts';
 import { FIELD_SOUND } from './fields.ts';
 import { convertPcSounds, parsePcSounds, ps2SoundEntries, sdbKey, writePs2Sdb, type PcSoundBank } from './ootfsound.ts';
-import { convertPcSequences, ssdPackFiles, usedIdsOf } from './ootfseq.ts';
+import { convertPcSequences, sequenceSoundRefs, ssdPackFiles, usedIdsOf } from './ootfseq.ts';
 import { SrscReader } from './srsc.ts';
 import {
     TERRAIN_TXD_PATH,
@@ -44,6 +44,7 @@ import {
     normalizeLevelRef,
     planCampaign,
     transitionFieldIndex,
+    exitDetectorParams,
     type CampaignPlan,
 } from './ootfcampaign.ts';
 import { applyMusicTriggers, findMusicTriggers, musicTriggerClassNames } from './ootfmusic.ts';
@@ -837,11 +838,50 @@ export async function convertOotfLevels(
                     const k = sdbKey(`${c}.sdb`);
                     (want.get(k) ?? want.set(k, new Set()).get(k)!).add(n.ref & 0xffff);
                 }
+                if (opt.sequences !== false) {
+                    const cinematicBanks = new Map<string, Set<number>>();
+                    for (const need of await scan(pc, 'sequence')) {
+                        if (!need.target || hostDbOf(stemOfTarget(need.target)) === null) continue;
+                        const container = builder.resolveContainer(need.owner, need.ref >>> 16);
+                        if (container)
+                            (
+                                cinematicBanks.get(container) ??
+                                cinematicBanks.set(container, new Set()).get(container)!
+                            ).add(need.ref & 0xffff);
+                    }
+                    for (const [container, ids] of cinematicBanks) {
+                        const bytes = await src.read(`${container}.ssd`);
+                        if (!bytes) {
+                            res.warnings.push(`cinematic sounds: missing ${container}.ssd`);
+                            continue;
+                        }
+                        await builder.registerOwner(container);
+                        try {
+                            for (const ref of await sequenceSoundRefs(await SrscReader.fromBytes(bytes), ids)) {
+                                const bank = builder.resolveContainer(container, ref >>> 16);
+                                if (!bank) {
+                                    res.warnings.push(
+                                        `cinematic sounds: ${container} cannot resolve sound 0x${ref.toString(16)}`,
+                                    );
+                                    continue;
+                                }
+                                const key = sdbKey(`${bank}.sdb`);
+                                (want.get(key) ?? want.set(key, new Set()).get(key)!).add(ref & 0xffff);
+                            }
+                        } catch (error) {
+                            res.warnings.push(`cinematic sounds: ${container}: ${String(error)}`);
+                        }
+                    }
+                }
             }
             for (const k of want.keys()) {
                 const bytes = await src.read(`${k}.sdb`);
-                if (!bytes) continue;
+                if (!bytes) {
+                    res.warnings.push(`sounds: missing ${k}.sdb (${want.get(k)!.size} referenced clip ids)`);
+                    continue;
+                }
                 const bank = await parsePcSounds(bytes);
+                for (const warning of bank.warnings) res.warnings.push(`sounds ${k}: ${warning}`);
                 banks.set(k, { ...bank, sounds: bank.sounds.filter((x) => want.get(k)!.has(x.id)) });
             }
             if (!banks.size) return;
@@ -866,7 +906,7 @@ export async function convertOotfLevels(
                 { firstId: 1, groupId: group, groupName: 'Order of the Flame', nextId: freeId },
                 { maxBytes: 0x3f000 },
             );
-            for (const w of conv.warnings.slice(0, 5)) res.warnings.push(`sounds: ${w}`);
+            for (const w of conv.warnings) res.warnings.push(`sounds: ${w}`);
             if (!conv.sounds.length) return;
             if (host) {
                 for (const r of ps2SoundEntries(conv.sounds))
@@ -968,8 +1008,26 @@ export async function convertOotfLevels(
                         continue;
                     }
                     const used = ssdUsed.get(g.stem) ?? ssdUsed.set(g.stem, usedIdsOf(ssd)).get(g.stem)!;
+                    const actorId = (engineClass: number): number | undefined => {
+                        const object = pc.list.objects.find(
+                            (o) => pc.classes.get(o.dbIndex)?.get(o.classId)?.rflClass === engineClass,
+                        );
+                        return object ? first.objectIdMap.get(object.id) : undefined;
+                    };
                     const conv = await convertPcSequences(await SrscReader.fromBytes(bytes), {
-                        maps: { objectIdMap: first.objectIdMap },
+                        maps: {
+                            objectIdMap: first.objectIdMap,
+                            soundMap: {
+                                get: (ref) => {
+                                    const db = hostDbOf(g.stem);
+                                    const id = c && soundLookup ? soundLookup(c, ref) : null;
+                                    return db === null || id === null ? undefined : ((db << 16) | id) >>> 0;
+                                },
+                            },
+                        },
+                        playerObjectId: actorId(9),
+                        dragonObjectId: actorId(28),
+                        cameraObjectId: actorId(27),
                         usedIds: used,
                         only: g.ids,
                         pcDbIndex: g.db,
@@ -977,6 +1035,8 @@ export async function convertOotfLevels(
                         folderName: `OotF ${title}`.slice(0, 40),
                     });
                     Object.assign(ssdFiles, ssdPackFiles(`${g.stem}.SSD`, conv.entries));
+                    for (const warning of conv.report.warnings)
+                        res.warnings.push(`sequences ${pc.path} (${c}): ${warning}`);
                     for (const [k, v] of conv.idMap) seqIds.set(`${pc.path}|${g.ow}|${k}`, v);
                     any = any || conv.idMap.size > 0;
                 }
@@ -1063,13 +1123,13 @@ export async function convertOotfLevels(
                                   : {};
                           })()
                         : {}),
-                    ...(detectorClass && dbgEnv0['OOTF_DETECT_WHICH'] !== undefined
+                    ...(detectorClass
                         ? {
-                              // Test aid: Detect Which? of the exit detectors (0 Rynn on ground, 1 on mount, 2 both = class default).
-                              detectorParams: detectorClass.cls
-                                  .fields!.map((f, i) => ({ fieldIndex: i, type: f.type, name: f.name }))
-                                  .filter((f) => /^detect which\?$/i.test(f.name.trim()))
-                                  .map((f) => ({ ...f, value: Number(dbgEnv0['OOTF_DETECT_WHICH']) })),
+                              // SYSTEM's Trigger Detector sends ON by default; FX's sends touch. Never depend on database order.
+                              detectorParams: exitDetectorParams(
+                                  detectorClass.cls.fields!,
+                                  dbgEnv0['OOTF_DETECT_WHICH'] === undefined ? 0 : Number(dbgEnv0['OOTF_DETECT_WHICH']),
+                              ),
                           }
                         : {}),
                     ...(timerClass

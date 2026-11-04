@@ -12,6 +12,7 @@ import {
     applyMusicTriggers,
     isOotfArenaPath,
     exitBoxes,
+    exitDetectorParams,
     type TerrainLayer,
     campaignExitStrings,
     campaignRegistration,
@@ -92,7 +93,13 @@ function level(
         classes.set(e.cls, { ...exitClass(`Level Transition ${e.cls}`, e.dest), id: e.cls });
         objects.push(obj(e.id, e.cls, { scale: [2, 2, 2], flags: FLAG_VISIBLE | 0x100 }));
     }
-    const header: LvlHeader = { name: lvlStr(name), maxWidth: 0, maxHeight: 0, dependencies: [], trailer: new Uint8Array(0) };
+    const header: LvlHeader = {
+        name: lvlStr(name),
+        maxWidth: 0,
+        maxHeight: 0,
+        dependencies: [],
+        trailer: new Uint8Array(0),
+    };
     return {
         path,
         header,
@@ -126,7 +133,13 @@ describe('planCampaign', () => {
     const by = (needle: string) => plan.levels.find((l) => l.path.includes(needle))!;
 
     it('orders by header string id with the unnamed intro first and titles with unique 8.3 stems', () => {
-        expect(plan.levels.map((l) => l.displayName)).toEqual(['Intro', 'Ruined Village', 'Ruined Village Book', 'Canyon', 'The End']);
+        expect(plan.levels.map((l) => l.displayName)).toEqual([
+            'Intro',
+            'Ruined Village',
+            'Ruined Village Book',
+            'Canyon',
+            'The End',
+        ]);
         expect(plan.levels.map((l) => l.title)).toEqual([
             'OotF 00 - Intro',
             'OotF 01 - Ruined Village',
@@ -142,7 +155,10 @@ describe('planCampaign', () => {
 
     it('resolves destinations case-insensitively and flags roles', () => {
         const village = by('Ruined Village.lvl');
-        expect(village.exits.filter((e) => e.reason === 'pc').map((e) => e.destTitle)).toEqual(['OotF 02 - Ruined Village Book', 'OotF 03 - Canyon']);
+        expect(village.exits.filter((e) => e.reason === 'pc').map((e) => e.destTitle)).toEqual([
+            'OotF 02 - Ruined Village Book',
+            'OotF 03 - Canyon',
+        ]);
         expect(by('Intro').role).toBe('start');
         expect(by('Ruined Village Book').role).toBe('side');
         expect(by('end.lvl').role).toBe('final');
@@ -152,10 +168,21 @@ describe('planCampaign', () => {
     it('hands the intro over to the first level and adds an arrival exit where the way back is missing', () => {
         const intro = by('Intro');
         expect(intro.exits).toHaveLength(1);
-        expect(intro.exits[0]).toMatchObject({ reason: 'intro-next', destTitle: 'OotF 01 - Ruined Village', synthetic: true, pos: [100, 200, 300] });
+        expect(intro.exits[0]).toMatchObject({
+            reason: 'intro-next',
+            destTitle: 'OotF 01 - Ruined Village',
+            synthetic: true,
+            pos: [100, 200, 300],
+        });
         // village needs an exit back to the intro (arrival marker), the end needs one back to the canyon
-        expect(by('Ruined Village.lvl').exits.filter((e) => e.reason === 'arrival').map((e) => e.destTitle)).toEqual(['OotF 00 - Intro']);
-        expect(by('end.lvl').exits).toMatchObject([{ reason: 'arrival', destTitle: 'OotF 03 - Canyon', synthetic: true }]);
+        expect(
+            by('Ruined Village.lvl')
+                .exits.filter((e) => e.reason === 'arrival')
+                .map((e) => e.destTitle),
+        ).toEqual(['OotF 00 - Intro']);
+        expect(by('end.lvl').exits).toMatchObject([
+            { reason: 'arrival', destTitle: 'OotF 03 - Canyon', synthetic: true },
+        ]);
         // the book and the canyon already have exits back
         expect(by('Book').exits).toHaveLength(1);
         expect(by('Canyon').exits).toHaveLength(2);
@@ -181,9 +208,12 @@ describe('campaignExitStrings', () => {
         const entries = campaignExitStrings(plan, 'level1on.xdb');
         expect(entries).toHaveLength(plan.destinationTitles.length);
         expect(entries[0]).toMatchObject({ file: 'LEVEL1ON.XDB', type: 0x400, sub: 1, isNew: true });
-        const xdb = await SrscReader.fromBytes(writePs2Srsc(entries.map((e) => ({ type: e.type, id: e.id, sub: e.sub, data: e.data }))));
+        const xdb = await SrscReader.fromBytes(
+            writePs2Srsc(entries.map((e) => ({ type: e.type, id: e.id, sub: e.sub, data: e.data }))),
+        );
         const strings = await parseXdbStrings(xdb);
-        for (const t of plan.destinationTitles) expect(strings.get(plan.stringIds.get(t)!)!.text[0]).toBe(campaignDestinationText(t));
+        for (const t of plan.destinationTitles)
+            expect(strings.get(plan.stringIds.get(t)!)!.text[0]).toBe(campaignDestinationText(t));
         expect(campaignDestinationText('X Y')).toBe('Levels\\X Y\\X Y.lvl');
         expect(normalizeLevelRef('\\Levels\\X\\X.lvl')).toBe('x/x.lvl');
     });
@@ -194,6 +224,34 @@ describe('applyCampaignExits', () => {
     const ctxFor = (isExit: (o: LvlObject) => boolean) => ({
         exitFieldOf: (o: LvlObject) => (isExit(o) ? exitField : null),
         exitClass: { dbIndex: 8, classId: 966, field: exitField },
+    });
+
+    it('sends touch explicitly on foot and mounted detectors, replacing a debug Detect Which override once', () => {
+        const fields = [
+            { name: 'Task', type: 7 },
+            { name: 'Detect Which?', type: 7 },
+            { name: 'Trigger Message', type: 7 },
+        ];
+        const params = exitDetectorParams(fields, 2);
+        expect(params.map((p) => p.value)).toEqual([6, 2, 5]);
+        const plan = planCampaign(fixture());
+        const village = plan.levels.find((l) => l.path.endsWith('Ruined Village.lvl'))!;
+        const list: LvlObjectList = { objects: [obj(1, 1)], warnings: [] };
+        applyCampaignExits(list, village, plan, {
+            ...ctxFor(() => false),
+            detectorClass: { dbIndex: 2, classId: 3050 },
+            detectorParams: params,
+            mountDetector: { fieldIndex: 1, type: 7, name: 'Detect Which?' },
+        });
+        const detectors = list.objects.filter((o) => o.classId === 3050);
+        expect(detectors.length).toBeGreaterThan(0);
+        for (const detector of detectors) {
+            expect(detector.params.map((p) => p.fieldIndex)).toEqual([0, 1, 2]);
+            expect(detector.data[0]).toBe(6);
+            expect(detector.data[2]).toBe(5);
+        }
+        expect(detectors.some((d) => d.data[1] === 1)).toBe(true);
+        expect(detectors.some((d) => d.data[1] === 2)).toBe(true);
     });
 
     it('sets a plain string id on converted exits, keeps other parameters and adds missing exits', () => {
@@ -208,7 +266,12 @@ describe('applyCampaignExits', () => {
             data: [(1 << 16) | 2, 1, ...stringToWords('abc').slice(0, 1)],
         });
         const list: LvlObjectList = { objects: [obj(1, 1), withText], warnings: [] };
-        const r = applyCampaignExits(list, village, plan, ctxFor((o) => o.id === 10));
+        const r = applyCampaignExits(
+            list,
+            village,
+            plan,
+            ctxFor((o) => o.id === 10),
+        );
         // exit 10 rewritten; exit 11 (class dropped) and the arrival exit to the intro added
         expect(r).toMatchObject({ rewritten: 1, added: 2, external: 0 });
         const o = list.objects.find((x) => x.id === 10)!;
@@ -256,7 +319,9 @@ describe('applyCampaignExits', () => {
         }
         // one detector for Rynn on foot (class default) and one for Rynn on a mount (Detect Which? = 1) per real exit
         expect(dets.length).toBe(2 * village.exits.filter((e) => e.reason === 'pc' && e.destTitle).length);
-        expect(dets.filter((d) => d.data[0] === 1 && d.params[0]?.name === 'Detect Which?')).toHaveLength(dets.length / 2);
+        expect(dets.filter((d) => d.data[0] === 1 && d.params[0]?.name === 'Detect Which?')).toHaveLength(
+            dets.length / 2,
+        );
     });
 
     it('fires the intro hand-over from a linked timer (nobody walks into an exit of a cut-scene level)', () => {
@@ -311,7 +376,10 @@ describe('Dragon.rrc strings and text plan', () => {
         expect(buf.length).toBeGreaterThan(0);
         expect(splitTextRef('<0x850a>The Ugly Stick')).toEqual({ id: 0x850a, fallback: 'The Ugly Stick' });
         expect(splitTextRef('plain')).toEqual({ id: null, fallback: 'plain' });
-        const m = await parseRrcStrings({ entries: [], readRaw: async () => new Uint8Array(0) } as unknown as SrscReader);
+        const m = await parseRrcStrings({
+            entries: [],
+            readRaw: async () => new Uint8Array(0),
+        } as unknown as SrscReader);
         expect(m.size).toBe(0);
     });
 
@@ -339,7 +407,9 @@ describe('Dragon.rrc strings and text plan', () => {
         const entries = plan.entries();
         const sys = entries.filter((e) => e.file === 'SYSTEM.XDB');
         expect(sys.map((e) => e.id)).toEqual([102, 103]);
-        const xdb = await SrscReader.fromBytes(writePs2Srsc(sys.map((e) => ({ type: e.type, id: e.id, sub: e.sub, data: e.data }))));
+        const xdb = await SrscReader.fromBytes(
+            writePs2Srsc(sys.map((e) => ({ type: e.type, id: e.id, sub: e.sub, data: e.data }))),
+        );
         const s = await parseXdbStrings(xdb);
         expect(s.get(103)!.text[0]).toBe('Other\r\nline');
     });
@@ -408,8 +478,20 @@ describe('music', () => {
         };
         pc.classes.get(2)!.set(40, mc);
         pc.list.objects.push(
-            obj(50, 40, { params: [{ fieldIndex: 0, type: FIELD_INT, name: 'Music 1 ID (0=none)', nameRaw: new Uint8Array(6) }, { fieldIndex: 1, type: FIELD_INT, name: 'Music 2 ID (0=none)', nameRaw: new Uint8Array(6) }], data: [3, 5] }),
-            obj(51, 40, { params: [{ fieldIndex: 1, type: FIELD_INT, name: 'Music 2 ID (0=none)', nameRaw: new Uint8Array(6) }, { fieldIndex: 4, type: FIELD_FLOAT, name: 'Music 2 Fade Out Time', nameRaw: new Uint8Array(6) }], data: [8, f32(6)] }),
+            obj(50, 40, {
+                params: [
+                    { fieldIndex: 0, type: FIELD_INT, name: 'Music 1 ID (0=none)', nameRaw: new Uint8Array(6) },
+                    { fieldIndex: 1, type: FIELD_INT, name: 'Music 2 ID (0=none)', nameRaw: new Uint8Array(6) },
+                ],
+                data: [3, 5],
+            }),
+            obj(51, 40, {
+                params: [
+                    { fieldIndex: 1, type: FIELD_INT, name: 'Music 2 ID (0=none)', nameRaw: new Uint8Array(6) },
+                    { fieldIndex: 4, type: FIELD_FLOAT, name: 'Music 2 Fade Out Time', nameRaw: new Uint8Array(6) },
+                ],
+                data: [8, f32(6)],
+            }),
             obj(52, 40),
         );
         return pc;
@@ -445,11 +527,15 @@ describe('music', () => {
         const o50 = list.objects.find((o) => o.id === 50)!;
         expect([o50.classId, o50.dbIndex]).toEqual([20, 14]);
         // slot 1 = track 3 -> bed list [116, 98, 115][2] = 115, Sounds is one element
-        expect(decodeFieldValue(0x1005, o50.data[o50.params.findIndex((p) => p.name === 'Sounds')]!, o50.data)).toEqual([115]);
+        expect(decodeFieldValue(0x1005, o50.data[o50.params.findIndex((p) => p.name === 'Sounds')]!, o50.data)).toEqual(
+            [115],
+        );
         const ov = list.objects.filter((o) => o.id > 60);
         expect(ov).toHaveLength(1);
         const ov50 = ov[0]!;
-        expect(decodeFieldValue(0x1005, ov50.data[ov50.params.findIndex((p) => p.name === 'Sounds')]!, ov50.data)).toEqual([113]);
+        expect(
+            decodeFieldValue(0x1005, ov50.data[ov50.params.findIndex((p) => p.name === 'Sounds')]!, ov50.data),
+        ).toEqual([113]);
         const ovFlag = ov50.params.findIndex((p) => p.name.startsWith('Plays overlay'));
         expect(ov50.data[ovFlag]).toBe(1);
         // the detector now links to the added overlay object of trigger 50 as well
