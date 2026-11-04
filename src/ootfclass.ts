@@ -963,6 +963,20 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
             );
             if (sk.length) pool.splice(0, pool.length, ...sk);
         }
+        const rigidBow = wantsModel && rfl === 79 && opt.modelSkinned?.(cls) === false;
+        if (rigidBow) {
+            // Native Bow controllers are selected by class header flags, independently of the model reference.
+            // A rigid PC bow has no skeleton/controller record: an animated (33) template reaches the native
+            // scene walker with a null actor controller. Native rigid crossbows use flags 1 and load-clip IDs 0.
+            // Keep their complete native template rather than merely clearing an animated template's flag.
+            const rigid = pool.filter((c) => {
+                const raw = c.odb.raw?.(c.id);
+                if (!raw) return false;
+                const body = splitClassRecord(raw).body;
+                return body.length >= 10 && [0, 1].includes(view(body).getUint32(6, true));
+            });
+            pool.splice(0, pool.length, ...rigid);
+        }
         if (wantsModel && pool.length > 1 && kind !== 'creature') {
             // Creature engine classes (Knight, Dragon ...) keep their templates: flag 32 is normal for them, and swapping Rift Crystal's
             // Crimson Knight to a flag 33 template corrupted the heap. Skinned models of generic object classes (Heuge Sailor) are filtered.
@@ -980,7 +994,9 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
         if (!pool.length) {
             unsupported.set(key, {
                 reason: 'no-raw-record',
-                detail: `no PS2 class of engine class ${rfl} carries a model`,
+                detail: rigidBow
+                    ? 'no compatible rigid PS2 Bow template with class flags 0/1 carries a model'
+                    : `no PS2 class of engine class ${rfl} carries a model`,
             });
             continue;
         }

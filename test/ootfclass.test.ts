@@ -153,6 +153,71 @@ describe('ootfclass', () => {
         expect(mergeDefaults(pc, cls(2, 'Wrong engine', 14, [[T_INT, 'Skill Level']], [2])).data).toEqual([2]);
     });
 
+    it('uses a complete rigid native Bow template only for a source model known to be rigid', () => {
+        const source = {
+            ...cls(1, 'Original rigid Bow', 79, [[T_FLOAT, 'Rate of Fire']], [f32(1.75)]),
+            model: { id: 80, db: 0 },
+        };
+        const animated = {
+            ...cls(
+                901,
+                'Animated Bow',
+                79,
+                [
+                    [T_FLOAT, 'Rate of Fire'],
+                    [T_INT, 'Load Animation'],
+                ],
+                [f32(1.75), 50],
+            ),
+            model: { id: 7, db: 0 },
+        };
+        const rigid = {
+            ...cls(
+                902,
+                'Rigid Crossbow',
+                79,
+                [
+                    [T_FLOAT, 'Rate of Fire'],
+                    [T_INT, 'Load Animation'],
+                ],
+                [f32(1), 0],
+            ),
+            model: { id: 8, db: 0 },
+        };
+        const records = new Map(
+            [animated, rigid].map((c) => {
+                const body = new Uint8Array(102),
+                    d = new DataView(body.buffer);
+                d.setUint16(2, c.model.id, true);
+                d.setUint32(6, c.id === animated.id ? 33 : 1, true);
+                d.setUint32(80, 0x1004f, true);
+                d.setUint32(86, 2, true);
+                d.setUint32(90, 2, true);
+                c.data!.forEach((v, i) => d.setUint32(94 + i * 4, v, true));
+                return [c.id, joinClassRecord(c.name, body)] as const;
+            }),
+        );
+        const native = {
+            ...odb(),
+            classes: new Map([animated, rigid].map((c) => [c.id, c])),
+            raw: (id: number) => records.get(id),
+        };
+        const options = { modelFor: () => ({ id: 20000, db: 0 }) };
+        const run = (modelSkinned?: () => boolean) =>
+            planClassMapping([{ db: 1, id: 1, cls: source }], [native], { ...options, modelSkinned });
+        const converted = run(() => false).synthesized[0]!;
+        expect(converted.template.classId).toBe(rigid.id);
+        expect(converted.cls.data).toEqual([f32(1.75), 0]); // source rate, complete rigid template's animation policy
+        const body = splitClassRecord(converted.record).body;
+        expect(new DataView(body.buffer, body.byteOffset).getUint32(6, true)).toBe(1);
+        expect(run(() => true).synthesized[0]!.template.classId).toBe(animated.id);
+        expect(run().synthesized[0]!.template.classId).toBe(animated.id); // unknown source layout is not guessed
+        native.classes.delete(rigid.id);
+        expect(run(() => false).synthesized).toHaveLength(0);
+        expect(run(() => false).unsupported.get('1:1')?.reason).toBe('no-raw-record');
+        expect(run(() => false).unsupported.get('1:1')?.detail).toContain('compatible rigid PS2 Bow');
+    });
+
     it('keeps the already equivalent native model when a same-name skill clone has no imported model', () => {
         const o = odb();
         const native = {
