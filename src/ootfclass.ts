@@ -125,6 +125,7 @@ const ENGINE_LIST: readonly [number, string, ClassKind][] = [
     [89, 'Magic Potion', 'item'],
     [91, 'Magic Crystal', 'item'],
     [92, 'Dr. Evil', 'creature'],
+    [95, 'Arrow / Spell Projectile', 'weapon'],
     [97, 'Weather (rain, snow)', 'fx'],
     [99, 'Morph Plug', 'scenery'],
     [100, 'Succubus', 'creature'],

@@ -37,6 +37,97 @@ function native(): Ps2OdbIn {
 }
 
 describe('OotF class reference defaults', () => {
+    it('imports referenced-only arrow projectiles and emits the quiver reference in its owning ODB', async () => {
+        const arrow: OdbClass = {
+            id: 3105,
+            name: 'Standard Arrow',
+            group: 1,
+            rflClass: 95,
+            runtimeClass: 95,
+            model: { id: 3934, db: 0 },
+            fields: [
+                { name: 'Damage', type: 1 },
+                { name: 'Seek Type', type: 7 },
+            ],
+            data: [10, 0],
+        };
+        const quiver: OdbClass = {
+            id: 3106,
+            name: 'Arrows',
+            group: 1,
+            rflClass: 39,
+            runtimeClass: 39,
+            model: { id: 3714, db: 0 },
+            fields: [{ name: 'My Ammo Object', type: 0x4003 }],
+            data: [3105],
+        };
+        const closure = await classReferenceClosure(
+            [{ owner: 'common/resources', id: quiver.id, cls: quiver }],
+            async (_source, ref) => (ref === arrow.id ? { owner: 'common/resources', id: arrow.id, cls: arrow } : null),
+        );
+        expect(closure.map((c) => c.id)).toEqual([3106, 3105]);
+        // Native field order differs: typed field matching, not source offsets, must carry the defaults.
+        const templates = [
+            { ...quiver, id: 100, name: 'Native quiver', runtimeClass: 0x10027, data: [14237] },
+            {
+                ...arrow,
+                id: 101,
+                name: 'Short Arrow',
+                runtimeClass: 0x1005f,
+                fields: [arrow.fields![1]!, arrow.fields![0]!],
+                data: [1, 5],
+            },
+        ];
+        const records = new Map(
+            templates.map((c) => {
+                const body = new Uint8Array(94 + c.data!.length * 4),
+                    dv = new DataView(body.buffer);
+                dv.setUint16(2, c.model!.id, true);
+                dv.setUint32(6, 1, true); // ordinary native95 arrows use the rigid, visible class flags
+                dv.setUint32(80, c.runtimeClass!, true);
+                dv.setUint32(86, c.fields!.length, true);
+                dv.setUint32(90, c.data!.length, true);
+                c.data!.forEach((v, i) => dv.setUint32(94 + i * 4, v, true));
+                return [c.id, joinClassRecord(c.name, body)] as const;
+            }),
+        );
+        const odb: Ps2OdbIn = {
+            file: 'RESOURES.ODB',
+            dbIndex: 3,
+            classes: new Map(templates.map((c) => [c.id, c])),
+            raw: (id) => records.get(id),
+        };
+        const sources = closure.map((c) => ({ db: 1, id: c.id, cls: c.cls }));
+        const plan = planClassMapping(sources, [odb], {
+            modelOdbFile: odb.file,
+            modelFor: (c) => ({ id: c.model!.id + 10000, db: 0 }),
+        });
+        expect(plan.unsupported.size).toBe(0);
+        expect(plan.synthesized).toHaveLength(2);
+        expect(
+            relocateClassDefaultReferences(
+                plan,
+                (key) => sources.find((c) => `${c.db}:${c.id}` === key)?.cls,
+                (_key, ref, file) => {
+                    expect(file).toBe(odb.file);
+                    return plan.resolve(1, ref)?.classId ?? null;
+                },
+            ),
+        ).toEqual([]);
+        const projectile = plan.resolve(1, arrow.id)!;
+        expect(projectile.cls!.data).toEqual([0, 10]);
+        expect(projectile.cls!.model).toEqual({ id: 13934, db: 0 });
+        const emitted = plan.synthesized.find((c) => c.rfl === 39)!;
+        expect(parseClassBody(splitClassRecord(emitted.record).body)?.data).toEqual([projectile.classId]);
+        const emittedArrow = plan.synthesized.find((c) => c.rfl === 95)!;
+        const body = splitClassRecord(emittedArrow.record).body;
+        expect(parseClassBody(body)?.rflClass).toBe(95);
+        expect(new DataView(body.buffer, body.byteOffset).getUint32(80, true)).toBe(0x1005f);
+        expect(new DataView(body.buffer, body.byteOffset).getUint32(6, true)).toBe(1);
+        expect(planClassMapping(sources, [odb]).unsupported.get('1:3105')?.reason).toBe('needs-model');
+        expect(planClassMapping(sources, [odb], { modelFor: () => null }).unsupported.has('1:3105')).toBe(true);
+    });
+
     it('synthesizes only the verified Trail Master schema with an explicit model binding', () => {
         const names = [
             'Special Effect (TRACER!)',
@@ -205,7 +296,7 @@ describe('OotF class reference defaults', () => {
                 dv = new DataView(b.buffer);
             dv.setUint16(0, 1, true);
             dv.setUint16(2, c.model!.id, true);
-            dv.setUint16(80, c.rflClass!, true);
+            dv.setUint32(80, c.runtimeClass!, true);
             dv.setUint32(86, c.fields!.length, true);
             dv.setUint32(90, c.data!.length, true);
             c.data!.forEach((v, i) => dv.setUint32(94 + i * 4, v, true));
