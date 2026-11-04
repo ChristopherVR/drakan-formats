@@ -50,10 +50,38 @@ describe('terrain textures', () => {
         expect(ids).toContain(m5 & 0xffff);
         const body = await r.readRaw(r.find(0x40, m5 & 0xffff)!);
         const img = decodeTxd(body);
+        expect(img.bpp).toBe(8);
         expect(img.width).toBe(32);
         expect(Array.from(img.rgba.subarray(0, 3))).toEqual([200, 10, 10]);
         expect(t.mapTexture(99, pc)).toBeNull();
         expect(t.mapTexture(0xffffffff, pc)).toBeNull();
+    });
+
+    it('bounds detailed terrain memory while retaining dimensions and an explicit truecolor override', async () => {
+        const pixels = pcTex24(32, 32, [0, 0, 0]);
+        for (let i = 0; i < 1024; i++) {
+            pixels[54 + i * 3] = (i % 32) * 8;
+            pixels[55 + i * 3] = Math.floor(i / 32) * 8;
+            pixels[56 + i * 3] = (i * 17) % 256;
+        }
+        const rich = writePs2Srsc([{ type: 0x40, id: 5, sub: 0, data: pixels }]);
+        const richSource: PcFileSource = { read: async () => rich, list: async () => [] };
+        const indexed = await convertTerrainTextures(pc, richSource, base, 24, { minSize: 0 });
+        const indexedReader = await SrscReader.fromBytes(indexed.txd);
+        const body = await indexedReader.readRaw(indexedReader.find(0x40, indexed.mapTexture(5, pc)! & 0xffff)!);
+        expect(decodeTxd(body).bpp).toBe(8);
+        expect(decodeTxd(body).width).toBe(32);
+        expect(body.length).toBeLessThan(32 * 32 * 4);
+        const t = await convertTerrainTextures(pc, richSource, base, 24, {
+            minSize: 0,
+            texture: { mode: 'truecolor', maxTruecolorPixels: Infinity },
+        });
+        const r = await SrscReader.fromBytes(t.txd);
+        const ref = t.mapTexture(5, pc)!;
+        const img = decodeTxd(await r.readRaw(r.find(0x40, ref & 0xffff)!));
+        expect(img.bpp).toBe(32);
+        expect(img.width).toBe(32);
+        expect(Array.from(img.rgba.subarray(0, 3))).toEqual([0, 248, 224]);
     });
 
     it('reduces to the most used textures by nearest colour', async () => {
