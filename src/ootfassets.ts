@@ -246,10 +246,22 @@ export class OotfAssetBuilder {
     }
 
     /** Convert PC model `id` of `<container>.mod` with its textures. Returns the new PS2 model id or null. */
-    async addModel(container: string, id: number): Promise<number | null> {
+    async addModel(container: string, id: number, requireDisplayList = false): Promise<number | null> {
         const key = `${lower(container)}#${id}`;
         const known = this.modelIds.get(key);
-        if (known !== undefined) return known;
+        if (known !== undefined) {
+            if (requireDisplayList) {
+                const existing = this.models.find((m) => m.id === known)!;
+                if (!existing.records?.some((r) => r.type === MOD_DISPLAY_LIST)) {
+                    // A shared rigid model may first be imported for an ordinary static class, then used by a
+                    // generic prop. Upgrade the same resource id rather than retaining its non-drawing representation.
+                    const dl = withDisplayList(existing.model);
+                    existing.model = dl.model;
+                    existing.records = [...writePs2ModelRecords(dl.model), { type: MOD_DISPLAY_LIST, data: dl.record }];
+                }
+            }
+            return known;
+        }
         if (this.report.skipped.has(`model ${key}`)) return null;
         const fail = (why: string): null => {
             this.skip(`model ${key}`, why);
@@ -333,13 +345,30 @@ export class OotfAssetBuilder {
                 ...remapped,
                 channels: remapped.channels.map((c, i) =>
                     i === 0
-                        ? { ...c, caps: remapped.lods.map((l) => ({ values: [0, 0, l.firstPoly, l.polyCount, 0] as [number, number, number, number, number], weights: [] })) }
+                        ? {
+                              ...c,
+                              caps: remapped.lods.map((l) => ({
+                                  values: [0, 0, l.firstPoly, l.polyCount, 0] as [
+                                      number,
+                                      number,
+                                      number,
+                                      number,
+                                      number,
+                                  ],
+                                  weights: [],
+                              })),
+                          }
                         : c,
                 ),
             };
             // PS2 character models carry shading 0x20002, a distance of 35000 and a second word of 1 (troll 4418, Scavenger 5055);
             // the PC conversion wrote shading 2 / no distance. Matching the disc did NOT make creature classes draw the body (see the journal).
-            out = { ...dl.model, shading: dl.model.shading | 0x20000, distance: dl.model.distance ?? 35000, reserved: 1 };
+            out = {
+                ...dl.model,
+                shading: dl.model.shading | 0x20000,
+                distance: dl.model.distance ?? 35000,
+                reserved: 1,
+            };
             records = [
                 ...writePs2ModelRecords(out).filter((r) => r.type !== MOD_BOUNDS),
                 { type: MOD_CHARACTER, data: writePs2Skeleton(ps2sk, skin.sphereVerts, Infinity) },
@@ -353,12 +382,14 @@ export class OotfAssetBuilder {
                 anims: anims.ids.length,
                 animsSkipped: anims.skipped,
             });
-        } else if ((this.options.displayList ?? DEFAULT_DISPLAY_LIST).test(pc.name)) {
+        } else if (requireDisplayList || (this.options.displayList ?? DEFAULT_DISPLAY_LIST).test(pc.name)) {
             try {
                 const dl = withDisplayList(model);
                 out = dl.model;
                 records = [...writePs2ModelRecords(out), { type: MOD_DISPLAY_LIST, data: dl.record }];
             } catch (e) {
+                if (requireDisplayList)
+                    return fail(`required display list: ${e instanceof Error ? e.message : String(e)}`);
                 this.report.warnings.push(
                     `model ${key}: display list failed (${e instanceof Error ? e.message : String(e)})`,
                 );
@@ -441,7 +472,12 @@ export class OotfAssetBuilder {
     ): Promise<{ ids: number[]; skipped: number }> {
         const loaded = await this.loadClips(container, sk, key);
         let skipped = loaded.skipped;
-        const r = convertCreatureAssets({ pcSkeleton: sk, pcAnims: loaded.pcAnims, ps2Skeleton: null, keepChannels: true });
+        const r = convertCreatureAssets({
+            pcSkeleton: sk,
+            pcAnims: loaded.pcAnims,
+            ps2Skeleton: null,
+            keepChannels: true,
+        });
         skipped += r.skipped.length;
         const map = new Map<number, number>();
         for (const a of r.anims) {
@@ -502,15 +538,18 @@ export class OotfAssetBuilder {
         ]);
     }
 
-    /** Model reference as stored in a class of `owner`'s ODB (`db` indexes `owner.db`): convert and return the PS2 ref. */
-    async addModelRef(owner: string, pcDb: number, pcId: number): Promise<number | null> {
+    /**
+     * Model reference in `owner`'s ODB (`db` indexes `owner.db`). Generic props require a strip display list even
+     * for rigid models; a later required request upgrades an already converted model without changing its id.
+     */
+    async addModelRef(owner: string, pcDb: number, pcId: number, requireDisplayList = false): Promise<number | null> {
         await this.registerOwner(owner);
         const c = this.resolveContainer(owner, pcDb);
         if (!c) {
             this.skip(`model ${lower(owner)}#db${pcDb}/${pcId}`, 'db index not in the .db');
             return null;
         }
-        return this.addModel(c, pcId);
+        return this.addModel(c, pcId, requireDisplayList);
     }
 
     /**

@@ -114,7 +114,10 @@ describe('PS2 texture encode', () => {
             const q = encodePs2Texture(many, { mode: 'indexed' });
             expect(q.lossy).toBe(true);
             expect(q.exact?.rgba).toEqual(many.rgba);
-            const flat = encodePs2Texture(img(8, 8, () => [1, 2, 3, 255]), { mode: 'indexed' });
+            const flat = encodePs2Texture(
+                img(8, 8, () => [1, 2, 3, 255]),
+                { mode: 'indexed' },
+            );
             expect(flat.lossy).toBe(false);
             expect(flat.exact).toBeUndefined();
         } finally {
@@ -185,13 +188,21 @@ describe('PS2 texture encode', () => {
         const d = decodeTxd(t.body, { upright: false });
         expect(d.rgba[(5 + 3 * 32) * 4]).toBe(5 * 8 + 1);
         expect(d.rgba[(5 + 3 * 32) * 4 + 1]).toBe(3 * 8 + 3);
-        expect(encodePs2Texture(img(8, 8, () => [1, 2, 3, 255]), { mode: 'truecolor' }).bpp).toBe(8);
+        expect(
+            encodePs2Texture(
+                img(8, 8, () => [1, 2, 3, 255]),
+                { mode: 'truecolor' },
+            ).bpp,
+        ).toBe(8);
     });
 
     it('truecolor mode keeps big textures 32 bpp unless a pixel budget is set', () => {
         const big = img(256, 256, (x, y) => [x, y, (x * y) & 255, 255]);
         expect(encodePs2Texture(big, { mode: 'truecolor' })).toMatchObject({ width: 256, height: 256, bpp: 32 });
-        expect(encodePs2Texture(big, { mode: 'truecolor', maxTruecolorPixels: 128 * 128 })).toMatchObject({ bpp: 8, lossy: true });
+        expect(encodePs2Texture(big, { mode: 'truecolor', maxTruecolorPixels: 128 * 128 })).toMatchObject({
+            bpp: 8,
+            lossy: true,
+        });
         const small = img(64, 64, (x, y) => [x, y, (x * y) & 255, 255]);
         expect(encodePs2Texture(small, { mode: 'truecolor', minSize: 128 })).toMatchObject({ width: 128, bpp: 32 });
     });
@@ -322,6 +333,36 @@ describe('containers and the asset builder', () => {
         );
         expect(b.report.textures.converted).toBe(1);
     });
+
+    it.each([
+        [false, true],
+        [true, false],
+    ])(
+        'retains a shared rigid model id when display-list requirements arrive in order %s/%s',
+        async (first, second) => {
+            const ordinary = new OotfAssetBuilder(src);
+            await ordinary.addModelRef('Lvl/Lvl', 0, 5);
+            const ordinaryMod = await SrscReader.fromBytes(ordinary.build('out', 'test').files['out/TEST.MOD']!);
+            expect(ordinaryMod.find(0x211, 2)).toBeUndefined();
+            const before = (await parseModel(ordinaryMod, 2))!;
+            const b = new OotfAssetBuilder(src);
+            expect(await b.addModelRef('Lvl/Lvl', 0, 5, first)).toBe(2);
+            expect(await b.addModelRef('Lvl/Lvl', 0, 5, second)).toBe(2);
+            const built = b.build('out', 'test').files['out/TEST.MOD']!;
+            expect(await b.addModelRef('Lvl/Lvl', 0, 5, true)).toBe(2);
+            expect(b.build('out', 'test').files['out/TEST.MOD']).toEqual(built);
+            expect(b.report.models.converted).toBe(1);
+            expect(b.report.models.triangles).toBe(1);
+            const mod = await SrscReader.fromBytes(built);
+            expect(mod.entries.filter((e) => e.type === 0x211).map((e) => e.id)).toEqual([2]);
+            const after = (await parseModel(mod, 2))!;
+            expect(after.textures).toEqual(before.textures);
+            expect(after.indices).toEqual(before.indices);
+            expect(after.uvs).toEqual(before.uvs);
+            expect(after.positions.slice(0, before.positions.length)).toEqual(before.positions);
+            expect(b.mapModelRef(0, 5, 'Lvl/Lvl')).toBe(2);
+        },
+    );
 
     it('answers terrain texture refs through the level dependency table', async () => {
         const b = new OotfAssetBuilder(src);

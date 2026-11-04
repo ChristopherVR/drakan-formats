@@ -496,7 +496,8 @@ export async function convertOotfLevels(
                 const ow = ownerOf.get(u.cls);
                 if (!m || !ow) continue;
                 ownerOf.set(u.cls, ow);
-                await builder.addModelRef(ow, m.db, m.id);
+                // Native generic props need the strip draw representation even when their model is rigid.
+                await builder.addModelRef(ow, m.db, m.id, u.cls.rflClass === 17);
             }
         });
     }
