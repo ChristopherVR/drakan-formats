@@ -378,6 +378,9 @@ export function layerHeightAt(L: TerrainLayer, x: number, z: number): number {
     const left = backslash ? fx < fz : 1 - fx > fz;
     const tex = left ? L.cellTexLeft[cell]! : L.cellTexRight[cell]!;
     if (tex === TEX_HOLE) return NaN;
+    // PAL 15a2f0 skips its first/second collision triangle on bits 0x40/0x80, independently of the shared texture.
+    // PC layers express holes in their separate triangle texture references; these PS2 bits do not apply there.
+    if (L.source === 'ps2' && (L.cellFlags[cell]! & (left ? 0x40 : 0x80)) !== 0) return NaN;
     if (backslash) {
         return left ? yc + fx * (yd - yc) + (1 - fz) * (ya - yc) : yb + (1 - fx) * (ya - yb) + fz * (yd - yb);
     }

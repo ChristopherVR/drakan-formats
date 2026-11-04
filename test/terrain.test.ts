@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
     CELL_SIZE,
     TEX_HOLE,
+    TEX_INVISIBLE,
     TerrainError,
     layerHeightAt,
     parsePcTerrain,
@@ -177,6 +178,41 @@ describe('height queries', () => {
     it('is NaN outside the layer and over holes', () => {
         expect(layerHeightAt(a!, 0, 0)).toBeNaN();
         expect(layerHeightAt(a!, 10.5 * CELL_SIZE, 21.5 * CELL_SIZE)).toBeNaN(); // cell 2 is a hole
+    });
+    it.each([0, 1])('honours native per-triangle collision flags for diagonal %i', (diagonal) => {
+        const spec: LayerSpec = {
+            ...L1,
+            w: 1,
+            h: 1,
+            raw: flat(1, 1, 0x8000),
+            tex: [0x90001],
+            flags: [diagonal],
+        };
+        const [layer] = parsePs2Terrain(ps2File([spec], () => []));
+        const left = diagonal ? [0.25, 0.75] : [0.25, 0.25];
+        const right = diagonal ? [0.75, 0.25] : [0.75, 0.75];
+        const at = (point: number[]) =>
+            layerHeightAt(layer!, (10 + point[0]!) * CELL_SIZE, (20 + point[1]!) * CELL_SIZE);
+        const below = { ...layer!, heights: new Float32Array(4).fill(500) };
+        for (const mask of [0x40, 0x80, 0xc0]) {
+            layer!.cellFlags[0] = diagonal | mask;
+            expect(Number.isNaN(at(left))).toBe((mask & 0x40) !== 0);
+            expect(Number.isNaN(at(right))).toBe((mask & 0x80) !== 0);
+            const point = mask & 0x40 ? left : right;
+            below.cellFlags = new Uint16Array([diagonal]);
+            expect(
+                terrainGroundBelow([below, layer!], (10 + point[0]!) * CELL_SIZE, (20 + point[1]!) * CELL_SIZE, 1500),
+            ).toBe(500);
+        }
+        // Hidden rendering does not remove collision, and PC flags must not acquire native PS2 meaning.
+        layer!.cellFlags[0] = diagonal | 0x30;
+        layer!.cellTexLeft[0] = layer!.cellTexRight[0] = TEX_INVISIBLE;
+        expect(at(left)).toBe(1000);
+        expect(at(right)).toBe(1000);
+        layer!.source = 'pc';
+        layer!.cellFlags[0] = diagonal | 0xc0;
+        expect(at(left)).toBe(1000);
+        expect(at(right)).toBe(1000);
     });
     it('picks the surface nearest nearY among stacked layers', () => {
         const hi: LayerSpec = { ...L1, wh: 5000, tex: [1, 1, 1, 1] };
