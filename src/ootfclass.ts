@@ -103,6 +103,7 @@ const ENGINE_LIST: readonly [number, string, ClassKind][] = [
     [57, 'Dragon Power-up', 'item'],
     [58, 'Lightning Bolt', 'weapon'],
     [59, 'Giant', 'creature'],
+    [60, 'Tracer / Weapon Ribbon', 'fx'],
     [61, 'Detector (trigger volume)', 'logic'],
     [62, 'Timer', 'logic'],
     [63, 'Generator (spawner)', 'spawn'],
@@ -116,6 +117,7 @@ const ENGINE_LIST: readonly [number, string, ClassKind][] = [
     [78, 'Object Grouper', 'logic'],
     [79, 'Bow', 'weapon'],
     [80, 'Quickening Effect', 'fx'],
+    [81, 'Trail Master Effect', 'fx'],
     [82, 'Death Mage', 'creature'],
     [83, 'Stomp FX / Moving Particles', 'fx'],
     [86, 'Soul Crystal (Master of the Dragon)', 'mp'],
@@ -762,6 +764,92 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
               : (pickNamed(loose) ?? pickNamed(aliasSquash(cls.name)));
         if (named) {
             mapped.set(key, { dbIndex: named.odb.dbIndex, classId: named.id, cls: named.cls });
+            continue;
+        }
+        // PAL registers Trail Master (0x10051) and its handler without shipping an ODB template.
+        // Require the audited native field types and explicitly converted model; relocate its tracer reference later.
+        if (!cands.length && rfl === 81) {
+            const types = [0x4003, 7, 1, ...Array<number>(15).fill(2)];
+            // PC editor spellings, audited in order against the native Trail Master descriptor semantics.
+            const names = [
+                'Special Effect (TRACER!)',
+                'Face Camera',
+                'Total Cycles (-1 = forever)',
+                'Square progression Range (0 = linear)',
+                'Initial Y Offset',
+                'Initial Angle Offset',
+                'Direction (1 or -1)',
+                'Upward Velocity (wu/s)',
+                'Max Ceiling',
+                'Forward Velocity (s/rotation)',
+                'Initial Radius (wu)',
+                'Final Radius (wu)',
+                'Max Vertical Ribbon Offset',
+                'Vertical Ribbon Speed',
+                'Max Horizontal Ribbon Offset',
+                'Horizontal Ribbon Speed',
+                'Ellipse Scale (X)',
+                'Ellipse Scale (Y)',
+            ];
+            const host = ps2.find((o) => o.file === opt.modelOdbFile);
+            const model = host && cls.model ? opt.modelFor?.(cls, host.file) : null;
+            const bounds = model ? opt.modelBounds?.(model.id, host!.file, model.db) : undefined;
+            if (
+                !host ||
+                !model ||
+                opt.modelSkinned?.(cls) !== false ||
+                bounds?.length !== 64 ||
+                cls.fields?.length !== types.length ||
+                cls.fields.some((f, i) => f.type !== types[i] || f.name.trim() !== names[i]) ||
+                cls.data?.length !== types.length
+            ) {
+                unsupported.set(key, {
+                    reason: 'needs-model',
+                    detail: 'Trail Master requires the verified ordered schema, rigid converted model and bounds',
+                });
+                continue;
+            }
+            const classId = nextId(host.file);
+            if (classId === undefined) {
+                unsupported.set(key, { reason: 'no-free-id', detail: `${host.file} has no free class id` });
+                continue;
+            }
+            const name = cls.name.trim() || 'OotF Trail Master';
+            const data = [...cls.data];
+            const group =
+                [...host.classes.values()].find((c) => c.rflClass === 60)?.group ??
+                host.classes.values().next().value?.group ??
+                0;
+            const body = new Uint8Array(94 + data.length * 4);
+            const dv = view(body);
+            dv.setUint16(0, group, true);
+            dv.setUint16(2, model.id, true);
+            dv.setUint16(4, model.db, true);
+            dv.setUint32(6, 1, true); // rigid model, no skeleton/controller flags
+            dv.setUint16(14, 1, true); // model/bounds block follows
+            body.set(bounds, 16);
+            dv.setUint16(80, 81, true);
+            dv.setUint16(82, 1, true);
+            dv.setUint16(84, cls.icon ?? 0, true);
+            dv.setUint32(86, types.length, true);
+            dv.setUint32(90, data.length, true);
+            data.forEach((v, i) => dv.setUint32(94 + i * 4, v >>> 0, true));
+            const out: OdbClass = { ...cls, id: classId, name, group, runtimeClass: 0x10051, model, data };
+            synthesized.push({
+                pcKeys: [key],
+                name,
+                file: host.file,
+                dbIndex: host.dbIndex,
+                classId,
+                group,
+                rfl: 81,
+                template: { dbIndex: host.dbIndex, classId: 0, name: 'Native Trail Master schema' },
+                record: joinClassRecord(name, body),
+                cls: out,
+                copied: cls.fields.map((f) => f.name),
+                skipped: [],
+                coverage: 1,
+            });
             continue;
         }
         if (!cands.length) {

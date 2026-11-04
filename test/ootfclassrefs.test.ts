@@ -37,6 +37,80 @@ function native(): Ps2OdbIn {
 }
 
 describe('OotF class reference defaults', () => {
+    it('synthesizes only the verified Trail Master schema with an explicit model binding', () => {
+        const names = [
+            'Special Effect (TRACER!)',
+            'Face Camera',
+            'Total Cycles (-1 = forever)',
+            'Square progression Range (0 = linear)',
+            'Initial Y Offset',
+            'Initial Angle Offset',
+            'Direction (1 or -1)',
+            'Upward Velocity (wu/s)',
+            'Max Ceiling',
+            'Forward Velocity (s/rotation)',
+            'Initial Radius (wu)',
+            'Final Radius (wu)',
+            'Max Vertical Ribbon Offset',
+            'Vertical Ribbon Speed',
+            'Max Horizontal Ribbon Offset',
+            'Horizontal Ribbon Speed',
+            'Ellipse Scale (X)',
+            'Ellipse Scale (Y)',
+        ];
+        const fields = [0x4003, 7, 1, ...Array<number>(15).fill(2)].map((type, i) => ({ name: names[i]!, type }));
+        const source: OdbClass = {
+            id: 2,
+            name: 'Trail',
+            group: 1,
+            runtimeClass: 81,
+            rflClass: 81,
+            model: { id: 20, db: 0 },
+            fields,
+            data: [55, 1, 0xffffffff, ...Array<number>(15).fill(0)],
+        };
+        const options = {
+            modelOdbFile: 'FX.ODB',
+            modelSkinned: () => false,
+            modelFor: () => ({ id: 20000, db: 0 }),
+            modelBounds: () => new Uint8Array(64).fill(0x35),
+        };
+        const plan = planClassMapping([{ db: 1, id: 2, cls: source }], [native()], options);
+        const result = plan.synthesized[0]!;
+        expect(result.cls.runtimeClass).toBe(0x10051);
+        const body = splitClassRecord(result.record).body;
+        expect(new DataView(body.buffer, body.byteOffset).getUint16(14, true)).toBe(1);
+        expect(parseClassBody(body)?.model).toEqual({ id: 20000, db: 0 });
+        expect(parseClassBody(body)?.data).toEqual(source.data);
+        expect(
+            relocateClassDefaultReferences(
+                plan,
+                () => source,
+                (_key, ref, file) => {
+                    expect([ref, file]).toEqual([55, 'FX.ODB']);
+                    return 0x20061;
+                },
+            ),
+        ).toEqual([]);
+        expect(parseClassBody(splitClassRecord(result.record).body)?.data[0]).toBe(0x20061);
+        const invalid = { ...source, fields: fields.map((f, i) => (i === 0 ? { ...f, type: 1 } : f)) };
+        expect(planClassMapping([{ db: 1, id: 2, cls: invalid }], [native()], options).synthesized).toHaveLength(0);
+        expect(planClassMapping([{ db: 1, id: 2, cls: source }], [native()], {}).synthesized).toHaveLength(0);
+        const swapped = [...fields];
+        [swapped[3], swapped[4]] = [swapped[4]!, swapped[3]!];
+        expect(
+            planClassMapping([{ db: 1, id: 2, cls: { ...source, fields: swapped } }], [native()], options).synthesized,
+        ).toHaveLength(0);
+        expect(
+            planClassMapping([{ db: 1, id: 2, cls: source }], [native()], { ...options, modelSkinned: () => true })
+                .synthesized,
+        ).toHaveLength(0);
+        expect(
+            planClassMapping([{ db: 1, id: 2, cls: source }], [native()], { ...options, modelSkinned: undefined })
+                .synthesized,
+        ).toHaveLength(0);
+    });
+
     it('imports a current volume without the native header Dust Devil companion', () => {
         const fields = [
             { name: 'Initial State', type: 7 },
@@ -178,7 +252,19 @@ describe('OotF class reference defaults', () => {
             [200, (1 << 16) | 2, 13],
         );
         const gen = generator(11, 'Source Soul Generator', [14, 15]);
-        const originals = [gen, creature, projectile, lightning, cloud];
+        const tracer = make(
+            16,
+            'Source Magic Tracer',
+            60,
+            [
+                ['Maximum Polygons', 1],
+                ['Length Along Object(%)', 2],
+                ['Fade Out Time (s)', 2],
+                ['Effect along which axis?', 7],
+            ],
+            [70, 0x42c80000, 0x3f800000, 1],
+        );
+        const originals = [gen, creature, projectile, lightning, cloud, tracer];
         const templates = originals.map((c) => ({ ...c, id: c.id + 100, name: `Native ${c.rflClass}` }));
         const records = new Map(templates.filter((c) => c.model).map((c) => [c.id, raw(c)]));
         const odb: Ps2OdbIn = {
@@ -203,7 +289,7 @@ describe('OotF class reference defaults', () => {
                 (_key, ref) => plan.resolve(1, ref)?.classId ?? null,
             ),
         ).toEqual([]);
-        for (const source of [projectile, lightning, cloud]) {
+        for (const source of [projectile, lightning, cloud, tracer]) {
             const target = plan.resolve(1, source.id)!;
             expect(target.cls!.rflClass).toBe(source.rflClass);
             expect(target.cls!.model).toEqual({ id: source.model!.id + 1000, db: 0 });
