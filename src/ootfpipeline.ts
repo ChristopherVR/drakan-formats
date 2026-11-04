@@ -24,7 +24,15 @@ import {
 import { ODB_CLASS_TYPE, ODB_FIELDS_TYPE, buildOdbIndex, parseOdbClasses, type OdbClass } from './odb.ts';
 import { resourceKind, type ResourceContext, type ResourceKind } from './convert.ts';
 import { FIELD_SOUND } from './fields.ts';
-import { convertPcSounds, parsePcSounds, ps2SoundEntries, sdbKey, writePs2Sdb, type PcSoundBank } from './ootfsound.ts';
+import {
+    convertPcSounds,
+    soundIdAllocator,
+    parsePcSounds,
+    ps2SoundEntries,
+    sdbKey,
+    writePs2Sdb,
+    type PcSoundBank,
+} from './ootfsound.ts';
 import { convertPcSequences, sequenceSoundRefs, ssdPackFiles, usedIdsOf } from './ootfseq.ts';
 import { SrscReader } from './srsc.ts';
 import {
@@ -885,26 +893,17 @@ export async function convertOotfLevels(
                 banks.set(k, { ...bank, sounds: bank.sounds.filter((x) => want.get(k)!.has(x.id)) });
             }
             if (!banks.size) return;
-            // Ids: the host SDB's free ids below its maximum (an id above a file's maximum did not work for ODB classes),
-            // group: an existing one (the host's most used), so no 0x0301 record has to be added.
+            // Reuse gaps first, then extend the sound index. Native sound descriptor requests use full resource ids.
             const host = ps2.hostSdb;
-            const hostSounds = new Set((host?.entries ?? []).filter((e) => e.type === 0x302).map((e) => e.id));
-            const hostMax = [...hostSounds].reduce((m, i) => Math.max(m, i), 0);
             const perGroup = new Map<number, number>();
             for (const e of host?.entries ?? [])
                 if (e.type === 0x302) perGroup.set(e.sub, (perGroup.get(e.sub) ?? 0) + 1);
             const group = [...perGroup].sort((a, b) => b[1] - a[1])[0]?.[0] ?? 1;
-            let cursor = 0;
-            const freeId = host
-                ? (): number | null => {
-                      while (++cursor <= hostMax) if (!hostSounds.has(cursor)) return cursor;
-                      return null;
-                  }
-                : undefined;
+            const freeId = host ? soundIdAllocator(host.entries) : undefined;
             const conv = convertPcSounds(
                 banks,
                 { firstId: 1, groupId: group, groupName: 'Order of the Flame', nextId: freeId },
-                { maxBytes: 0x3f000 },
+                { maxBytes: 0x3f000, fitRates: [22050, 11025] },
             );
             for (const w of conv.warnings) res.warnings.push(`sounds: ${w}`);
             if (!conv.sounds.length) return;

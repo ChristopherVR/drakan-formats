@@ -7,6 +7,7 @@ import {
     SoundMap,
     appendToPs2Sdb,
     convertPcSounds,
+    soundIdAllocator,
     decodeSdbSamples,
     encodeSdbSamples,
     encodeVag,
@@ -186,7 +187,11 @@ describe('PS2 SDB writer', () => {
             ]),
         );
         const free = [3, 9];
-        const conv = convertPcSounds(new Map([[key, bank]]), { firstId: 1, groupId: 94, nextId: () => free.shift() ?? null });
+        const conv = convertPcSounds(new Map([[key, bank]]), {
+            firstId: 1,
+            groupId: 94,
+            nextId: () => free.shift() ?? null,
+        });
         expect(conv.sounds.map((s) => [s.id, s.group])).toEqual([
             [3, 94],
             [9, 94],
@@ -274,6 +279,17 @@ describe('PS2 SDB writer', () => {
 });
 
 describe('id map', () => {
+    it('allocates above the old maximum without replacing sample or lipsync ids', () => {
+        const allocate = soundIdAllocator([
+            { type: 0x302, id: 1 },
+            { type: 0x304, id: 2 },
+            { type: 0x305, id: 4 },
+        ]);
+        expect([allocate(), allocate(), allocate()]).toEqual([3, 5, 6]);
+        const full = soundIdAllocator(Array.from({ length: 65535 }, (_, i) => ({ type: 0x302, id: i + 1 })));
+        expect(full()).toBeNull();
+    });
+
     it('maps PC references through dependency keys', async () => {
         const bank = await parsePcSounds(pcSrsc([{ type: 0x302, id: 4, sub: 1, data: pcSound('a', signal(100), {}) }]));
         const key = sdbKey('Common/System/System.sdb');
@@ -286,6 +302,23 @@ describe('id map', () => {
         const m = new SoundMap(3);
         m.set('k', 1, 77);
         expect(m.get('k', 1)).toBe((3 << 16) | 77);
+    });
+
+    it('fits a complete oversized clip at the highest permitted playback rate', async () => {
+        const pcm = signal(22050);
+        const bank = await parsePcSounds(pcSrsc([{ type: 0x302, id: 4, sub: 1, data: pcSound('speech', pcm, {}) }]));
+        const converted = convertPcSounds(
+            new Map([['speech', bank]]),
+            { firstId: 1, groupId: 1 },
+            { maxBytes: 7000, fitRates: [8000, 11025] },
+        );
+        expect(converted.warnings).toEqual([]);
+        expect(converted.sounds).toHaveLength(1);
+        const sound = converted.sounds[0]!;
+        expect(sound.rate).toBe(11025);
+        expect(sound.pcm.length / sound.rate).toBeCloseTo(pcm.length / bank.sounds[0]!.rate, 4);
+        expect(converted.adpcmBytes).toBeLessThanOrEqual(7000);
+        expect(sound.pcm).toEqual(resamplePcm(bank.sounds[0]!.pcm, bank.sounds[0]!.rate, 11025));
     });
 
     it('resamples by an integer ratio', () => {

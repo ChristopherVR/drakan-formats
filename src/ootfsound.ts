@@ -494,6 +494,17 @@ export async function nextSdbIds(existing: Uint8Array): Promise<{ sound: number;
     return { sound: s + 1, group: g + 1 };
 }
 
+/** Allocate unused sound ids without replacing descriptor/sample/lipsync records. Sound resources are indexed by
+ * full id, unlike ODB class arrays; the host's editor metadata is not an allocation ceiling. */
+export function soundIdAllocator(entries: readonly { type: number; id: number }[]): () => number | null {
+    const reserved = new Set(entries.filter((e) => e.type >= 0x302 && e.type <= 0x305).map((e) => e.id));
+    let cursor = 0;
+    return () => {
+        while (++cursor <= 0xffff) if (!reserved.has(cursor)) return cursor;
+        return null;
+    };
+}
+
 // ---- PC -> PS2 conversion and id map ----------------------------------------------------------------------------
 
 /** Lower-case SDB stem identifying a PC database, e.g. `common/system/system`; the key space of `SoundMap`. */
@@ -508,6 +519,8 @@ export interface SoundConvertOptions {
     maxRate?: number;
     /** Hard cap on the ADPCM size per sound in bytes (longer sounds are dropped with a warning). Default: none. */
     maxBytes?: number;
+    /** Proven playback rates to try before rejecting an oversized clip; preserves its full duration. */
+    fitRates?: readonly number[];
     /** Override the descriptor flags (default: 0x2, loop adds 0x8). */
     flags?: (pc: PcSound) => number;
 }
@@ -592,7 +605,18 @@ export function convertPcSounds(
                 pcm = resamplePcm(pcm, rate, maxRate);
                 rate = maxRate;
             }
-            const size = (Math.ceil(pcm.length / 28) + 3) * 16;
+            let size = (Math.ceil(pcm.length / 28) + 3) * 16;
+            if (opts.maxBytes && size > opts.maxBytes) {
+                for (const candidate of [...(opts.fitRates ?? [])].sort((a, b) => b - a)) {
+                    if (!Number.isFinite(candidate) || candidate <= 0 || candidate >= rate) continue;
+                    const samples = Math.max(1, Math.floor((pc.pcm.length * candidate) / pc.rate));
+                    if ((Math.ceil(samples / 28) + 3) * 16 > opts.maxBytes) continue;
+                    pcm = resamplePcm(pc.pcm, pc.rate, candidate);
+                    rate = candidate;
+                    size = (Math.ceil(pcm.length / 28) + 3) * 16;
+                    break;
+                }
+            }
             if (opts.maxBytes && size > opts.maxBytes) {
                 warnings.push(`${key}#${pc.id} ${pc.name}: ${size} bytes exceeds the cap`);
                 continue;
