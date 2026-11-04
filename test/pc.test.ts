@@ -185,7 +185,7 @@ describe('PC object list', () => {
         // a PC link is the position of the target in the table (id 11 sits at position 1); position 7 is past the end and is dropped
         expect(a.links).toEqual([11]);
         expect(list.warnings.some((x) => /link 7/.test(x))).toBe(true);
-        expect(a.rot).toEqual([-90, 90, 0]);
+        expect(a.rot).toEqual([270, 90, 0]);
         expect(a.scale).toEqual([1, 2, 3]);
         expect(list.objects[1]!.params[0]).toMatchObject({ name: 'Speed', fieldIndex: 3, type: 2 });
     });
@@ -369,7 +369,7 @@ describe('PC -> PS2 conversion', () => {
         const back = parseObjectList(writeObjectList(r.objects));
         const first = back.objects.find((o) => o.pos[0] === 100)!;
         expect(first.classId).toBe(77);
-        expect(first.rot).toEqual([-90, 0, 0]);
+        expect(first.rot).toEqual([270, 0, 0]);
         expect(first.links).toEqual([2]); // id 3 was dropped
         expect(first.params.map((p) => p.name).sort()).toEqual(['Sound', 'Tag', 'speed']);
         const ids = back.objects.map((o) => o.id);
@@ -380,6 +380,29 @@ describe('PC -> PS2 conversion', () => {
         expect(R.cellsFallback).toBe(6);
         expect([...L.cellTexLeft]).toEqual(new Array(6).fill(0x00090042));
         expect([...L.vertexMask]).toEqual([...ps2VertexMask(3, 2)]);
+    });
+
+    it('preserves unsigned native rotation words above 180 degrees on every axis', async () => {
+        const { pc, h, classes } = await fixture();
+        for (const angle of [181, 270, 359]) {
+            for (const axis of [0, 1, 2]) {
+                const rot: [number, number, number] = [0, 0, 0];
+                rot[axis] = angle;
+                const w = new W().u16(1);
+                pcObject({ id: 1, cls: 1, db: 1, pos: [0, 0, 0], rot }, w);
+                const source = { ...pc, list: parsePcObjectList(w.bytes()) };
+                const converted = convertPcLevel(source, {
+                    template: { header: h, classes },
+                    textureFallback: 0x00090042,
+                });
+                const payload = writeObjectList(converted.objects);
+                // One 8-byte table entry follows the count; the fixed no-link body puts rotations at 38.
+                // The native loader reads these words unsigned, not through our signed editor parser.
+                const dv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+                expect([38, 40, 42].map((offset) => dv.getUint16(offset, true))).toEqual(rot);
+                expect(parseObjectList(payload).objects[0]!.rot).toEqual(rot);
+            }
+        }
     });
 
     it('writes terrain that the PS2 reader decodes (two layers)', async () => {

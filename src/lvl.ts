@@ -190,7 +190,7 @@ export interface LvlObject {
     radius: number | null;
     /** Ids of other objects in the list (trigger targets). */
     links: number[];
-    /** Signed degrees. */
+    /** Degree words; native loading is unsigned (normally 0..359). The reader preserves legacy signed bit patterns. */
     rot: Vec3;
     /** Present exactly when `flags & FLAG_SCALED`. */
     scale: Vec3 | null;

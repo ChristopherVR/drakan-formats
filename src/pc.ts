@@ -67,7 +67,7 @@ function nulText(raw: Uint8Array): string {
     return latin1(raw, 0, z < 0 ? raw.length : z);
 }
 
-/** Degrees 0..359 (PC) to the signed form the PS2 list stores. */
+/** Fold degrees into -180..180 for callers that need signed angles; not native LVL serialization. */
 export function signedDegrees(d: number): number {
     const m = ((d % 360) + 360) % 360;
     return m > 180 ? m - 360 : m;
@@ -85,7 +85,9 @@ function parsePcBody(c: PcCursor): LvlObject {
     c.need(nLinks * 2);
     const links: number[] = [];
     for (let i = 0; i < nLinks; i++) links.push(c.u16());
-    const rot: Vec3 = [signedDegrees(c.u16()), signedDegrees(c.u16()), signedDegrees(c.u16())];
+    // Native 0x1c9f40 loads these words unsigned before converting to radians.
+    // Writing -90 as 0xffa6 adds 65536 degrees (16 modulo 360), unlike source 270.
+    const rot: Vec3 = [c.u16(), c.u16(), c.u16()];
     const scale: Vec3 | null = flags & FLAG_SCALED ? [c.f32(), c.f32(), c.f32()] : null;
     const dataDwords = c.u32();
     const nParams = c.u32();
@@ -124,7 +126,7 @@ function parsePcBody(c: PcCursor): LvlObject {
 
 /**
  * Parse a PC LVL 0x0020 payload: `u16 count`, then self-contained bodies. Throws LvlError unless the bodies consume the
- * payload exactly. Links (u16 table positions on PC) are translated to object ids and rotations are widened to the PS2 model.
+ * payload exactly. Links (u16 table positions on PC) are translated to object ids and unsigned degree words retain their values for the PS2 loader.
  */
 export function parsePcObjectList(data: Uint8Array): LvlObjectList {
     const c = new PcCursor(data);
