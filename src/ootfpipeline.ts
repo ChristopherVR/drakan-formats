@@ -73,7 +73,13 @@ import {
     type Ps2OdbIn,
 } from './ootfclass.ts';
 import { OotfAssetBuilder, type AssetReport } from './ootfassets.ts';
-import { loadPcLevel, pcLevelName, resolvePcPath, type PcFileSource, type PcLevel } from './pc.ts';
+import { loadPcLevel, parsePcOdbClasses, pcLevelName, resolvePcPath, type PcFileSource, type PcLevel } from './pc.ts';
+import {
+    classDefaultReferences,
+    classReferenceClosure,
+    ownedClassKey,
+    relocateClassDefaultReferences,
+} from './ootfclassrefs.ts';
 import { CELL_SIZE, LVL_TYPE_LAYERS, parsePs2Terrain, terrainHeightAt } from './terrain.ts';
 import { odbStemForDependency } from './odb.ts';
 import { animName, parseSkeleton, writePs2Anim } from './ootfanim.ts';
@@ -439,11 +445,54 @@ export async function convertOotfLevels(
         }
     }
     const ownerOf = new Map<OdbClass, string>();
+    const ownedClasses = new Map<string, OdbClass>();
+    for (const pc of pcs)
+        for (const [db, table] of pc.classes) {
+            const ow = owner(pc, db);
+            if (!ow) continue;
+            for (const [id, cls] of table) {
+                ownerOf.set(cls, ow);
+                ownedClasses.set(ownedClassKey(ow, id), cls);
+            }
+        }
+    if (opt.classes !== false) {
+        const loaded = new Set<string>();
+        const initial = [...used.values()].flatMap((u) => {
+            const ow = ownerOf.get(u.cls);
+            return ow ? [{ owner: ow, id: u.id, cls: u.cls }] : [];
+        });
+        const closure = await classReferenceClosure(initial, async (source, ref) => {
+            await builder.registerOwner(source.owner);
+            const container = builder.resolveContainer(source.owner, ref >>> 16);
+            if (!container) return null;
+            const key = ownedClassKey(container, ref & 0xffff);
+            if (!ownedClasses.has(key) && !loaded.has(container.toLowerCase())) {
+                loaded.add(container.toLowerCase());
+                const bytes = await src.read(`${container}.odb`);
+                if (bytes)
+                    for (const [id, cls] of await parsePcOdbClasses(await SrscReader.fromBytes(bytes))) {
+                        ownedClasses.set(ownedClassKey(container, id), cls);
+                        ownerOf.set(cls, container);
+                    }
+            }
+            const cls = ownedClasses.get(key);
+            return cls ? { owner: container, id: ref & 0xffff, cls } : null;
+        });
+        for (const c of closure)
+            if (
+                ![...used.values()].some(
+                    (u) => ownedClassKey(ownerOf.get(u.cls) ?? '', u.id) === ownedClassKey(c.owner, c.id),
+                )
+            ) {
+                ownerOf.set(c.cls, c.owner);
+                used.set(`reference|${ownedClassKey(c.owner, c.id)}`, { db: -1, id: c.id, cls: c.cls, pc: pcs[0]! });
+            }
+    }
     if (opt.models !== false && opt.classes !== false && hostOk) {
         await stage('models', async () => {
             for (const u of used.values()) {
                 const m = u.cls.model;
-                const ow = owner(u.pc, u.db);
+                const ow = ownerOf.get(u.cls);
                 if (!m || !ow) continue;
                 ownerOf.set(u.cls, ow);
                 await builder.addModelRef(ow, m.db, m.id);
@@ -452,7 +501,8 @@ export async function convertOotfLevels(
     }
     /** Static models appended to a template ODB's own MOD / TXD (no skinned models), by ODB stem. */
     const crossBuilders = new Map<string, OotfAssetBuilder>();
-    const sig = (c: OdbClass): string => `${c.name}|${c.rflClass}|${(c.data ?? []).join(',')}`;
+    const sig = (c: OdbClass): string =>
+        `${c.name}|${c.rflClass}|${(c.data ?? []).join(',')}|${classDefaultReferences(c).length ? (ownerOf.get(c) ?? '') : ''}`;
     const planKey = new Map<string, { db: number; id: number }>();
     let plan: ClassPlan | null = null;
     let ps2Odbs: Ps2OdbIn[] = [];
@@ -674,6 +724,40 @@ export async function convertOotfLevels(
             return result;
         });
         res.classPlan = plan;
+        if (plan) {
+            const sourceByKey = new Map<string, OdbClass>(
+                [...used.values()].map((u) => {
+                    const k = planKey.get(sig(u.cls))!;
+                    return [`${k.db}:${k.id}`, u.cls] as const;
+                }),
+            );
+            res.warnings.push(
+                ...relocateClassDefaultReferences(
+                    plan,
+                    (key) => sourceByKey.get(key),
+                    (key, ref, file) => {
+                        const source = sourceByKey.get(key);
+                        const ow = source && ownerOf.get(source);
+                        const container = ow && builder.resolveContainer(ow, ref >>> 16);
+                        const cls = container && ownedClasses.get(ownedClassKey(container, ref & 0xffff));
+                        const targetKey = cls && planKey.get(sig(cls));
+                        const target = targetKey && plan!.resolve(targetKey.db, targetKey.id);
+                        if (!target) return null;
+                        const targetStem = ps2Odbs
+                            .find((o) => o.dbIndex === target.dbIndex)
+                            ?.file.replace(/\.ODB$/i, '');
+                        const fromStem = file.replace(/\.ODB$/i, '');
+                        if (!targetStem) return null;
+                        if (fromStem === targetStem) return target.classId;
+                        const dbText = ps2.dbFiles?.get(fromStem)?.text;
+                        for (const match of dbText?.matchAll(/^(\d+)\s+(.+?)\s*$/gm) ?? [])
+                            if (odbStemForDependency(match[2]!) === targetStem)
+                                return ((Number(match[1]) << 16) | target.classId) >>> 0;
+                        return null;
+                    },
+                ),
+            );
+        }
         if (plan) {
             // PC clips retargeted onto the PS2 rig of a name-mapped creature replace the PS2 clips of the same name.
             await stage('retarget', async () => {

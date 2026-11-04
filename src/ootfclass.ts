@@ -483,7 +483,7 @@ export function mergeDefaults(
     const convertedAnim = new Set<number>();
     const copiedChan = new Set<number>();
     pf.forEach((f, i) => {
-        const isClassRef = fieldBase(f.type) === 3 && !fieldIsArray(f.type);
+        const isClassRef = fieldBase(f.type) === 3;
         const value = isValueField(f.type);
         if (value) valueFields++;
         const j = byName.get(f.name);
@@ -496,6 +496,20 @@ export function mergeDefaults(
         const dword = pc.data?.[i];
         if (dword === undefined) return;
         if (isClassRef) {
+            if (fieldIsArray(f.type)) {
+                if (!mapClassRef) {
+                    skipped.push(f.name);
+                    return;
+                }
+                const refs = decodeFieldValue(f.type, dword, pc.data ?? []) as number[];
+                const mapped = refs.map((ref) => mapClassRef(ref));
+                if (mapped.some((ref) => ref === null || ref === undefined)) skipped.push(f.name);
+                const words = mapped.filter((ref): ref is number => ref !== null && ref !== undefined);
+                out[j] = words.length ? ((words.length << 16) | out.length) >>> 0 : 0;
+                out.push(...words.map((ref) => ref >>> 0));
+                copied.push(f.name);
+                return;
+            }
             const mapped = mapClassRef ? mapClassRef(dword) : null;
             if (mapped === null || mapped === undefined) {
                 skipped.push(f.name);
@@ -931,7 +945,10 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
                 continue;
             }
         }
-        const sig = `${c.odb.file}|${c.id}|${m.data.join(',')}|${modelRef ? `${modelRef.db}:${modelRef.id}` : ''}`;
+        // Reference defaults are relocated after the complete plan exists. Distinct source namespaces must not fold
+        // into one clone merely because their unrelated template defaults happened to match before relocation.
+        const refIdentity = cls.fields?.some((f) => fieldBase(f.type) === 3) ? `|refs:${key}` : '';
+        const sig = `${c.odb.file}|${c.id}|${m.data.join(',')}|${modelRef ? `${modelRef.db}:${modelRef.id}` : ''}${refIdentity}`;
         const prev = done.get(sig);
         if (prev) {
             prev.pcKeys.push(key);
