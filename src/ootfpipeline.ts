@@ -600,7 +600,12 @@ export async function convertOotfLevels(
                     const st = c.model ? containerStem(file.replace(/\.ODB$/i, ''), c.model.db) : null;
                     return !!c.model && !!st && !!modOf(st)?.find(0x0208, c.model.id);
                 },
-                modelBounds: (id) => (dbgEnv0['OOTF_NO_BOUNDS'] ? builder.skeletonBounds(id) : builder.modelBounds(id)),
+                modelBounds: (id, file, db) => {
+                    const stem = file.replace(/\.ODB$/i, '');
+                    // Cross-ODB models have their own id namespace. A coincident root-builder id is another model.
+                    const destination = stem !== hostStem && db === 0 ? crossBuilders.get(stem) : builder;
+                    return dbgEnv0['OOTF_NO_BOUNDS'] ? destination?.skeletonBounds(id) : destination?.modelBounds(id);
+                },
                 mapAnimFor: (cls) => {
                     const ow = ownerOf.get(cls);
                     return ow && cls.model

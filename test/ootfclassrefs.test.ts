@@ -37,6 +37,84 @@ function native(): Ps2OdbIn {
 }
 
 describe('OotF class reference defaults', () => {
+    it('imports a current volume without the native header Dust Devil companion', () => {
+        const fields = [
+            { name: 'Initial State', type: 7 },
+            { name: 'Speed (lu/s)', type: 2 },
+        ];
+        const source: OdbClass = {
+            id: 1,
+            name: 'Source river current',
+            group: 1,
+            runtimeClass: 111,
+            rflClass: 111,
+            model: { id: 40, db: 0 },
+            fields,
+            data: [1, 0x3f800000],
+        };
+        const template: OdbClass = {
+            ...source,
+            id: 6394,
+            name: 'Native dust air current',
+            runtimeClass: 0x1006f,
+            model: { id: 5515, db: 1 },
+        };
+        const body = new Uint8Array(102);
+        const dv = new DataView(body.buffer);
+        dv.setUint16(2, 5515, true);
+        dv.setUint16(4, 1, true);
+        dv.setUint16(10, 6288, true);
+        dv.setUint16(14, 1, true);
+        dv.setUint32(80, 0x1006f, true);
+        dv.setUint32(86, 2, true);
+        dv.setUint32(90, 2, true);
+        const bounds = new Uint8Array(64).fill(0x25);
+        const inputs = [{ db: 1, id: 1, cls: source }];
+        const odbs = [
+            {
+                file: 'FX.ODB',
+                dbIndex: 4,
+                classes: new Map([[6394, template]]),
+                raw: () => joinClassRecord(template.name, body),
+            },
+        ];
+        const options = {
+            modelOdbFile: 'FX.ODB',
+            modelFor: () => ({ id: 20000, db: 0 }),
+            modelBounds: (id: number, file: string, db: number) => {
+                expect([id, file, db]).toEqual([20000, 'FX.ODB', 0]);
+                return bounds;
+            },
+        };
+        const output = planClassMapping(inputs, odbs, options).synthesized[0]!;
+        expect(output.cls.rflClass).toBe(111);
+        expect(output.cls.model).toEqual({ id: 20000, db: 0 });
+        const head = splitClassRecord(output.record).body;
+        const hd = new DataView(head.buffer, head.byteOffset);
+        expect(hd.getUint32(10, true)).toBe(0);
+        expect(hd.getUint16(14, true)).toBe(1);
+        expect(head.slice(16, 80)).toEqual(bounds);
+        expect(parseClassBody(head)?.data).toEqual(source.data);
+        // This is a general PC-header rule, including ordinary model-bearing scenery cloned from native templates.
+        const scenery = { ...source, rflClass: 17, runtimeClass: 17 };
+        const nativeScenery = { ...template, rflClass: 17, runtimeClass: 0x10011 };
+        const b = body.slice();
+        new DataView(b.buffer).setUint32(80, 0x10011, true);
+        const other = planClassMapping(
+            [{ db: 1, id: 1, cls: scenery }],
+            [
+                {
+                    ...odbs[0]!,
+                    classes: new Map([[6394, nativeScenery]]),
+                    raw: () => joinClassRecord(nativeScenery.name, b),
+                },
+            ],
+            options,
+        );
+        const otherHead = splitClassRecord(other.synthesized[0]!.record).body;
+        expect(new DataView(otherHead.buffer, otherHead.byteOffset).getUint32(10, true)).toBe(0);
+    });
+
     it('converts referenced lightning, projectile and fading-effect models instead of dropping their engine kinds', () => {
         const make = (id: number, name: string, rfl: number, fields: [string, number][], data: number[]): OdbClass => ({
             id,

@@ -345,7 +345,7 @@ export interface PlanOptions {
     templateJoints?: (cls: OdbClass, odbFile: string) => number | undefined;
     modelJoints?: (cls: OdbClass) => number | undefined;
     /** The 64 byte 0x0208 bounds block of a converted skinned model (new id); the class record caches a copy of it (body 16..80). */
-    modelBounds?: (modelId: number) => Uint8Array | undefined;
+    modelBounds?: (modelId: number, odbFile: string, modelDb: number) => Uint8Array | undefined;
 }
 
 // ---------------------------------------------------------------- plan
@@ -787,7 +787,7 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
             !!kind &&
             !!opt.modelFor &&
             !!cls.model &&
-            !RETARGET_KINDS.has(kind) &&
+            (!RETARGET_KINDS.has(kind) || rfl === 111) &&
             !noModel; // test aid: keep the template's own model
         // A model-less PC class of a mechanism / scenery / fx engine class (Break Brick floor, Fire Fly Axis ...) is cloned from a
         // model-less PS2 class of the same engine id: the clone shows nothing it should not.
@@ -974,7 +974,16 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
                   fieldCount: c.cls.fields!.length,
                   data: m.data,
               });
-        if (modelRef && raw) record = patchRecordModel(record, modelRef, opt.modelBounds?.(modelRef.id));
+        // PS2 headers carry an auxiliary class reference at +10/+12, independently of the field list. PC ODB
+        // records have no equivalent (pc.ts parsePcClassRecord). Never inherit a template's unrelated companion:
+        // e.g. the native air-current template attaches a Dust Devil generator to every imported river volume.
+        // Preserve +14, which announces the following model/bounds block; actual source class defaults are relocated later.
+        const recordParts = splitClassRecord(record);
+        const ownHeader = recordParts.body.slice();
+        view(ownHeader).setUint32(10, 0, true);
+        record = joinClassRecord(recordParts.name, ownHeader);
+        if (modelRef && raw)
+            record = patchRecordModel(record, modelRef, opt.modelBounds?.(modelRef.id, c.odb.file, modelRef.db));
         const out: OdbClass = {
             id: newId,
             name,
