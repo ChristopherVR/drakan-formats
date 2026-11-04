@@ -3,7 +3,7 @@ import { ootfDebugFlag } from './ootfdebug.ts';
 import { type Ps2Entry, writePs2Srsc } from './ootfcontainer.ts';
 import { inflate } from './inflate.ts';
 import type { SrscReader } from './srsc.ts';
-import { TXD_ENTRY_TYPE } from './txd.ts';
+import { TXD_ENTRY_TYPE, decodeTxd } from './txd.ts';
 
 /**
  * Order of the Flame (PC) TXD texture (SRSC 0x0040) -> PS2 TXD texture. PC header: OpenDrakan
@@ -294,6 +294,8 @@ export interface Ps2TextureOptions {
     fps?: number;
     /** u32 at header +40 (disc: a per-container counter, 0 in splat textures; meaning unknown). */
     slot?: number;
+    /** Defer the global lossless-image sink until a caller finalizes the encoded metadata; `exact` remains available. */
+    deferExact?: boolean;
 }
 
 export interface Ps2Texture {
@@ -319,8 +321,8 @@ let exactSink: ((body: Uint8Array, exact: RgbaImage) => void) | null = null;
 export function setExactSink(fn: ((body: Uint8Array, exact: RgbaImage) => void) | null): void {
     exactSink = fn;
 }
-function lossyResult(t: Ps2Texture, exact: RgbaImage): Ps2Texture {
-    exactSink?.(t.body, exact);
+function lossyResult(t: Ps2Texture, exact: RgbaImage, emit = true): Ps2Texture {
+    if (emit) exactSink?.(t.body, exact);
     return { ...t, exact };
 }
 
@@ -428,7 +430,7 @@ export function encodePs2Texture(src: RgbaImage, opt: Ps2TextureOptions = {}): P
         for (let i = palette.length / 4; i < 256; i++) body[0x40 + 16 + i * 4 + 3] = PS2_OPAQUE;
         for (let i = 0; i < px; i++) body[0x40 + 16 + 1024 + i] = lookup(i);
         const t8: Ps2Texture = { body, width: w, height: h, bpp: 8, hasAlpha, lossy };
-        return lossy ? lossyResult(t8, img) : t8;
+        return lossy ? lossyResult(t8, img, !opt.deferExact) : t8;
     }
     if (mode === 'truecolor') {
         const body = new Uint8Array(0x40 + px * 4);
@@ -451,7 +453,60 @@ export function encodePs2Texture(src: RgbaImage, opt: Ps2TextureOptions = {}): P
         const b = img.rgba[i * 4 + 2]! >> 3;
         dv.setUint16(0x40 + i * 2, r | (g << 5) | (b << 10) | (img.rgba[i * 4 + 3]! >= 128 ? 0x8000 : 0), true);
     }
-    return lossyResult({ body, width: w, height: h, bpp: 16, hasAlpha, lossy: true }, img);
+    return lossyResult({ body, width: w, height: h, bpp: 16, hasAlpha, lossy: true }, img, !opt.deferExact);
+}
+
+/**
+ * Upgrade a converted texture in place for native fast item drawing. null means it already fits.
+ * Preserve opacity/animation semantics: decoded PS2 opaque alpha is 254, not a reason to enable blending.
+ */
+export function upgradeIndexedSquareTexture(body: Uint8Array): Ps2Texture | null {
+    const source = decodeTxd(body, { upright: false });
+    if (!ps2TextureSizeOk(source.width, source.height))
+        throw new OotfTextureError('unsupported fast-draw texture size');
+    if (source.bpp === 8 && source.width === source.height) return null;
+    const size = Math.max(source.width, source.height);
+    if (source.bpp === 8) {
+        // Preserve the authored palette verbatim (including every alpha byte). Only resize the index plane.
+        const paletteBytes = source.paletteKind === 1 ? 1024 : 512;
+        const planeAt = 0x40 + 16 + paletteBytes;
+        const dv = view(body);
+        const indices = source.zlibPlane
+            ? inflate(body.subarray(planeAt + 4, planeAt + 4 + dv.getUint32(planeAt, true)))
+            : body.subarray(planeAt);
+        if (!indices || indices.length !== source.width * source.height)
+            throw new OotfTextureError('invalid indexed fast-draw texture plane');
+        const next = new Uint8Array(planeAt + size * size);
+        next.set(body.subarray(0, planeAt));
+        const out = view(next);
+        out.setUint32(0, size, true);
+        out.setUint32(4, size, true);
+        out.setUint32(8, size, true);
+        for (let y = 0; y < size; y++)
+            for (let x = 0; x < size; x++)
+                next[planeAt + y * size + x] =
+                    indices[
+                        Math.floor((y * source.height) / size) * source.width + Math.floor((x * source.width) / size)
+                    ]!;
+        return { body: next, width: size, height: size, bpp: 8, hasAlpha: (body[37]! & 2) !== 0, lossy: false };
+    }
+    // Resample before encoding, so opaque enlargement cannot select the separate smoothing path.
+    const image = resampleNearest(source, size, size);
+    for (let i = 3; i < image.rgba.length; i += 4) if (image.rgba[i] === 254) image.rgba[i] = 255;
+    const old = view(body);
+    const upgraded = encodePs2Texture(image, {
+        mode: 'indexed',
+        maxSize: size,
+        square: true,
+        fps: body[36]!,
+        slot: old.getUint32(40, true),
+        deferExact: true,
+    });
+    upgraded.body.set(body.subarray(36, 64), 36);
+    upgraded.body[38] = 0; // representation flag: the upgraded pixel/index plane is 8 bpp
+    upgraded.hasAlpha = (body[37]! & 2) !== 0;
+    if (upgraded.lossy && upgraded.exact) exactSink?.(upgraded.body, upgraded.exact);
+    return upgraded;
 }
 
 /** Does the PS2 record already fit the PS2 rules (used to decide whether a PC texture needs re-encoding). */

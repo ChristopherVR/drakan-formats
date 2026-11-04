@@ -15,3 +15,19 @@ export function requireGenericPropDrawLists(
         owner(target.file, model.db)?.requireDisplayList(model.id);
     }
 }
+
+interface RigidWeaponDrawOwner {
+    requireRigidWeaponDisplayList(id: number): boolean;
+}
+
+/** Melee eligibility is separate from generic props: only the owning builder can validate its authored sphere chain. */
+export function requireRigidWeaponDrawLists(
+    plan: Pick<ClassPlan, 'synthesized'>,
+    owner: (file: string, db: number) => RigidWeaponDrawOwner | undefined,
+): void {
+    for (const target of plan.synthesized) {
+        const model = target.cls.model;
+        if (target.rfl !== 14 || !model) continue;
+        owner(target.file, model.db)?.requireRigidWeaponDisplayList(model.id);
+    }
+}

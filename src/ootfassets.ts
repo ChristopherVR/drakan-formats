@@ -21,6 +21,7 @@ import {
     encodePs2Texture,
     isSkip,
     readPcTexture,
+    upgradeIndexedSquareTexture,
 } from './ootftex.ts';
 import { type PcFileSource, type PcLevel, resolvePcPath } from './pc.ts';
 import { SrscReader } from './srsc.ts';
@@ -442,6 +443,69 @@ export class OotfAssetBuilder {
             existing.records = [...writePs2ModelRecords(dl.model), { type: MOD_DISPLAY_LIST, data: dl.record }];
         }
         return true;
+    }
+
+    /** Rigid native melee weapons require a nonempty authored sphere hierarchy; never approximate it with boxes. */
+    requireRigidWeaponDisplayList(id: number): boolean {
+        const existing = this.models.find((m) => m.id === id);
+        if (!existing) return false;
+        const bounds = existing.model.bounds ?? existing.records?.find((r) => r.type === MOD_BOUNDS)?.data;
+        const count = bounds ? sphereHierarchyCount(bounds) : null;
+        if (existing.records?.some((r) => r.type === MOD_CHARACTER) || count === null || count === 0) {
+            const warning = `model ${existing.key}: native rigid weapon requires a nonempty authored sphere hierarchy; draw upgrade skipped`;
+            if (!this.report.warnings.includes(warning)) this.report.warnings.push(warning);
+            return false;
+        }
+        // Keep existing ids/cache keys: a shared texture's format demand upgrades its stored representation in place.
+        const frames = new Set<number>();
+        for (const ref of existing.model.textures) {
+            if (ref.db !== 0) {
+                const warning = `model ${existing.key}: rigid weapon texture is outside the owning asset builder; draw upgrade skipped`;
+                if (!this.report.warnings.includes(warning)) this.report.warnings.push(warning);
+                return false;
+            }
+            let base = ref.id,
+                count = 1;
+            for (const [candidate, length] of this.texFrames)
+                if (ref.id >= candidate && ref.id < candidate + length) {
+                    base = candidate;
+                    count = length;
+                    break;
+                }
+            for (let frame = base; frame < base + count; frame++) frames.add(frame);
+        }
+        const changes: {
+            stored: { id: number; body: Uint8Array };
+            next: ReturnType<typeof upgradeIndexedSquareTexture>;
+        }[] = [];
+        try {
+            for (const frame of frames) {
+                const stored = this.texBodies.find((t) => t.id === frame);
+                if (!stored) throw new Error(`texture ${frame} is not owned by the asset builder`);
+                changes.push({ stored, next: upgradeIndexedSquareTexture(stored.body) });
+            }
+        } catch (error) {
+            const warning = `model ${existing.key}: rigid weapon texture upgrade failed (${error instanceof Error ? error.message : String(error)})`;
+            if (!this.report.warnings.includes(warning)) this.report.warnings.push(warning);
+            return false;
+        }
+        for (const { stored, next } of changes) {
+            if (!next) continue;
+            const oldBpp = new DataView(stored.body.buffer, stored.body.byteOffset, stored.body.byteLength).getUint32(
+                12,
+                true,
+            );
+            this.report.textures.bytes += next.body.length - stored.body.length;
+            if (oldBpp !== next.bpp) {
+                const previous = (this.report.textures.byBpp[oldBpp] ?? 0) - 1;
+                if (previous > 0) this.report.textures.byBpp[oldBpp] = previous;
+                else delete this.report.textures.byBpp[oldBpp];
+                this.report.textures.byBpp[next.bpp] = (this.report.textures.byBpp[next.bpp] ?? 0) + 1;
+            }
+            if (next.lossy) this.report.textures.lossy++;
+            stored.body = next.body;
+        }
+        return this.requireDisplayList(id);
     }
 
     /**

@@ -14,6 +14,8 @@ import {
     quantizeRgba,
     resampleNearest,
     setExactSink,
+    upgradeIndexedSquareTexture,
+    PC_TEX_NEXT_FRAME,
 } from '../src/ootftex.ts';
 import type { PcFileSource, PcLevel } from '../src/pc.ts';
 
@@ -238,6 +240,78 @@ describe('PS2 texture encode', () => {
         expect(r.find(0x402, 0)).toBeDefined();
         expect(r.find(0x40, 1)!.size).toBe(t.body.length);
         expect(() => buildPs2Txd([{ id: 0, body: t.body }])).toThrow();
+    });
+});
+
+describe('native item texture representation upgrades', () => {
+    it.each([1, 2])('resizes only the index plane and preserves palette kind %i and metadata verbatim', (kind) => {
+        const encoded = encodePs2Texture(
+            {
+                width: 16,
+                height: 8,
+                rgba: Uint8Array.from({ length: 16 * 8 * 4 }, (_, i) => (i % 4 === 3 ? 255 : (i * 7) & 255)),
+            },
+            { mode: 'indexed', fps: 13, slot: 77 },
+        );
+        const paletteBytes = kind === 1 ? 1024 : 512,
+            planeAt = 80 + paletteBytes;
+        let body = encoded.body;
+        if (kind === 2) {
+            const next = new Uint8Array(planeAt + 128);
+            next.set(body.subarray(0, 80));
+            const dv = new DataView(next.buffer);
+            dv.setUint32(64, 2, true);
+            for (let i = 0; i < 256; i++) dv.setUint16(80 + i * 2, i | (i % 2 ? 0x8000 : 0), true);
+            next.set(body.subarray(1104), planeAt);
+            body = next;
+        } else {
+            for (let i = 0; i < 4; i++) body[83 + i * 4] = [0, 64, 127, 128][i]!;
+        }
+        body[37] = 2 | PC_TEX_NEXT_FRAME;
+        new DataView(body.buffer).setFloat32(44, 1.75, true);
+        const frozen = body.slice(),
+            original = decodeTxd(body, { upright: false });
+        const upgraded = upgradeIndexedSquareTexture(body)!;
+        expect(body).toEqual(frozen);
+        expect([upgraded.width, upgraded.height, upgraded.bpp]).toEqual([16, 16, 8]);
+        expect(upgraded.lossy).toBe(false);
+        expect(upgraded.body.slice(16, planeAt)).toEqual(body.slice(16, planeAt));
+        const image = decodeTxd(upgraded.body, { upright: false });
+        const expected = new Uint8Array(image.rgba.length);
+        for (let y = 0; y < 16; y++)
+            expected.set(original.rgba.subarray(Math.floor(y / 2) * 64, Math.floor(y / 2) * 64 + 64), y * 64);
+        expect(image.rgba).toEqual(expected);
+        expect(upgradeIndexedSquareTexture(upgraded.body)).toBeNull();
+    });
+
+    it('emits lossy exact images only after final opaque/animation metadata is applied', () => {
+        const rgba = Uint8Array.from({ length: 32 * 16 * 4 }, (_, i) => {
+            const pixel = Math.floor(i / 4),
+                x = pixel % 32,
+                y = Math.floor(pixel / 32);
+            return [x * 7, y * 13, (x ^ y) * 5, 255][i % 4]!;
+        });
+        const original = encodePs2Texture({ width: 32, height: 16, rgba }, { mode: 'truecolor', fps: 17, slot: 91 });
+        expect(original.bpp).toBe(32);
+        original.body[37] = PC_TEX_NEXT_FRAME;
+        new DataView(original.body.buffer).setFloat32(44, 2.5, true);
+        const emitted: Uint8Array[] = [];
+        try {
+            setExactSink((body, exact) => {
+                emitted.push(body.slice());
+                expect([exact.width, exact.height]).toEqual([32, 32]);
+            });
+            const next = upgradeIndexedSquareTexture(original.body)!;
+            expect(next.lossy).toBe(true);
+            expect(next.bpp).toBe(8);
+            expect(next.body[37]).toBe(PC_TEX_NEXT_FRAME); // decoded opaque alpha254 must not enable blending
+            expect(next.body[38]).toBe(0);
+            expect(next.body.slice(40, 64)).toEqual(original.body.slice(40, 64));
+            expect(new DataView(next.body.buffer).getUint32(16, true)).toBe(0);
+            expect(emitted).toEqual([next.body]); // the HD hash sees final bytes, never the pre-metadata encoding
+        } finally {
+            setExactSink(null);
+        }
     });
 });
 
@@ -553,6 +627,7 @@ describe('containers and the asset builder', () => {
             const before = await SrscReader.fromBytes(ordinary.build('out', 'test').files['out/TEST.MOD']!);
             const b = new OotfAssetBuilder(local);
             await b.addModelRef('Lvl/Lvl', 0, 5, first);
+            expect(b.requireRigidWeaponDisplayList(2)).toBe(true);
             await b.addModelRef('Lvl/Lvl', 0, 5, true);
             const after = await SrscReader.fromBytes(b.build('out', 'test').files['out/TEST.MOD']!);
             expect(await after.readRaw(after.find(0x207, 2)!)).toEqual(await before.readRaw(before.find(0x207, 2)!));
@@ -572,6 +647,103 @@ describe('containers and the asset builder', () => {
             expect(next.positions.length).toBeGreaterThan(old.positions.length);
             expect(triangles(next)).not.toEqual(triangles(old));
             expect(triangles(next).sort()).toEqual(triangles(old).sort());
+        },
+    );
+
+    it('diagnoses unsupported melee bounds without synthesizing a sphere chain or adding a draw list', async () => {
+        const b = new OotfAssetBuilder(src);
+        await b.addModelRef('Lvl/Lvl', 0, 5);
+        const before = b.build('out', 'test').files['out/TEST.MOD'];
+        expect(b.requireRigidWeaponDisplayList(5941)).toBe(false);
+        expect(b.requireRigidWeaponDisplayList(2)).toBe(false);
+        expect(b.requireRigidWeaponDisplayList(2)).toBe(false);
+        expect(b.build('out', 'test').files['out/TEST.MOD']).toEqual(before);
+        expect(b.report.warnings).toEqual([
+            'model lvl/lvl#5: native rigid weapon requires a nonempty authored sphere hierarchy; draw upgrade skipped',
+        ]);
+    });
+
+    it.each([false, true])(
+        'upgrades shared animated weapon textures without allocating ids (weapon first %s)',
+        async (weaponFirst) => {
+            const sphere = new Uint8Array(88),
+                sd = new DataView(sphere.buffer);
+            sd.setUint16(64, 1, true);
+            sd.setFloat32(84, 2, true);
+            const meshes = [];
+            for (const id of [5, 6]) {
+                const r = await SrscReader.fromBytes(
+                    model(
+                        id,
+                        [
+                            [3, 0],
+                            [8, 1],
+                        ],
+                        false,
+                        0,
+                        sphere,
+                    ),
+                );
+                for (const e of r.entries)
+                    meshes.push({ type: e.type, id: e.id, sub: e.sub, data: await r.readRaw(e) });
+            }
+            const textureRecords = [];
+            for (let frame = 0; frame < 3; frame++) {
+                const data = Array.from({ length: 32 * 16 * 3 }, (_, i) => {
+                    const p = Math.floor(i / 3),
+                        x = p % 32,
+                        y = Math.floor(p / 32);
+                    return [x * 7, y * 13, ((x ^ y) * 5 + frame * 11) & 255][i % 3]!;
+                });
+                textureRecords.push({
+                    type: 0x40,
+                    id: 8 + frame,
+                    sub: 0,
+                    data: pcTex({ w: 32, h: 16, bpp: 24, data, flags: frame ? PC_TEX_NEXT_FRAME : 0 }),
+                });
+            }
+            const meshBytes = writePs2Srsc(meshes),
+                textureBytes = writePs2Srsc(textureRecords);
+            const local: PcFileSource = {
+                ...src,
+                read: async (p) =>
+                    p.toLowerCase() === 'lvl/lvl.mod'
+                        ? meshBytes
+                        : p.toLowerCase() === 'common/c/c.txd'
+                          ? textureBytes
+                          : src.read(p),
+            };
+            const b = new OotfAssetBuilder(local, { texture: { mode: 'truecolor', fps: 17, slot: 91 } });
+            const first = weaponFirst ? 5 : 6,
+                second = weaponFirst ? 6 : 5;
+            expect(await b.addModelRef('Lvl/Lvl', 0, first)).toBe(2);
+            if (weaponFirst) expect(b.requireRigidWeaponDisplayList(2)).toBe(true);
+            expect(await b.addModelRef('Lvl/Lvl', 0, second)).toBe(3);
+            const weaponId = weaponFirst ? 2 : 3;
+            expect(b.requireRigidWeaponDisplayList(weaponId)).toBe(true);
+            expect(await b.addTexture('Lvl/Lvl', 3)).toBe(4); // no :i alias or hidden extra texture ids
+            const built = b.build('out', 'test');
+            expect(b.requireRigidWeaponDisplayList(weaponId)).toBe(true);
+            expect(b.build('out', 'test').files).toEqual(built.files);
+            expect(b.report.textures.converted).toBe(4);
+            expect(b.report.textures.byBpp).toEqual({ 8: 4 });
+            expect(b.report.textures.lossy).toBe(3);
+            const txd = await SrscReader.fromBytes(built.files['out/TEST.TXD']!);
+            expect(txd.entries.filter((e) => e.type === 0x40).map((e) => e.id)).toEqual([1, 2, 3, 4]);
+            for (let frame = 0; frame < 3; frame++) {
+                const body = await txd.readRaw(txd.find(0x40, 1 + frame)!),
+                    image = decodeTxd(body);
+                expect([image.width, image.height, image.bpp]).toEqual([32, 32, 8]);
+                expect(body[36]).toBe(17);
+                expect(body[37]).toBe(frame ? PC_TEX_NEXT_FRAME : 0);
+                expect(new DataView(body.buffer, body.byteOffset, body.byteLength).getUint32(40, true)).toBe(91);
+            }
+            const mod = await SrscReader.fromBytes(built.files['out/TEST.MOD']!);
+            for (const id of [2, 3]) expect((await parseModel(mod, id))!.textures).toEqual([{ id: 1, db: 0 }]);
+            const size = (
+                await Promise.all(txd.entries.filter((e) => e.type === 0x40).map((e) => txd.readRaw(e)))
+            ).reduce((n, r) => n + r.length, 0);
+            expect(b.report.textures.bytes).toBe(size);
         },
     );
 

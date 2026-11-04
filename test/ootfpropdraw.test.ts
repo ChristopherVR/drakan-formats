@@ -1,7 +1,7 @@
 // Synthetic plans only; no game assets.
 import { describe, expect, it, vi } from 'vitest';
 import type { ClassPlan } from '../src/ootfclass.ts';
-import { requireGenericPropDrawLists } from '../src/ootfpropdraw.ts';
+import { requireGenericPropDrawLists, requireRigidWeaponDrawLists } from '../src/ootfpropdraw.ts';
 
 describe('native generic-prop draw requirements', () => {
     it('selects chosen native targets instead of a source runtime-class whitelist', () => {
@@ -30,6 +30,33 @@ describe('native generic-prop draw requirements', () => {
         expect(resolve.mock.calls).toEqual([
             ['RESOURES.ODB', 0],
             ['NPCS.ODB', 1],
+            ['RESOURES.ODB', 9],
+        ]);
+    });
+});
+
+describe('native melee-weapon draw requirements', () => {
+    it('selects only native class 14 and delegates authored-bounds validation to the resolved owner', () => {
+        const target = (rfl: number, model: { id: number; db: number } | null) =>
+            ({ rfl, cls: { model }, file: 'RESOURES.ODB' }) as ClassPlan['synthesized'][number];
+        const host = { requireRigidWeaponDisplayList: vi.fn(() => true) };
+        const resolve = vi.fn((_file: string, db: number) => (db === 0 ? host : undefined));
+        requireRigidWeaponDrawLists(
+            {
+                synthesized: [
+                    target(14, { id: 40, db: 0 }),
+                    target(79, { id: 41, db: 0 }), // bows retain their independent conversion/rig path
+                    target(17, { id: 42, db: 0 }),
+                    target(35, { id: 43, db: 0 }),
+                    target(14, null),
+                    target(14, { id: 44, db: 9 }),
+                ],
+            },
+            resolve,
+        );
+        expect(host.requireRigidWeaponDisplayList.mock.calls).toEqual([[40]]);
+        expect(resolve.mock.calls).toEqual([
+            ['RESOURES.ODB', 0],
             ['RESOURES.ODB', 9],
         ]);
     });
