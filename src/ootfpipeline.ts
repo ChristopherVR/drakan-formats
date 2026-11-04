@@ -1,3 +1,4 @@
+import { buildBowAimMetadata } from './ootfbowaim.ts';
 import { requireGenericPropDrawLists, requireRigidWeaponDrawLists } from './ootfpropdraw.ts';
 import { splitClassRecord } from './odbwrite.ts';
 import { carryStartingInventory } from './ootfstartinventory.ts';
@@ -765,6 +766,9 @@ export async function convertOotfLevels(
                     },
                 ),
             );
+            const bowAim = buildBowAimMetadata(plan, (key) => sourceByKey.get(key));
+            if (bowAim.text) res.files['gameplay/bows.ini'] = strToU8(bowAim.text);
+            res.warnings.push(...bowAim.warnings);
         }
         if (plan && opt.models !== false && hostOk) {
             const drawOwner = (file: string, db: number) => {
