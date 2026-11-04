@@ -1,4 +1,5 @@
 import { splitClassRecord } from './odbwrite.ts';
+import { carryStartingInventory } from './ootfstartinventory.ts';
 import { ootfDebugFlag } from './ootfdebug.ts';
 import { strToU8 } from 'fflate';
 import {
@@ -1516,6 +1517,32 @@ export async function convertOotfLevels(
         const at = (l: OotfLevelOut): number =>
             plan0.byPath.get(normalizeLevelRef(l.pcPath))?.index ?? Number.MAX_SAFE_INTEGER;
         res.levels.sort((a, b) => at(a) - at(b));
+        const sourceByPath = new Map(pcs.map((pc) => [normalizeLevelRef(pc.path), pc]));
+        const startingInventory = carryStartingInventory(
+            res.levels.flatMap((level) => {
+                const source = sourceByPath.get(normalizeLevelRef(level.pcPath));
+                return source && plan0.byPath.has(normalizeLevelRef(level.pcPath))
+                    ? [
+                          {
+                              source,
+                              target: {
+                                  dependencies: level.parts.header.dependencies,
+                                  objects: level.parts.objects,
+                                  objectIdMap: level.parts.objectIdMap,
+                              },
+                          },
+                      ]
+                    : [];
+            }),
+            (object) =>
+                classes.get(object.dbIndex)?.get(object.classId) ??
+                plan?.synthesized.find((s) => s.dbIndex === object.dbIndex && s.classId === object.classId)?.cls,
+        );
+        res.warnings.push(...startingInventory.warnings);
+        if (startingInventory.copied)
+            res.warnings.push(
+                `campaign starting inventory: ${startingInventory.copied} source item(s) linked to the synthetic opening player`,
+            );
     }
 
     // ---- files
