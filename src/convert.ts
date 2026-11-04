@@ -419,8 +419,12 @@ function convertLayer(L: TerrainLayer, pc: PcLevel, opt: ConvertOptions, report:
     }
     const lim = opt.maxTexturesPerLayer ?? layerTexEnv() ?? MAX_LAYER_TEXTURES;
     if (lim > 0) limitLayerTextures(cellTexLeft, L.width, L.height, lim);
+    // Collision belongs to the platform conversion, not the optional opaque/shading rewrite in the pipeline.
+    // Native PS2 collision skips triangles on 0x40/0x80 even when the texture reference is a hole sentinel.
+    const cellFlags = L.cellFlags.map((flags, c) => (flags & ~0xc0) | (cellTexLeft[c] === TEX_HOLE ? 0xc0 : 0));
     return {
         ...L,
+        cellFlags,
         cellTexLeft,
         cellTexRight: cellTexLeft,
         vertexFlags: new Uint16Array(L.heights.length),

@@ -158,7 +158,7 @@ export interface OotfPipelineOptions {
     terrain?: TerrainTextureOptions;
     /** Put the terrain textures in the shared container (OOTFCOM.TXD, own dependency) instead of the splat TXD. */
     terrainInCommon?: boolean;
-    /** Rewrite the PS2 cell flags (high byte 0xff = opaque, see ootfterrain.ts `ps2CellFlags`). Default true. */
+    /** Rewrite PS2 shading flags (high byte 0xff = opaque). Default true; collision holes are always converted. */
     terrainShading?: boolean;
     /** Debug: map each PC terrain texture to one of the template's own terrain textures (tests the blob path without new TXD data). */
     terrainDiscTextures?: boolean;

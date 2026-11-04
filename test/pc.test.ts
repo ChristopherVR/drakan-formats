@@ -437,11 +437,16 @@ describe('PC -> PS2 conversion', () => {
         const terrain = pc.terrain[0]!;
         terrain.cellTexLeft[1] = terrain.cellTexRight[1] = TEX_HOLE;
         terrain.cellTexLeft[2] = terrain.cellTexRight[2] = TEX_INVISIBLE;
-        terrain.cellFlags[0] = 0x0d;
+        terrain.cellFlags[0] = 0xcd;
         terrain.cellFlags[1] = 1;
-        terrain.cellFlags[2] = 1;
+        terrain.cellFlags[2] = 0xc1;
         const converted = convertPcLevel(pc, { template: { header: h, classes }, textureFallback: 0x00090042 });
         const layer = converted.terrain[0]!;
+        // Direct conversion (also used with terrainShading:false) must already have native collision semantics.
+        expect([...layer.cellFlags].slice(0, 3)).toEqual([0x0d, 0xc1, 1]);
+        expect([...terrain.cellFlags].slice(0, 3)).toEqual([0xcd, 1, 0xc1]); // source untouched
+        const direct = parsePs2Terrain(writePs2Terrain([layer], () => new Uint8Array(16)))[0]!;
+        expect([...direct.cellFlags].slice(0, 3)).toEqual([0x0d, 0xc1, 1]);
         layer.cellFlags = ps2CellFlags(layer, 0x0d);
         const payload = writePs2Terrain([layer], () => new Uint8Array(16));
         const native = await SrscReader.fromBytes(buildPs2Srsc([{ type: 1, id: 0, sub: 0, data: payload }]));
