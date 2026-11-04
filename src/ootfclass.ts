@@ -67,6 +67,7 @@ export interface EngineClassInfo {
  */
 const ENGINE_LIST: readonly [number, string, ClassKind][] = [
     [1, 'Expanding / Fading Effect', 'fx'],
+    [3, 'Radius Damage', 'fx'],
     [6, 'Looping/Triggered Sound', 'sound'],
     [7, 'Count Down To Zero', 'logic'],
     [8, 'Weapon Projectile', 'weapon'],
