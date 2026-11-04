@@ -36,6 +36,35 @@ describe('native generic-prop draw requirements', () => {
 });
 
 describe('native melee-weapon draw requirements', () => {
+    it('requests bow draw upgrades only after verified complete rigid-template selection', () => {
+        const target = (rfl: number, id: number, rigidBowTemplate?: boolean, db = 0) =>
+            ({
+                rfl,
+                rigidBowTemplate,
+                cls: { model: { id, db } },
+                file: 'RESOURES.ODB',
+            }) as ClassPlan['synthesized'][number];
+        const host = { requireRigidWeaponDisplayList: vi.fn(() => true) };
+        const resolve = vi.fn((_file: string, db: number) => (db === 0 ? host : undefined));
+        requireRigidWeaponDrawLists(
+            {
+                synthesized: [
+                    target(79, 10, true),
+                    target(79, 11),
+                    target(79, 12, false),
+                    target(95, 13, true),
+                    target(79, 14, true, 9),
+                ],
+            },
+            resolve,
+        );
+        expect(host.requireRigidWeaponDisplayList.mock.calls).toEqual([[10]]);
+        expect(resolve.mock.calls).toEqual([
+            ['RESOURES.ODB', 0],
+            ['RESOURES.ODB', 9],
+        ]);
+    });
+
     it('selects only native class 14 and delegates authored-bounds validation to the resolved owner', () => {
         const target = (rfl: number, model: { id: number; db: number } | null) =>
             ({ rfl, cls: { model }, file: 'RESOURES.ODB' }) as ClassPlan['synthesized'][number];

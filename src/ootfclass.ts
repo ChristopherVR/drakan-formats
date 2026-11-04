@@ -367,6 +367,8 @@ export interface Unsupported {
 }
 
 export interface Synthesized {
+    /** Converted engine79 model was explicitly rigid and selected a complete native rigid Bow template. */
+    rigidBowTemplate?: boolean;
     /** `${db}:${id}` of every PC class folded into this record (identical result). */
     pcKeys: string[];
     name: string;
@@ -1087,6 +1089,7 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
         const prev = done.get(sig);
         if (prev) {
             prev.pcKeys.push(key);
+            if (rigidBow) prev.rigidBowTemplate = true;
             continue;
         }
         const newId = nextId(c.odb.file);
@@ -1128,6 +1131,7 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
             data: m.data,
         };
         const s: Synthesized = {
+            rigidBowTemplate: rigidBow || undefined,
             pcKeys: [key],
             name,
             file: c.odb.file,

@@ -445,7 +445,7 @@ export class OotfAssetBuilder {
         return true;
     }
 
-    /** Rigid native melee weapons require a nonempty authored sphere hierarchy; never approximate it with boxes. */
+    /** Guard rigid weapon draw upgrades with a nonempty authored sphere hierarchy; never approximate it with boxes. */
     requireRigidWeaponDisplayList(id: number): boolean {
         const existing = this.models.find((m) => m.id === id);
         if (!existing) return false;

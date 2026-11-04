@@ -207,11 +207,14 @@ describe('ootfclass', () => {
             planClassMapping([{ db: 1, id: 1, cls: source }], [native], { ...options, modelSkinned });
         const converted = run(() => false).synthesized[0]!;
         expect(converted.template.classId).toBe(rigid.id);
+        expect(converted.rigidBowTemplate).toBe(true);
         expect(converted.cls.data).toEqual([f32(1.75), 0]); // source rate, complete rigid template's animation policy
         const body = splitClassRecord(converted.record).body;
         expect(new DataView(body.buffer, body.byteOffset).getUint32(6, true)).toBe(1);
         expect(run(() => true).synthesized[0]!.template.classId).toBe(animated.id);
         expect(run().synthesized[0]!.template.classId).toBe(animated.id); // unknown source layout is not guessed
+        expect(run().synthesized[0]!.rigidBowTemplate).toBeUndefined();
+        expect(run(() => true).synthesized[0]!.rigidBowTemplate).toBeUndefined();
         native.classes.delete(rigid.id);
         expect(run(() => false).synthesized).toHaveLength(0);
         expect(run(() => false).unsupported.get('1:1')?.reason).toBe('no-raw-record');
