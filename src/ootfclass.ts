@@ -62,12 +62,14 @@ export interface EngineClassInfo {
 }
 
 /**
- * Engine classes placed in the 23 OotF levels (80 ids). Names: OpenDrakan's class list where it has one, else the
+ * Engine classes placed in the 23 OotF levels, plus referenced-only effects/projectiles. Names: OpenDrakan's class list where it has one, else the
  * dominant PC/PS2 class name and group of that id. The kind is a judgement from names, fields and PS2 usage.
  */
 const ENGINE_LIST: readonly [number, string, ClassKind][] = [
+    [1, 'Expanding / Fading Effect', 'fx'],
     [6, 'Looping/Triggered Sound', 'sound'],
     [7, 'Count Down To Zero', 'logic'],
+    [8, 'Weapon Projectile', 'weapon'],
     [9, 'Rynn (Human Control)', 'player'],
     [10, 'Health Potion', 'item'],
     [13, 'Switch / Lever / Button', 'mechanism'],
@@ -99,6 +101,7 @@ const ENGINE_LIST: readonly [number, string, ClassKind][] = [
     [54, 'Level Properties', 'system'],
     [55, 'Level Transition', 'logic'],
     [57, 'Dragon Power-up', 'item'],
+    [58, 'Lightning Bolt', 'weapon'],
     [59, 'Giant', 'creature'],
     [61, 'Detector (trigger volume)', 'logic'],
     [62, 'Timer', 'logic'],

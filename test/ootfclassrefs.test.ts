@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { decodeFieldValue } from '../src/fields.ts';
-import type { OdbClass } from '../src/odb.ts';
+import { parseClassBody, type OdbClass } from '../src/odb.ts';
 import { buildPlainClassRecord, mergeDefaults, planClassMapping, type Ps2OdbIn } from '../src/ootfclass.ts';
 import { classReferenceClosure, ownedClassKey, relocateClassDefaultReferences } from '../src/ootfclassrefs.ts';
+import { joinClassRecord, splitClassRecord } from '../src/odbwrite.ts';
 
 function generator(id: number, name: string, refs: number[]): OdbClass {
     return {
@@ -36,6 +37,109 @@ function native(): Ps2OdbIn {
 }
 
 describe('OotF class reference defaults', () => {
+    it('converts referenced lightning, projectile and fading-effect models instead of dropping their engine kinds', () => {
+        const make = (id: number, name: string, rfl: number, fields: [string, number][], data: number[]): OdbClass => ({
+            id,
+            name,
+            group: 1,
+            runtimeClass: 0x10000 + rfl,
+            rflClass: rfl,
+            model: { id: id + 100, db: 0 },
+            fields: fields.map(([name, type]) => ({ name, type })),
+            data,
+        });
+        const raw = (c: OdbClass): Uint8Array => {
+            const b = new Uint8Array(94 + c.data!.length * 4),
+                dv = new DataView(b.buffer);
+            dv.setUint16(0, 1, true);
+            dv.setUint16(2, c.model!.id, true);
+            dv.setUint16(80, c.rflClass!, true);
+            dv.setUint32(86, c.fields!.length, true);
+            dv.setUint32(90, c.data!.length, true);
+            c.data!.forEach((v, i) => dv.setUint32(94 + i * 4, v, true));
+            return joinClassRecord(c.name, b);
+        };
+        const projectile = make(
+            13,
+            'Source Sonic Boom',
+            8,
+            [
+                ['Damage', 1],
+                ['Life Time (sec)', 2],
+            ],
+            [25, 0x40000000],
+        );
+        const lightning = make(
+            14,
+            'Source Soul Lightning',
+            58,
+            [
+                ['Damage', 1],
+                ['Width (wu)', 2],
+            ],
+            [0, 0x42480000],
+        );
+        const cloud = make(
+            15,
+            'Source Fire Cloud',
+            1,
+            [
+                ['Initial Scale', 2],
+                ['Maximum Scale', 2],
+            ],
+            [0x3f800000, 0x40000000],
+        );
+        const creature = make(
+            12,
+            'Source Ebon Dragon',
+            30,
+            [
+                ['Initial Health', 1],
+                ['Weapon Objects', 0x1003],
+            ],
+            [200, (1 << 16) | 2, 13],
+        );
+        const gen = generator(11, 'Source Soul Generator', [14, 15]);
+        const originals = [gen, creature, projectile, lightning, cloud];
+        const templates = originals.map((c) => ({ ...c, id: c.id + 100, name: `Native ${c.rflClass}` }));
+        const records = new Map(templates.filter((c) => c.model).map((c) => [c.id, raw(c)]));
+        const odb: Ps2OdbIn = {
+            file: 'FX.ODB',
+            dbIndex: 4,
+            classes: new Map(templates.map((c) => [c.id, c])),
+            raw: (id) => records.get(id),
+        };
+        const plan = planClassMapping(
+            originals.map((cls) => ({ db: 1, id: cls.id, cls })),
+            [odb],
+            {
+                modelFor: (c) => (c.model ? { id: c.model.id + 1000, db: 0 } : null),
+            },
+        );
+        expect(plan.unsupported.size).toBe(0);
+        const byId = new Map(originals.map((c) => [c.id, c]));
+        expect(
+            relocateClassDefaultReferences(
+                plan,
+                (key) => byId.get(Number(key.split(':')[1])),
+                (_key, ref) => plan.resolve(1, ref)?.classId ?? null,
+            ),
+        ).toEqual([]);
+        for (const source of [projectile, lightning, cloud]) {
+            const target = plan.resolve(1, source.id)!;
+            expect(target.cls!.rflClass).toBe(source.rflClass);
+            expect(target.cls!.model).toEqual({ id: source.model!.id + 1000, db: 0 });
+            expect(
+                parseClassBody(
+                    splitClassRecord(plan.synthesized.find((s) => s.classId === target.classId)!.record).body,
+                )!.data,
+            ).toEqual(target.cls!.data);
+        }
+        const convertedCreature = plan.resolve(1, creature.id)!.cls!;
+        expect(decodeFieldValue(0x1003, convertedCreature.data![1]!, convertedCreature.data!)).toEqual([
+            plan.resolve(1, projectile.id)!.classId,
+        ]);
+    });
     it('relocates a typed class array and never retains a foreign template effect when mapping fails', () => {
         const pc = generator(1, 'PC generator', [0x10007, 0x20008]);
         const tpl = generator(10, 'Native generator', [0x187a, 0x18ec]);
