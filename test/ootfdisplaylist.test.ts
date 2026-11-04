@@ -110,6 +110,85 @@ describe('0x0211 decoder', () => {
 });
 
 describe('0x0211 encoder', () => {
+    it('counts internal block padding when flushing a batch and retains its vertex window', () => {
+        const quad = grid(1);
+        const polygons = Array.from({ length: 85 }, (_, i) =>
+            quad.polygons.map((p) => ({ ...p, uvs: p.uvs.map((v) => v + i * 4) })),
+        ).flat();
+        const out = buildDisplayList({ positions: Float32Array.from(quad.positions), polygons }, { sameWinding: true });
+        const dl = decodeDisplayList(out.record);
+        // 85 four-element strips plus terminators fit 448 without padding; the native 64-element blocks do not.
+        expect(dl.batches).toHaveLength(2);
+        expect(dl.batches.map((b) => b.triangles)).toEqual([168, 2]);
+        expect(dl.batches[0]!.loads).toEqual([{ group: 0, slot: 0 }]);
+        expect(dl.batches[1]!.loads).toEqual([]);
+        const triangles = expandTriangles(dl);
+        expect(triangles).toHaveLength(170);
+        expect(triangles.flatMap((t) => t.u).sort((a, b) => a - b)).toEqual(
+            polygons.flatMap((p) => p.indices.map((_, i) => p.uvs[i * 2]!)).sort((a, b) => a - b),
+        );
+    });
+
+    it.each([false, true])(
+        'bounds long strips without changing oriented triangles or UVs (same winding %s)',
+        (sameWinding) => {
+            const oriented = (vertices: number[], u: number[], v: number[]): string => {
+                const corners = vertices.map((vertex, i) => `${vertex}:${u[i]}:${v[i]}`);
+                return corners.map((_, i) => [...corners.slice(i), ...corners.slice(0, i)].join('/')).sort()[0]!;
+            };
+            for (const count of [30, 31, 32, 58, 59, 86, 222]) {
+                const positions = Float32Array.from(Array.from({ length: count }, (_, i) => [i >> 1, i % 2, 0]).flat());
+                const polygons: NeutralPoly[] = Array.from({ length: count - 2 }, (_, i) => {
+                    const indices = i % 2 ? [i + 1, i, i + 2] : [i, i + 1, i + 2];
+                    if (!sameWinding) indices.reverse();
+                    return { flags: 0, texture: 0, indices, uvs: indices.flatMap((v) => [v / 128, (v % 2) / 2]) };
+                });
+                const out = buildDisplayList({ positions, polygons }, { sameWinding });
+                const dl = decodeDisplayList(out.record);
+                const raw = new DataView(out.record.buffer, out.record.byteOffset, out.record.byteLength);
+                let at = 12 + (2 * raw.getUint32(4, true) - 1) * 4;
+                const batches = raw.getUint32(at, true);
+                at += 8;
+                for (let batch = 0; batch < batches; batch++) {
+                    at += 4 + raw.getUint32(at, true) * 2;
+                    const cap = raw.getUint32(at + 4, true);
+                    at += 8;
+                    expect(cap).toBeLessThanOrEqual(448);
+                    let start = -1;
+                    for (let i = 0; i < cap; i++) {
+                        if (out.record[at + i]) {
+                            if (start < 0) start = i;
+                        } else {
+                            if (start >= 0) expect(Math.floor(i / 64)).toBe(Math.floor(start / 64));
+                            start = -1;
+                            expect(raw.getFloat32(at + cap + 4 + i * 8, true)).toBe(0);
+                            expect(raw.getFloat32(at + cap + 8 + i * 8, true)).toBe(0);
+                        }
+                    }
+                    expect(start).toBe(-1);
+                    at += cap + 4 + cap * 8 + 4;
+                }
+                const strips = dl.batches.flatMap((b) => b.strips);
+                expect(Math.max(...strips.map((s) => s.slots.length))).toBe(30);
+                expect(strips).toHaveLength(Math.ceil((count - 2) / 28));
+                const actual = expandTriangles(dl)
+                    .map((t) => oriented(t.vertices, t.u, t.v))
+                    .sort();
+                const expected = polygons
+                    .map((p) => {
+                        const order = sameWinding ? [0, 1, 2] : [2, 1, 0];
+                        return oriented(
+                            order.map((i) => p.indices[i]!),
+                            order.map((i) => p.uvs[i * 2]!),
+                            order.map((i) => p.uvs[i * 2 + 1]!),
+                        );
+                    })
+                    .sort();
+                expect(actual).toEqual(expected);
+            }
+        },
+    );
+
     it('round-trips a small two texture model through the decoder', () => {
         const m = model([grid(3, 0), grid(2, 1, 16)]);
         const out = buildDisplayList(m);

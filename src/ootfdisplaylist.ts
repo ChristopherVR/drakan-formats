@@ -36,13 +36,23 @@ import type { NeutralModel, NeutralPoly } from './ootfmodel.ts';
  * vertex exists once, vertices are grouped by primary joint into small groups (default 48 vertices, 16 joints), a batch loads
  * every group its triangles touch packed from slot 0 (disc Rynn: 24 groups, 10 batches, up to 7 loads each); `source` is then a
  * permutation plus pad vertices and the 0x0204 polygons keep their shape. Strips are built greedily; orientation follows the
- * majority on the disc (strip parity corrected, opposite to the 0x0204 winding).
+ * majority on the disc (strip parity corrected, opposite to the 0x0204 winding). Strips have at most 30 elements,
+ * and zero/UV padding keeps each strip and its terminator inside one 64-element block, matching the native lists.
  */
 
 export class DisplayListError extends Error {}
 
 export const DL_MAX_WINDOW = 225;
 const MAX_BATCH_ELEMENTS = 448;
+// All 139,353 strips in 1,593 audited PAL models contain at most 30 elements.
+// Longer imported strips produce missing wedges in both the native VU interpreter and AOT path.
+const MAX_STRIP_ELEMENTS = 30;
+const STRIP_BLOCK_ELEMENTS = 64;
+
+const stripStart = (at: number, length: number): number =>
+    (at % STRIP_BLOCK_ELEMENTS) + length + 1 > STRIP_BLOCK_ELEMENTS
+        ? Math.ceil(at / STRIP_BLOCK_ELEMENTS) * STRIP_BLOCK_ELEMENTS
+        : at;
 
 export interface DlStrip {
     /** Window slots (0-based), one per element. */
@@ -539,7 +549,14 @@ export function buildDisplayList(
     }
     const batches: Batch[] = [];
     for (const bp of plan) {
-        const strips = stripify(bp.tris, opt.sameWinding === true);
+        const strips = stripify(bp.tris, opt.sameWinding === true).flatMap((s) => {
+            const parts: Elem[][] = [];
+            // Carry the last two vertices into each continuation. Advancing by 28 triangles is even,
+            // so restarting strip parity preserves winding, corner UVs and the exact triangle set.
+            for (let start = 0; start + 2 < s.length; start += MAX_STRIP_ELEMENTS - 2)
+                parts.push(s.slice(start, start + MAX_STRIP_ELEMENTS));
+            return parts;
+        });
         let cur: Elem[][] = [];
         let el = 0;
         let first = true;
@@ -556,9 +573,9 @@ export function buildDisplayList(
             el = 0;
         };
         for (const s of strips) {
-            if (el + s.length + 1 > MAX_BATCH_ELEMENTS) flush();
+            if (stripStart(el, s.length) + s.length + 1 > MAX_BATCH_ELEMENTS) flush();
             cur.push(s);
-            el += s.length + 1;
+            el = stripStart(el, s.length) + s.length + 1;
         }
         flush();
     }
@@ -580,12 +597,19 @@ export function buildDisplayList(
             o.u8(l.slot);
         }
         o.u32(b.triangles);
-        const elements = b.strips.reduce((a, s) => a + s.length + 1, 0);
+        const elements = b.strips.reduce((a, s) => stripStart(a, s.length) + s.length + 1, 0);
         const cap = Math.ceil(elements / 64) * 64;
         o.u32(cap);
         const stream: number[] = [];
         const uv: number[] = [];
         for (const s of b.strips) {
+            // The native consumer processes 64-element blocks independently. A strip and its terminator
+            // must stay inside one block; mirror the disc's zero/UV padding before crossing that boundary.
+            const start = stripStart(stream.length, s.length);
+            while (stream.length < start) {
+                stream.push(0);
+                uv.push(0, 0);
+            }
             for (const e of s) {
                 if (e.vertex + 1 > 255) throw new DisplayListError('window slot above 254');
                 stream.push(e.vertex + 1);
