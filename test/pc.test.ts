@@ -1,8 +1,12 @@
 // Synthetic Order of the Flame fixtures only; no game bytes.
 import { zlibSync } from 'fflate';
 import { describe, expect, it } from 'vitest';
+import { ps2CellFlags } from '../src/ootfterrain.ts';
 import {
     SrscReader,
+    TEX_HOLE,
+    TEX_INVISIBLE,
+    ps2TerrainBlock,
     buildOdbIndex,
     convertPcLevel,
     loadPcLevel,
@@ -403,6 +407,50 @@ describe('PC -> PS2 conversion', () => {
                 expect(parseObjectList(payload).objects[0]!.rot).toEqual(rot);
             }
         }
+    });
+
+    it('serializes hole-aware adjacency without removing invisible collision cells', async () => {
+        const { pc, h, classes } = await fixture();
+        const terrain = pc.terrain[0]!;
+        terrain.cellTexLeft[1] = terrain.cellTexRight[1] = TEX_HOLE;
+        terrain.cellTexLeft[2] = terrain.cellTexRight[2] = TEX_INVISIBLE;
+        const converted = convertPcLevel(pc, { template: { header: h, classes }, textureFallback: 0x00090042 });
+        const layer = converted.terrain[0]!;
+        const expected = [8, 4, 8, 4, 10, 13, 14, 5, 2, 3, 3, 1];
+        expect([...layer.vertexMask]).toEqual(expected);
+        const block = ps2TerrainBlock(layer);
+        const dv = new DataView(block.buffer, block.byteOffset, block.byteLength);
+        expect(expected.map((_, i) => dv.getUint16(i * 6 + 2, true))).toEqual(expected);
+        // The hole's four quadrant bits are clear; the next invisible cell retains its collision adjacency.
+        for (const [vertex, bit] of [[1, 8], [2, 4], [5, 2], [6, 1]] as const) {
+            expect(dv.getUint16(vertex * 6 + 2, true) & bit).toBe(0);
+        }
+        const payload = writePs2Terrain([layer], () => new Uint8Array(16));
+        const native = await SrscReader.fromBytes(buildPs2Srsc([{ type: 1, id: 0, sub: 0, data: payload }]));
+        const serialized = parsePs2Terrain(await native.readRaw(native.entries[0]!))[0]!;
+        expect([...serialized.vertexMask]).toEqual(expected);
+        expect([...serialized.cellTexLeft].slice(1, 3)).toEqual([TEX_HOLE, TEX_INVISIBLE]);
+    });
+
+    it('writes native triangle collision flags for holes while retaining invisible floors', async () => {
+        const { pc, h, classes } = await fixture();
+        const terrain = pc.terrain[0]!;
+        terrain.cellTexLeft[1] = terrain.cellTexRight[1] = TEX_HOLE;
+        terrain.cellTexLeft[2] = terrain.cellTexRight[2] = TEX_INVISIBLE;
+        terrain.cellFlags[0] = 0x0d;
+        terrain.cellFlags[1] = 1;
+        terrain.cellFlags[2] = 1;
+        const converted = convertPcLevel(pc, { template: { header: h, classes }, textureFallback: 0x00090042 });
+        const layer = converted.terrain[0]!;
+        layer.cellFlags = ps2CellFlags(layer, 0x0d);
+        const payload = writePs2Terrain([layer], () => new Uint8Array(16));
+        const native = await SrscReader.fromBytes(buildPs2Srsc([{ type: 1, id: 0, sub: 0, data: payload }]));
+        const serialized = parsePs2Terrain(await native.readRaw(native.entries[0]!))[0]!;
+        expect([...serialized.cellFlags].slice(0, 3)).toEqual([0xff0d, 0xffc1, 0xff31]);
+        // PAL collision tests gate the two triangles independently on 0x40 and 0x80, not the texture ref.
+        expect(serialized.cellFlags[1]! & 0xc0).toBe(0xc0);
+        expect(serialized.cellFlags[2]! & 0xc0).toBe(0);
+        expect([...ps2CellFlags(layer, 0)].slice(0, 3)).toEqual([0xff00, 0xffc0, 0xff30]);
     });
 
     it('writes terrain that the PS2 reader decodes (two layers)', async () => {

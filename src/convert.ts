@@ -424,7 +424,7 @@ function convertLayer(L: TerrainLayer, pc: PcLevel, opt: ConvertOptions, report:
         cellTexLeft,
         cellTexRight: cellTexLeft,
         vertexFlags: new Uint16Array(L.heights.length),
-        vertexMask: ps2VertexMask(L.width, L.height),
+        vertexMask: ps2VertexMask(L.width, L.height, cellTexLeft),
         source: 'ps2',
     };
 }
@@ -478,17 +478,22 @@ export function limitLayerTextures(tex: Uint32Array, w: number, h: number, max: 
     }
 }
 
-/** Per-vertex adjacency mask: one bit for each of the four surrounding cells that exist (15 = all, level-format.md s10). */
-export function ps2VertexMask(w: number, h: number): Uint8Array {
+/**
+ * Per-vertex adjacency mask: one bit for each surrounding cell that exists and is not a hole. Omit cellTextures for
+ * a wholly solid grid. Invisible cells remain collidable; TEX_HOLE must not retain the corresponding adjacency bit.
+ */
+export function ps2VertexMask(w: number, h: number, cellTextures?: ArrayLike<number>): Uint8Array {
+    const solid = (x: number, z: number): boolean =>
+        x >= 0 && z >= 0 && x < w && z < h && (!cellTextures || cellTextures[z * w + x] !== TEX_HOLE);
     const m = new Uint8Array((w + 1) * (h + 1));
     for (let z = 0; z <= h; z++) {
         for (let x = 0; x <= w; x++) {
-            // 8 top-left cell, 4 top-right, 2 bottom-left, 1 bottom-right (edges 12/10/5/3, corners 8/4/2/1 as observed)
+            // 8 down-right, 4 down-left, 2 up-right, 1 up-left, matching the native disc adjacency nibble.
             let v = 0;
-            if (x < w && z < h) v |= 8;
-            if (x > 0 && z < h) v |= 4;
-            if (x < w && z > 0) v |= 2;
-            if (x > 0 && z > 0) v |= 1;
+            if (solid(x, z)) v |= 8;
+            if (solid(x - 1, z)) v |= 4;
+            if (solid(x, z - 1)) v |= 2;
+            if (solid(x - 1, z - 1)) v |= 1;
             m[z * (w + 1) + x] = v;
         }
     }
