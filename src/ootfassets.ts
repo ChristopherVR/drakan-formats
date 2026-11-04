@@ -8,6 +8,7 @@ import {
     type NeutralModel,
     buildPs2Mod,
     writePs2ModelRecords,
+    synthesizeBounds,
     parsePcModel,
     pcToNeutral,
     type PcToPs2Options,
@@ -79,6 +80,16 @@ export interface BuiltAssets {
 const lower = (s: string): string => s.toLowerCase();
 const MOD_DISPLAY_LIST = 0x0211;
 const DEFAULT_DISPLAY_LIST = /tree|birch/i;
+
+/** Rebuild polygon-index-dependent bounds, retaining the source's conservative sphere/box and excluding pad vertices. */
+function rigidDisplayList(model: NeutralModel): ReturnType<typeof withDisplayList> {
+    const dl = withDisplayList(model);
+    const original = model.bounds ?? synthesizeBounds(model.positions, model.polygons.length);
+    const bounds = synthesizeBounds(model.positions, dl.model.polygons.length);
+    if (original.length >= 72) bounds.set(original.subarray(0, 72));
+    dl.model.bounds = bounds;
+    return dl;
+}
 
 export class OotfAssetBuilder {
     readonly report: AssetReport = {
@@ -252,10 +263,10 @@ export class OotfAssetBuilder {
         if (known !== undefined) {
             if (requireDisplayList) {
                 const existing = this.models.find((m) => m.id === known)!;
-                if (!existing.records?.some((r) => r.type === MOD_DISPLAY_LIST)) {
+                if (existing.model.polygons.length > 0 && !existing.records?.some((r) => r.type === MOD_DISPLAY_LIST)) {
                     // A shared rigid model may first be imported for an ordinary static class, then used by a
                     // generic prop. Upgrade the same resource id rather than retaining its non-drawing representation.
-                    const dl = withDisplayList(existing.model);
+                    const dl = rigidDisplayList(existing.model);
                     existing.model = dl.model;
                     existing.records = [...writePs2ModelRecords(dl.model), { type: MOD_DISPLAY_LIST, data: dl.record }];
                 }
@@ -382,9 +393,17 @@ export class OotfAssetBuilder {
                 anims: anims.ids.length,
                 animsSkipped: anims.skipped,
             });
-        } else if (requireDisplayList || (this.options.displayList ?? DEFAULT_DISPLAY_LIST).test(pc.name)) {
+        } else if (
+            // Geometry-only helper models (e.g. current volumes) have bounds but no triangles to submit.
+            (requireDisplayList && model.polygons.length > 0) ||
+            (this.options.displayList ?? DEFAULT_DISPLAY_LIST).test(pc.name)
+        ) {
             try {
-                const dl = withDisplayList(model);
+                // Preserve the established tree path; only newly required rigid representations need this upgrade.
+                const dl =
+                    requireDisplayList && !(this.options.displayList ?? DEFAULT_DISPLAY_LIST).test(pc.name)
+                        ? rigidDisplayList(model)
+                        : withDisplayList(model);
                 out = dl.model;
                 records = [...writePs2ModelRecords(out), { type: MOD_DISPLAY_LIST, data: dl.record }];
             } catch (e) {

@@ -250,10 +250,18 @@ describe('containers and the asset builder', () => {
     // A level folder "Lvl/Lvl" with its own model + texture container and a shared "Common/C/C".
     const files = new Map<string, Uint8Array>();
     const w = (name: string, data: Uint8Array) => files.set(name.toLowerCase(), data);
-    const model = (id: number, texRefs: number[][], character = false): Uint8Array => {
+    const model = (
+        id: number,
+        texRefs: number[][],
+        character = false,
+        offset = 0,
+        bounds?: Uint8Array,
+        drawable = true,
+    ): Uint8Array => {
         const rec = (type: number, data: number[]) => ({ type, id, sub: 0, data: Uint8Array.from(data) });
         const verts = [...u16(3)];
-        for (const v of [0, 0, 0, 1, 0, 0, 0, 0, 1]) verts.push(...new Uint8Array(new Float32Array([v]).buffer));
+        for (const v of [0, 0, 0, 1, 0, 0, 0, 0, 1])
+            verts.push(...new Uint8Array(new Float32Array([v + offset]).buffer));
         const poly = [...u16(1), ...u16(0), ...u16(3), ...u16(1)]; // one triangle, texture list entry 1
         for (const [i, u, v] of [
             [0, 0, 0],
@@ -263,8 +271,9 @@ describe('containers and the asset builder', () => {
             poly.push(...u16(i), ...new Uint8Array(new Float32Array([u, v]).buffer));
         const name = [...u16(4), 0x6d, 0x6f, 0x64, 0x31, ...u32(2)];
         const tl = [...u32(texRefs.length), ...texRefs.flatMap(([i, d]) => [...u16(i!), ...u16(d!)])];
-        const recs = [rec(0x200, name), rec(0x206, tl), rec(0x203, verts), rec(0x204, poly)];
+        const recs = [rec(0x200, name), rec(0x206, tl), rec(0x203, verts), rec(0x204, drawable ? poly : [0, 0])];
         if (character) recs.push(rec(0x208, new Array(70).fill(0)));
+        if (bounds) recs.push(rec(0x207, [...bounds]));
         return writePs2Srsc(recs);
     };
     const txd = (ids: number[]): Uint8Array =>
@@ -335,17 +344,38 @@ describe('containers and the asset builder', () => {
     });
 
     it.each([
-        [false, true],
-        [true, false],
+        [false, true, false],
+        [true, false, false],
+        [false, true, true],
+        [true, false, true],
     ])(
-        'retains a shared rigid model id when display-list requirements arrive in order %s/%s',
-        async (first, second) => {
-            const ordinary = new OotfAssetBuilder(src);
+        'retains a shared rigid model id when display-list requirements arrive in order %s/%s (authored bounds %s)',
+        async (first, second, authored) => {
+            const bounds = new Uint8Array(72).fill(0xab);
+            const conservative = [6, 6, 6, 20, -4, -4, -4, 20, 0, 0, 0, 20, 0, 0, 0, 20];
+            conservative.forEach((v, i) => new DataView(bounds.buffer).setFloat32(i * 4, v, true));
+            const local: PcFileSource = {
+                ...src,
+                read: async (p) =>
+                    p.toLowerCase() === 'lvl/lvl.mod'
+                        ? model(
+                              5,
+                              [
+                                  [3, 0],
+                                  [8, 1],
+                              ],
+                              false,
+                              5,
+                              authored ? bounds : undefined,
+                          )
+                        : src.read(p),
+            };
+            const ordinary = new OotfAssetBuilder(local);
             await ordinary.addModelRef('Lvl/Lvl', 0, 5);
             const ordinaryMod = await SrscReader.fromBytes(ordinary.build('out', 'test').files['out/TEST.MOD']!);
             expect(ordinaryMod.find(0x211, 2)).toBeUndefined();
             const before = (await parseModel(ordinaryMod, 2))!;
-            const b = new OotfAssetBuilder(src);
+            const b = new OotfAssetBuilder(local);
             expect(await b.addModelRef('Lvl/Lvl', 0, 5, first)).toBe(2);
             expect(await b.addModelRef('Lvl/Lvl', 0, 5, second)).toBe(2);
             const built = b.build('out', 'test').files['out/TEST.MOD']!;
@@ -356,6 +386,18 @@ describe('containers and the asset builder', () => {
             const mod = await SrscReader.fromBytes(built);
             expect(mod.entries.filter((e) => e.type === 0x211).map((e) => e.id)).toEqual([2]);
             const after = (await parseModel(mod, 2))!;
+            const beforeBounds = await ordinaryMod.readRaw(ordinaryMod.find(0x207, 2)!);
+            const afterBounds = await mod.readRaw(mod.find(0x207, 2)!);
+            expect(afterBounds.slice(0, 72)).toEqual(beforeBounds.slice(0, 72));
+            // The source hierarchy may reference old polygons. Rebuild it and list each new polygon once.
+            const bv = new DataView(afterBounds.buffer, afterBounds.byteOffset, afterBounds.byteLength);
+            expect(afterBounds.length).toBe(130 + (after.indices.length / 3) * 2);
+            expect(bv.getUint16(128, true)).toBe(after.indices.length / 3);
+            expect(Array.from({ length: after.indices.length / 3 }, (_, i) => bv.getUint16(130 + i * 2, true))).toEqual(
+                Array.from({ length: after.indices.length / 3 }, (_, i) => i),
+            );
+            expect([80, 84, 88].map((i) => bv.getFloat32(i, true))).toEqual([5, 5, 5]);
+            expect(after.positions.slice(-3)).toEqual(new Float32Array([0, 0, 0]));
             expect(after.textures).toEqual(before.textures);
             expect(after.indices).toEqual(before.indices);
             expect(after.uvs).toEqual(before.uvs);
@@ -363,6 +405,75 @@ describe('containers and the asset builder', () => {
             expect(b.mapModelRef(0, 5, 'Lvl/Lvl')).toBe(2);
         },
     );
+
+    it.each([
+        [false, true],
+        [true, false],
+    ])('keeps legacy named display-list bounds byte-identical in order %s/%s', async (first, second) => {
+        const options = { displayList: /mod1/ };
+        const ordinary = new OotfAssetBuilder(src, options);
+        await ordinary.addModelRef('Lvl/Lvl', 0, 5);
+        const baseline = ordinary.build('out', 'test').files['out/TEST.MOD'];
+        const b = new OotfAssetBuilder(src, options);
+        expect(await b.addModelRef('Lvl/Lvl', 0, 5, first)).toBe(2);
+        expect(await b.addModelRef('Lvl/Lvl', 0, 5, second)).toBe(2);
+        expect(b.build('out', 'test').files['out/TEST.MOD']).toEqual(baseline);
+    });
+
+    it.each([
+        [false, true],
+        [true, false],
+    ])('retains bounds-only helper models without a draw list in order %s/%s', async (first, second) => {
+        const local: PcFileSource = {
+            ...src,
+            read: async (p) =>
+                p.toLowerCase() === 'lvl/lvl.mod'
+                    ? model(
+                          5,
+                          [
+                              [3, 0],
+                              [8, 1],
+                          ],
+                          false,
+                          5,
+                          undefined,
+                          false,
+                      )
+                    : p.toLowerCase() === 'lvl/other.mod'
+                      ? model(6, [
+                            [3, 0],
+                            [8, 0],
+                        ])
+                      : p.toLowerCase() === 'lvl/other.txd'
+                        ? txd([8])
+                        : src.read(p),
+        };
+        const ordinary = new OotfAssetBuilder(local);
+        await ordinary.addModelRef('Lvl/Lvl', 0, 5);
+        expect(await ordinary.addModel('Lvl/Other', 6)).toBe(3);
+        const b = new OotfAssetBuilder(local);
+        expect(await b.addModelRef('Lvl/Lvl', 0, 5, first)).toBe(2);
+        expect(await b.addModelRef('Lvl/Lvl', 0, 5, second)).toBe(2);
+        expect(await b.addModel('Lvl/Other', 6)).toBe(3);
+        expect(b.build('out', 'test').files['out/TEST.MOD']).toEqual(
+            ordinary.build('out', 'test').files['out/TEST.MOD'],
+        );
+        expect(b.report.models.converted).toBe(2);
+        expect(b.report.models.triangles).toBe(1);
+        expect(b.report.skipped.size).toBe(0);
+    });
+
+    it('rejects a drawable model whose textures are missing even when a display list is required', async () => {
+        const missing: PcFileSource = {
+            ...src,
+            read: async (p) => (p.toLowerCase().endsWith('.txd') ? null : src.read(p)),
+        };
+        const b = new OotfAssetBuilder(missing);
+        expect(await b.addModelRef('Lvl/Lvl', 0, 5, true)).toBeNull();
+        expect(b.mapModelRef(0, 5, 'Lvl/Lvl')).toBeNull();
+        expect([...b.report.skipped.values()]).toContain('no polygon left (textures missing)');
+        expect(b.report.models.converted).toBe(0);
+    });
 
     it('answers terrain texture refs through the level dependency table', async () => {
         const b = new OotfAssetBuilder(src);
