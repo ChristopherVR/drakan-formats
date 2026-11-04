@@ -1285,19 +1285,6 @@ export async function convertOotfLevels(
             classes.get(o.dbIndex)?.get(o.classId)?.name ??
             plan?.synthesized.find((x) => x.dbIndex === o.dbIndex && x.classId === o.classId)?.name ??
             '';
-        // Cinematic levels (a Stomp Player sequencer, engine class 51: the Intro and the Book hand-overs): their skinned generic props
-        // (Rynn, Owl, Aroch) are clones of a creature's skinned template. The sequence drives them as animated objects, the engine
-        // builds a controller for them that the clone cannot feed (null vtable at this+0xd4, 0x10822c) and the guest crashed a frame
-        // or two after the load in about half of the co-op runs of the Intro (2 of 4; 0 of 4 with these four objects dropped).
-        if (parts.objects.objects.some((o) => classes.get(o.dbIndex)?.get(o.classId)?.rflClass === 51)) {
-            const skinnedProp = (o: LvlObject): boolean => {
-                const sy = plan?.synthesized.find((x) => x.dbIndex === o.dbIndex && x.classId === o.classId);
-                return !!sy && sy.rfl === 17 && /^NPCS\.ODB$/i.test(sy.file);
-            };
-            for (const o of parts.objects.objects)
-                if (skinnedProp(o)) console.warn(`DROPPED skinned prop ${dbgName(o)}`);
-            parts.objects = { ...parts.objects, objects: parts.objects.objects.filter((o) => !skinnedProp(o)) };
-        }
         if (dbgEnv['DRAKAN_DBG_LINKS']) {
             // Test aid: objects whose class name matches the regex, with the names of their link targets and of their linkers.
             const re = new RegExp(dbgEnv['DRAKAN_DBG_LINKS'], 'i');
