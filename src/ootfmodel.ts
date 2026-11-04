@@ -206,6 +206,20 @@ export function writePs2Polygons(m: NeutralModel): Uint8Array {
     return out;
 }
 
+/** Number of shapes in a structurally valid sphere-only 0x0207 hierarchy, or null for another/invalid layout. */
+export function sphereHierarchyCount(bounds: Uint8Array): number | null {
+    if (bounds.length < 76) return null;
+    const dv = view(bounds);
+    const count = dv.getUint16(72, true);
+    if (dv.getUint16(74, true) !== 0 || count > 0x7fff || bounds.length !== 76 + count * 20) return null;
+    for (let i = 0; i < count * 2; i++) if (dv.getUint16(76 + i * 2, true) >= count) return null;
+    for (let i = 0; i < count * 4; i++) {
+        const value = dv.getFloat32(76 + count * 4 + i * 4, true);
+        if (!Number.isFinite(value) || (i % 4 === 3 && value < 0)) return null;
+    }
+    return count;
+}
+
 /**
  * Bounds from the vertices when the source has none: sphere around the box centre, one OBB (`center` = minimum corner,
  * axes scaled by the box size, as the disc models), `num_shapes 1, is_obb 1`, hierarchy (0,0), the box again and the

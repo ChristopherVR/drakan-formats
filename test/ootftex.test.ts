@@ -2,6 +2,7 @@
 import { zlibSync } from 'fflate';
 import { describe, expect, it } from 'vitest';
 import { SrscReader, decodeTxd, parseModel } from '../src/index.ts';
+import { type NeutralModel, writePs2ModelRecords } from '../src/ootfmodel.ts';
 import { OotfAssetBuilder } from '../src/ootfassets.ts';
 import { buildDbText, parseDbText, writePs2Srsc } from '../src/ootfcontainer.ts';
 import {
@@ -474,6 +475,105 @@ describe('containers and the asset builder', () => {
         expect([...b.report.skipped.values()]).toContain('no polygon left (textures missing)');
         expect(b.report.models.converted).toBe(0);
     });
+
+    it('leaves original model ids and imported skeletal records untouched by rigid upgrade requests', async () => {
+        const b = new OotfAssetBuilder(src);
+        await b.addModelRef('Lvl/Lvl', 0, 5);
+        const imported = (
+            b as unknown as { models: { model: NeutralModel; records?: { type: number; data: Uint8Array }[] }[] }
+        ).models[0]!;
+        // Synthetic imported skeletal state deliberately lacking its list: the rigid API must not discard its records.
+        imported.records = [...writePs2ModelRecords(imported.model), { type: 0x208, data: new Uint8Array([7, 8, 9]) }];
+        const before = b.build('out', 'test').files['out/TEST.MOD'];
+        expect(b.requireDisplayList(5941)).toBe(false); // original native/template id, not owned by this builder
+        expect(b.requireDisplayList(2)).toBe(false);
+        expect(b.build('out', 'test').files['out/TEST.MOD']).toEqual(before);
+    });
+
+    it.each([false, true])(
+        'preserves a full authored sphere hierarchy through padded multi-window draw conversion (required first %s)',
+        async (first) => {
+            const spheres = new Uint8Array(64 + 4 + 2 * 20);
+            const sd = new DataView(spheres.buffer);
+            sd.setFloat32(0, 100, true);
+            sd.setFloat32(12, 250, true);
+            sd.setUint16(64, 2, true);
+            sd.setUint16(68, 1, true);
+            for (let i = 0; i < 2; i++) {
+                sd.setFloat32(76 + i * 16, 50 + i * 100, true);
+                sd.setFloat32(88 + i * 16, 100, true);
+            }
+            const source = await SrscReader.fromBytes(
+                model(
+                    5,
+                    [
+                        [3, 0],
+                        [8, 1],
+                    ],
+                    false,
+                    0,
+                    spheres,
+                ),
+            );
+            const vertices = new Uint8Array(2 + 300 * 12),
+                vd = new DataView(vertices.buffer);
+            vd.setUint16(0, 300, true);
+            const polygons = new Uint8Array(2 + 100 * 36),
+                pd = new DataView(polygons.buffer);
+            pd.setUint16(0, 100, true);
+            for (let i = 0; i < 100; i++) {
+                const o = 2 + i * 36;
+                pd.setUint16(o + 2, 3, true);
+                pd.setUint16(o + 4, i % 2, true);
+                for (let k = 0; k < 3; k++) {
+                    const v = i * 3 + k;
+                    vd.setFloat32(2 + v * 12, 5 + i * 2 + (k === 1 ? 1 : 0), true);
+                    vd.setFloat32(2 + v * 12 + 4, 5, true);
+                    vd.setFloat32(2 + v * 12 + 8, 5 + (k === 2 ? 1 : 0), true);
+                    pd.setUint16(o + 6 + k * 10, v, true);
+                    pd.setFloat32(o + 8 + k * 10, k === 1 ? 1 : 0, true);
+                    pd.setFloat32(o + 12 + k * 10, k === 2 ? 1 : 0, true);
+                }
+            }
+            const records = [];
+            for (const e of source.entries)
+                records.push({
+                    type: e.type,
+                    id: e.id,
+                    sub: e.sub,
+                    data: e.type === 0x203 ? vertices : e.type === 0x204 ? polygons : await source.readRaw(e),
+                });
+            const bytes = writePs2Srsc(records);
+            const local: PcFileSource = {
+                ...src,
+                read: async (p) => (p.toLowerCase() === 'lvl/lvl.mod' ? bytes : src.read(p)),
+            };
+            const ordinary = new OotfAssetBuilder(local);
+            await ordinary.addModelRef('Lvl/Lvl', 0, 5);
+            const before = await SrscReader.fromBytes(ordinary.build('out', 'test').files['out/TEST.MOD']!);
+            const b = new OotfAssetBuilder(local);
+            await b.addModelRef('Lvl/Lvl', 0, 5, first);
+            await b.addModelRef('Lvl/Lvl', 0, 5, true);
+            const after = await SrscReader.fromBytes(b.build('out', 'test').files['out/TEST.MOD']!);
+            expect(await after.readRaw(after.find(0x207, 2)!)).toEqual(await before.readRaw(before.find(0x207, 2)!));
+            const old = (await parseModel(before, 2))!,
+                next = (await parseModel(after, 2))!;
+            const triangles = (m: typeof old) =>
+                Array.from({ length: m.indices.length / 3 }, (_, t) => {
+                    const corners = [0, 1, 2].map((k) => [
+                        ...m.positions.slice(m.indices[t * 3 + k]! * 3, m.indices[t * 3 + k]! * 3 + 3),
+                        ...m.uvs.slice(t * 6 + k * 2, t * 6 + k * 2 + 2),
+                    ]);
+                    return JSON.stringify([
+                        m.triTexture[t],
+                        corners.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
+                    ]);
+                });
+            expect(next.positions.length).toBeGreaterThan(old.positions.length);
+            expect(triangles(next)).not.toEqual(triangles(old));
+            expect(triangles(next).sort()).toEqual(triangles(old).sort());
+        },
+    );
 
     it('answers terrain texture refs through the level dependency table', async () => {
         const b = new OotfAssetBuilder(src);

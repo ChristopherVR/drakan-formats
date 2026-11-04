@@ -9,6 +9,7 @@ import {
     buildPs2Mod,
     writePs2ModelRecords,
     synthesizeBounds,
+    sphereHierarchyCount,
     parsePcModel,
     pcToNeutral,
     type PcToPs2Options,
@@ -85,6 +86,12 @@ const DEFAULT_DISPLAY_LIST = /tree|birch/i;
 function rigidDisplayList(model: NeutralModel): ReturnType<typeof withDisplayList> {
     const dl = withDisplayList(model);
     const original = model.bounds ?? synthesizeBounds(model.positions, model.polygons.length);
+    // Sphere hierarchies refer only to shapes, so vertex/polygon remapping cannot invalidate them.
+    // In particular, native rigid weapons reject an OBB replacement and delete the item on attack.
+    if (sphereHierarchyCount(original) !== null) {
+        dl.model.bounds = original;
+        return dl;
+    }
     const bounds = synthesizeBounds(model.positions, dl.model.polygons.length);
     if (original.length >= 72) bounds.set(original.subarray(0, 72));
     dl.model.bounds = bounds;
@@ -261,16 +268,7 @@ export class OotfAssetBuilder {
         const key = `${lower(container)}#${id}`;
         const known = this.modelIds.get(key);
         if (known !== undefined) {
-            if (requireDisplayList) {
-                const existing = this.models.find((m) => m.id === known)!;
-                if (existing.model.polygons.length > 0 && !existing.records?.some((r) => r.type === MOD_DISPLAY_LIST)) {
-                    // A shared rigid model may first be imported for an ordinary static class, then used by a
-                    // generic prop. Upgrade the same resource id rather than retaining its non-drawing representation.
-                    const dl = rigidDisplayList(existing.model);
-                    existing.model = dl.model;
-                    existing.records = [...writePs2ModelRecords(dl.model), { type: MOD_DISPLAY_LIST, data: dl.record }];
-                }
-            }
+            if (requireDisplayList) this.requireDisplayList(known);
             return known;
         }
         if (this.report.skipped.has(`model ${key}`)) return null;
@@ -430,6 +428,20 @@ export class OotfAssetBuilder {
         m.polygonsDropped += stats.polygonsDropped;
         if (stats.flatToSmooth) m.flatToSmooth++;
         return nid;
+    }
+
+    /** Ensure an already imported model has the generic-prop draw representation, retaining its id and bounds. */
+    requireDisplayList(id: number): boolean {
+        const existing = this.models.find((m) => m.id === id);
+        if (!existing) return false; // Native/template models belong to their original MOD and are never rewritten here.
+        if (existing.records?.some((r) => r.type === MOD_CHARACTER))
+            return existing.records.some((r) => r.type === MOD_DISPLAY_LIST); // Never rebuild a skeleton as a rigid model.
+        if (existing.model.polygons.length > 0 && !existing.records?.some((r) => r.type === MOD_DISPLAY_LIST)) {
+            const dl = rigidDisplayList(existing.model);
+            existing.model = dl.model;
+            existing.records = [...writePs2ModelRecords(dl.model), { type: MOD_DISPLAY_LIST, data: dl.record }];
+        }
+        return true;
     }
 
     /**

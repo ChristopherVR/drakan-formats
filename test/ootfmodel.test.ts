@@ -10,6 +10,7 @@ import {
     pcToNeutral,
     readPs2Neutral,
     synthesizeBounds,
+    sphereHierarchyCount,
     writePs2ModelRecords,
 } from '../src/ootfmodel.ts';
 
@@ -229,5 +230,43 @@ describe('PS2 model records', () => {
         expect(r.find(0x202, 0)).toBeDefined();
         expect(r.find(0x402, 0)).toBeDefined();
         expect(r.find(0x201, 1)).toBeDefined();
+    });
+});
+
+describe('sphere-only collision hierarchy recognition', () => {
+    const record = (count: number): Uint8Array => {
+        const b = new Uint8Array(76 + count * 20);
+        const dv = new DataView(b.buffer);
+        dv.setUint16(72, count, true);
+        for (let i = 0; i < count; i++) {
+            if (i + 1 < count) dv.setUint16(76 + i * 4, i + 1, true);
+            for (let k = 0; k < 4; k++) dv.setFloat32(76 + count * 4 + i * 16 + k * 4, k === 3 ? 2 : i + k, true);
+        }
+        return b;
+    };
+    it.each([0, 1, 3])('recognizes %i authored spheres including nonzero buffer offsets', (count) => {
+        const b = record(count);
+        const padded = new Uint8Array(b.length + 9);
+        padded.set(b, 5);
+        expect(sphereHierarchyCount(padded.subarray(5, 5 + b.length))).toBe(count);
+    });
+    it('rejects truncated, trailing, OBB, oversized-count and out-of-range hierarchy layouts', () => {
+        const b = record(3);
+        expect(sphereHierarchyCount(b.slice(0, 75))).toBeNull();
+        expect(sphereHierarchyCount(b.slice(0, -1))).toBeNull();
+        expect(sphereHierarchyCount(new Uint8Array([...b, 0]))).toBeNull();
+        const mutate = (offset: number, value: number) => {
+            const x = b.slice();
+            new DataView(x.buffer).setUint16(offset, value, true);
+            return x;
+        };
+        expect(sphereHierarchyCount(mutate(74, 1))).toBeNull();
+        expect(sphereHierarchyCount(mutate(72, 0x8000))).toBeNull();
+        expect(sphereHierarchyCount(mutate(76, 3))).toBeNull();
+    });
+    it.each([NaN, Infinity, -1])('rejects a non-finite or negative sphere radius %s', (radius) => {
+        const b = record(1);
+        new DataView(b.buffer).setFloat32(92, radius, true);
+        expect(sphereHierarchyCount(b)).toBeNull();
     });
 });

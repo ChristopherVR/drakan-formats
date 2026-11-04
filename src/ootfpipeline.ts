@@ -1,3 +1,4 @@
+import { requireGenericPropDrawLists } from './ootfpropdraw.ts';
 import { splitClassRecord } from './odbwrite.ts';
 import { carryStartingInventory } from './ootfstartinventory.ts';
 import { ootfDebugFlag } from './ootfdebug.ts';
@@ -764,6 +765,12 @@ export async function convertOotfLevels(
                     },
                 ),
             );
+        }
+        if (plan && opt.models !== false && hostOk) {
+            requireGenericPropDrawLists(plan, (file, db) => {
+                const stem = containerStem(file.replace(/\.ODB$/i, ''), db);
+                return stem === hostStem ? builder : stem ? crossBuilders.get(stem) : undefined;
+            });
         }
         if (plan) {
             // PC clips retargeted onto the PS2 rig of a name-mapped creature replace the PS2 clips of the same name.
