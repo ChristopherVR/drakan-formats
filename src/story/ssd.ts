@@ -3,8 +3,9 @@
 //
 // Proven (every 0x311 record of the PAL disc parses, see story-editing.md): record = `u16 length + name`, four u32
 // header words, then `actors` actor records. An actor is `u16 length + name`, u32 slot, u32 ref, u32 0, u32
-// actionCount, then the action bytes. Inferred: header word 0 is the length (60 = the default of an empty sequence),
-// word 2 is the highest slot + 1, word 3 the actor count. Not decoded: the action grammar. The actions are kept as
+// actionCount, then the action bytes. Native PAL sequence startup consumes header word 0 as flags;
+// duration is derived from action times. Word 2 is the highest slot + 1, word 3 the actor count. See
+// `ssdactions.ts` for the decoded action grammar. The actions are kept as
 // opaque bytes (the action count is exact; the next actor is found by scanning for its header), so a rewrite is
 // byte-exact apart from the fields above.
 
@@ -44,7 +45,7 @@ export interface SsdSequence {
     folder: number;
     name: string;
     nameLen: number;
-    /** Header word 0: 60 for an empty one, up to a few hundred for scenes (inferred: length). */
+    /** Header word 0: native sequence flags. Historical property name retained for API compatibility. */
     length: number;
     unknown1: number;
     slots: number;
