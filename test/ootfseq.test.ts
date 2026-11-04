@@ -147,6 +147,92 @@ describe('ootfseq', () => {
         expect(used.has(seqEntry.id)).toBe(true);
     });
 
+    it('uses actor-specific rig maps without falling back to a global clip', async () => {
+        const clip = act(1, 3.25, [...u32(2), ...u32(7), ...f32(0), ...f32(0.85), ...f32(1), ...u32(0x15)]);
+        const bytes = w(
+            str('Rigs'),
+            u32(126),
+            u32(0),
+            u32(4),
+            u32(3),
+            actor('First', 1, 100, [clip]),
+            actor('Second', 2, 200, [clip]),
+            actor('Unverified', 3, 300, [clip]),
+        );
+        const result = await convertPcSequences(stub(bytes), {
+            maps: {
+                objectIdMap: new Map([
+                    [100, 11],
+                    [200, 22],
+                    [300, 33],
+                ]),
+                animMap: new Map([[7, 999]]),
+                animMapForActor: (_actor, target) =>
+                    target === 11 ? new Map([[7, 41]]) : target === 22 ? new Map([[7, 82]]) : undefined,
+            },
+            usedIds: new Set(),
+        });
+        const entry = result.entries.find((e) => e.type === 0x311)!;
+        const seq = parseSequence(entry.id, entry.sub, entry.data)!;
+        expect(
+            seq.actors.map((a) =>
+                parseActions(a)!.map((action) => ({
+                    time: action.time,
+                    clip: action.fields.find((f) => f.name === 'animation')?.value,
+                })),
+            ),
+        ).toEqual([[{ time: 3.25, clip: 41 }], [{ time: 3.25, clip: 82 }], []]);
+        expect(result.report.droppedActions.get('animation')).toBe(1);
+        expect(result.report.warnings).toContain('animation 0x7: no compatible resource mapping');
+    });
+
+    it('passes mapped source identities for aliased player and camera animation maps', async () => {
+        const clip = act(1, 2, [...u32(2), ...u32(7), ...f32(0), ...f32(0.85), ...f32(1), ...u32(0x15)]);
+        const bytes = w(
+            str('Aliases'),
+            u32(126),
+            u32(0),
+            u32(3),
+            u32(2),
+            actor('Wrynn', 1, 1740, [clip]),
+            actor('UnlabelledView', 2, 385, [clip]),
+        );
+        const seen: number[][] = [];
+        const result = await convertPcSequences(stub(bytes), {
+            maps: {
+                objectIdMap: new Map([
+                    [1740, 501],
+                    [385, 502],
+                ]),
+                animMapForActor: (source, target) => {
+                    seen.push([source.objectId, target]);
+                    return new Map([[7, target + 100]]);
+                },
+            },
+            playerObjectId: 501,
+            cameraObjectId: 502,
+            usedIds: new Set(),
+        });
+        expect(seen).toEqual([
+            [1740, 501],
+            [385, 502],
+        ]);
+        const entry = result.entries.find((e) => e.type === 0x311)!;
+        const sequence = parseSequence(entry.id, entry.sub, entry.data)!;
+        expect(sequence.actors.map((a) => [a.ref, a.mode])).toEqual([
+            [501, 1],
+            [502, 0],
+        ]);
+        expect(
+            sequence.actors.map(
+                (a) =>
+                    parseActions(a)!
+                        .find((x) => x.type === 1)!
+                        .fields.find((f) => f.name === 'animation')!.value,
+            ),
+        ).toEqual([601, 602]);
+    });
+
     it('allocates holes below the maximum first and builds pack paths', () => {
         expect(ssdEntryPath('LEVEL1ON.SSD', { type: 0x311, id: 5, sub: 2 })).toBe('new/LEVEL1ON.SSD/0311_5_2.bin');
         expect(remapSequenceRefs([1, 2, 3], new Map([[2, 9]]))).toEqual([9]);

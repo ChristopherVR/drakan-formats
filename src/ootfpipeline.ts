@@ -424,6 +424,8 @@ export async function convertOotfLevels(
         key: string;
     }[] = [];
     const retargetNotes: string[] = [];
+    // Planned class key -> source clips actually written for its compatible native target rig.
+    const sequenceRetargetMaps = new Map<string, Map<number, number>>();
     /** PC classes whose converted model is cloned instead of name-mapping them to a PS2 class with a foreign rig. */
     const convertOwn = new Set<OdbClass>();
 
@@ -697,6 +699,7 @@ export async function convertOotfLevels(
                         if (e) own.set(animName(await adb.readRaw(e)).toLowerCase(), id);
                     }
                     let n = 0;
+                    const clips = new Map<number, number>();
                     for (const a of res2.anims) {
                         const id = own.get(a.anim.name.toLowerCase());
                         const k = `${t.ps2Stem}|${id}`;
@@ -708,8 +711,10 @@ export async function convertOotfLevels(
                         if (!e2) continue;
                         res.files[`overrides/${t.ps2Stem}.ADB/0501_${id}_${e1.sub}.bin`] = w.info;
                         res.files[`overrides/${t.ps2Stem}.ADB/0502_${id}_${e2.sub}.bin`] = w.data;
+                        clips.set(a.id, id);
                         n++;
                     }
+                    sequenceRetargetMaps.set(t.key, clips);
                     res.warnings.push(
                         `retarget ${t.pc.name}: ${n} PS2 clips of ${t.ps2Stem}.ADB replaced (${res2.anims.length} converted, ${res2.skipped.length} skipped)`,
                     );
@@ -1016,6 +1021,32 @@ export async function convertOotfLevels(
                     const conv = await convertPcSequences(await SrscReader.fromBytes(bytes), {
                         maps: {
                             objectIdMap: first.objectIdMap,
+                            animMapForActor: (actor, targetId) => {
+                                // Prefer the explicit source identity, but only when it resolves to this target.
+                                // Assigned/current actors have no source object id; their fallback ids are supplied
+                                // by actorId() above and are actual mapped level object ids, not sentinel refs.
+                                const sourceId =
+                                    actor.actorType === 1 && first.objectIdMap.get(actor.objectId) === targetId
+                                        ? actor.objectId
+                                        : undefined;
+                                const object = pc.list.objects.find((o) =>
+                                    sourceId !== undefined
+                                        ? o.id === sourceId
+                                        : first.objectIdMap.get(o.id) === targetId,
+                                );
+                                const cls = object && pc.classes.get(object.dbIndex)?.get(object.classId);
+                                const model = cls?.model;
+                                const ow = cls && ownerOf.get(cls);
+                                if (!cls || !model || !ow) return undefined;
+                                const key = planKey.get(sig(cls));
+                                // pruneSkinned already removed unshipped source models and their clip maps.
+                                const clips =
+                                    builder.mapAnimRef(model.db, model.id, ow) ??
+                                    (key ? sequenceRetargetMaps.get(`${key.db}:${key.id}`) : undefined);
+                                return clips
+                                    ? { get: (ref) => (ref >>> 16 === 0 ? clips.get(ref & 0xffff) : undefined) }
+                                    : undefined;
+                            },
                             soundMap: {
                                 get: (ref) => {
                                     const db = hostDbOf(g.stem);

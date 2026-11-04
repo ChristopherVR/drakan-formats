@@ -128,8 +128,10 @@ export type RefLookup = { get(pcRef: number): number | undefined };
 export interface SequenceMaps {
     /** PC level object id -> PS2 object id (after convertPcLevel's renumbering; objects that were dropped are absent). */
     objectIdMap: RefLookup;
-    /** PC animation ref `(db << 16) | id` (db relative to the PC `.db` of this `.ssd`) -> final PS2 ref word. */
+    /** PC animation ref -> PS2 ref, resolved relative to each actor model's database (not the SSD sound database). */
     animMap?: RefLookup;
+    /** Clip map verified for this actor's target rig. When supplied, no global animation map is used as fallback. */
+    animMapForActor?: (actor: PcSeqActor, targetObjectId: number) => RefLookup | undefined;
     /** PC sound ref `(db << 16) | id` -> final PS2 ref word (`(db << 16) | id` in the target SSD's `.DB` frame). */
     soundMap?: RefLookup;
     /** PC music id (first u32 of the music action; 0 = stop) -> PS2 music ref word (`(db << 16) | id`). */
@@ -352,6 +354,9 @@ function resolveObject(
 function convertActor(a: PcSeqActor, opts: SequenceConvertOptions, report: SequenceReport): ActorOutcome {
     const target = resolveObject(a, opts);
     if (!target) return { actor: null };
+    const actionOptions = opts.maps.animMapForActor
+        ? { ...opts, maps: { ...opts.maps, animMap: opts.maps.animMapForActor(a, target.ref) } }
+        : opts;
     const chunks: Uint8Array[] = [];
     const sorted = a.actions.map((x, i) => ({ x, i })).sort((p, q) => p.x.time - q.x.time || p.i - q.i);
     const isCamera = target.special === 'camera';
@@ -363,13 +368,13 @@ function convertActor(a: PcSeqActor, opts: SequenceConvertOptions, report: Seque
         const first = sorted[0];
         // the PS2 camera actors start with the run/stop action (5) and then the setup, both at t = 0
         if (first && first.x.type === 5 && first.x.time === 0) {
-            chunks.push(convertAction(first.x, opts, report)!);
+            chunks.push(convertAction(first.x, actionOptions, report)!);
             sorted.shift();
         }
         chunks.push(c);
     }
     for (const { x } of sorted) {
-        const b = convertAction(x, opts, report);
+        const b = convertAction(x, actionOptions, report);
         if (b) chunks.push(b);
     }
     const j = joinActions(chunks);
