@@ -462,6 +462,20 @@ interface Merge {
     same: number;
 }
 
+/** A verified TAG-only weapon restriction, absent from the original PC melee/Bow schema. */
+function inheritedWeaponSkillField(pc: OdbClass, tpl: OdbClass): number {
+    if (
+        (pc.rflClass !== 14 && pc.rflClass !== 79) ||
+        pc.rflClass !== tpl.rflClass ||
+        !pc.fields ||
+        pc.fields?.some((f) => f.name.trim().toLowerCase() === 'skill level')
+    )
+        return -1;
+    const matches = (tpl.fields ?? []).flatMap((f, i) => (f.name.trim().toLowerCase() === 'skill level' ? [i] : []));
+    const i = matches.length === 1 ? matches[0]! : -1;
+    return i >= 0 && tpl.fields![i]!.type === FIELD_INT && tpl.data?.[i] !== undefined ? i : -1;
+}
+
 /**
  * Overwrite the template's defaults with the PC class's, by field name and type. Strings and arrays append their new
  * payload at the end of the data area (the old payload stays, unused). Class-typed fields go through `mapClassRef`.
@@ -614,6 +628,10 @@ export function mergeDefaults(
                 } else if ((v & 0xffff) !== 0) out[j] = fallback;
             }
     }
+    // Original melee/Bow classes have no TAG skill gate. Native341858 rejects equipped weapons whose
+    // scalar Skill Level exceeds stats row1/2. A clone must not inherit that unrelated template restriction.
+    const skill = inheritedWeaponSkillField(pc, tpl);
+    if (skill >= 0) out[skill] = 0;
     return { data: out, copied, skipped, coverage: valueFields === 0 ? 1 : found / valueFields, same };
 }
 
@@ -762,10 +780,16 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
             : opt.keepOwnModel?.(cls)
               ? undefined
               : (pickNamed(loose) ?? pickNamed(aliasSquash(cls.name)));
-        if (named) {
+        const namedSkill = named ? inheritedWeaponSkillField(cls, named.cls) : -1;
+        const skillRestricted = namedSkill >= 0 && (named!.cls.data![namedSkill]! | 0) > 0;
+        // A same-name native weapon with a skill requirement is not an equivalent original weapon. Clone it
+        // instead of modifying the shared TAG record. Explicit diagnostic name mappings retain their requested target.
+        if (named && (nameMap || !skillRestricted)) {
             mapped.set(key, { dbIndex: named.odb.dbIndex, classId: named.id, cls: named.cls });
             continue;
         }
+        const sameNameSkillClone = !!named && skillRestricted && !nameMap;
+        if (sameNameSkillClone) cands = [named!]; // keep the already equivalent native model/template
         // PAL registers Trail Master (0x10051) and its handler without shipping an ODB template.
         // Require the audited native field types and explicitly converted model; relocate its tracer reference later.
         if (!cands.length && rfl === 81) {
@@ -870,6 +894,7 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
             cands.some((c) => !!c.odb.raw?.(c.id));
         const noModel = debug.noModel?.test(cls.name) ?? false;
         const wantsModel =
+            !sameNameSkillClone &&
             (!substituted || modelStandIn) &&
             !ownFxModel &&
             !!kind &&
@@ -893,6 +918,7 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
                 wantsModel ||
                 modelless ||
                 ownFxModel ||
+                sameNameSkillClone ||
                 noModel
             )
         ) {

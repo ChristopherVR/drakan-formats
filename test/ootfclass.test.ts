@@ -1,6 +1,13 @@
 // Synthetic fixtures only; no game bytes.
 import { describe, expect, it } from 'vitest';
-import { encodeFieldList, joinClassRecord, parseClassBody, splitClassRecord, stringToWords, type OdbClass } from '../src/index.ts';
+import {
+    encodeFieldList,
+    joinClassRecord,
+    parseClassBody,
+    splitClassRecord,
+    stringToWords,
+    type OdbClass,
+} from '../src/index.ts';
 import {
     ENGINE_CLASSES,
     buildClassEntries,
@@ -98,6 +105,118 @@ describe('ootfclass', () => {
         const m = mergeDefaults(pc, ps2Timer);
         expect(m.data.length).toBe(ps2Timer.data!.length + stringToWords('longer text').length);
         expect(m.data[3]! & 0xffff).toBe(ps2Timer.data!.length);
+    });
+
+    it.each([14, 79])('removes only an inherited TAG skill requirement from converted weapon class %i', (rfl) => {
+        const pc = cls(1, 'Original weapon', rfl, [[T_FLOAT, 'Rate of Fire (1.0 = normal)']], [f32(1.75)]);
+        const tpl = cls(
+            2,
+            'TAG weapon',
+            rfl,
+            [
+                [T_INT, 'Skill Level'],
+                [T_FLOAT, 'Rate of Fire (1.0 = normal)'],
+                [T_INT, 'Quantity'],
+            ],
+            [2, f32(1), 7],
+        );
+        expect(mergeDefaults(pc, tpl).data).toEqual([0, f32(1.75), 7]);
+        expect(tpl.data).toEqual([2, f32(1), 7]); // the native weapon and unrelated defaults are unchanged
+    });
+
+    it('preserves an explicit source skill requirement and rejects unknown target skill layouts', () => {
+        const pc = cls(1, 'Original Bow', 79, [], []);
+        const explicit = cls(1, 'Custom Bow', 79, [[T_INT, 'Skill Level']], [3]);
+        const native = cls(2, 'TAG Bow', 79, [[T_INT, 'Skill Level']], [2]);
+        expect(mergeDefaults(explicit, native).data).toEqual([3]);
+        const unknownSource = { ...pc };
+        delete unknownSource.fields;
+        expect(mergeDefaults(unknownSource, native).data).toEqual([2]);
+        for (const type of [T_FLOAT, T_ENUM, 0x1001, 0x4001]) {
+            const unknown = cls(2, 'Unknown Bow', 79, [[type, 'Skill Level']], [2]);
+            expect(mergeDefaults(pc, unknown).data[0]).toBe(2);
+        }
+        const duplicate = cls(
+            2,
+            'Ambiguous Bow',
+            79,
+            [
+                [T_INT, 'Skill Level'],
+                [T_INT, 'Skill Level'],
+            ],
+            [2, 4],
+        );
+        expect(mergeDefaults(pc, duplicate).data).toEqual([2, 4]);
+        expect(
+            mergeDefaults(cls(1, 'Other', 62, [], []), cls(2, 'Other', 62, [[T_INT, 'Skill Level']], [2])).data,
+        ).toEqual([2]);
+        expect(mergeDefaults(pc, cls(2, 'Wrong engine', 14, [[T_INT, 'Skill Level']], [2])).data).toEqual([2]);
+    });
+
+    it('keeps the already equivalent native model when a same-name skill clone has no imported model', () => {
+        const o = odb();
+        const native = {
+            ...cls(
+                911,
+                'Shared Bow',
+                79,
+                [
+                    [T_INT, 'Quantity'],
+                    [T_INT, 'Skill Level'],
+                ],
+                [1, 2],
+            ),
+            model: { id: 7, db: 0 },
+        };
+        o.classes.set(911, native);
+        const body = new Uint8Array(102);
+        const dv = new DataView(body.buffer);
+        dv.setUint16(2, 7, true);
+        dv.setUint16(80, 79, true);
+        dv.setUint32(86, 2, true);
+        dv.setUint32(90, 2, true);
+        dv.setUint32(94, 1, true);
+        dv.setUint32(98, 2, true);
+        o.raw = (id) => (id === 911 ? joinClassRecord('Shared Bow', body) : undefined);
+        const pc = { ...cls(1, 'Shared Bow', 79, [[T_INT, 'Quantity']], [1]), model: { id: 8, db: 1 } };
+        let requests = 0;
+        const plan = planClassMapping([{ db: 1, id: 1, cls: pc }], [o], {
+            modelFor: () => {
+                ++requests;
+                return null;
+            },
+        });
+        expect(requests).toBe(0);
+        expect(plan.unsupported.size).toBe(0);
+        expect(plan.synthesized).toHaveLength(1);
+        expect(plan.synthesized[0]!.cls.model).toEqual(native.model);
+        expect(parseClassBody(splitClassRecord(plan.synthesized[0]!.record).body)?.data).toEqual([1, 0]);
+    });
+
+    it('clones a same-name restricted weapon rather than reusing or editing the native record', async () => {
+        const o = odb();
+        const native = cls(
+            911,
+            'Shared Bow',
+            79,
+            [
+                [T_INT, 'Quantity'],
+                [T_INT, 'Skill Level'],
+            ],
+            [1, 2],
+        );
+        o.classes.set(911, native);
+        const pc = cls(1, 'Shared Bow', 79, [[T_INT, 'Quantity']], [1]);
+        const plan = planClassMapping([{ db: 1, id: 1, cls: pc }], [o]);
+        expect(plan.mapped.size).toBe(0);
+        expect(plan.synthesized).toHaveLength(1);
+        expect(plan.synthesized[0]!.cls.data).toEqual([1, 0]);
+        expect(native.data).toEqual([1, 2]);
+        const entries = await buildClassEntries(plan, [o]);
+        const record = entries.find((e) => e.type === 0x102)!;
+        expect(parseClassBody(splitClassRecord(record.data).body)?.data).toEqual([1, 0]);
+        native.data![1] = 0;
+        expect(planClassMapping([{ db: 1, id: 1, cls: pc }], [o]).mapped.get('1:1')?.classId).toBe(911);
     });
 
     it('maps animation-typed defaults (scalar and array) through the converted clip ids', () => {
@@ -250,8 +369,14 @@ describe('ootfclass', () => {
         ];
         const o = odb();
         (o.classes as Map<number, OdbClass>).set(30, cls(30, 'Message Relay', 224, relayFields, [1, 0]));
-        const lockFields: [number, string][] = [[T_ENUM, "Toggle 'A' Message"], [T_ENUM, 'Fire Message']];
-        const messengerFields: [number, string][] = [[T_INT, 'Receiver Class'], [T_ENUM, 'Message to send']];
+        const lockFields: [number, string][] = [
+            [T_ENUM, "Toggle 'A' Message"],
+            [T_ENUM, 'Fire Message'],
+        ];
+        const messengerFields: [number, string][] = [
+            [T_INT, 'Receiver Class'],
+            [T_ENUM, 'Message to send'],
+        ];
         const pc = [
             { db: 1, id: 1, cls: cls(1, 'combination lock', 123, lockFields, [1, 2]) },
             { db: 1, id: 2, cls: cls(2, 'Class Messenger', 137, messengerFields, [3235, 6]) },
@@ -335,7 +460,6 @@ describe('ootfclass', () => {
         const patched = patchRecordModel(modelRec('x', 19, 7), { id: 8, db: 0 }, bounds);
         expect([...splitClassRecord(patched).body.subarray(16, 80)]).toEqual([...bounds]);
     });
-
 
     it('does not retarget kinds that need a model', () => {
         const pc = [{ db: 1, id: 1, cls: cls(1, 'Lever', 13, [], []) }];
