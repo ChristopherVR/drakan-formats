@@ -579,6 +579,12 @@ export async function convertOotfLevels(
                 else if (hostDbForStem(st) !== null && ps2.mods?.has(st)) modelFiles.add(odb.file);
             }
             const crossWant: { stem: string; cls: OdbClass }[] = [];
+            const skinnedIds = new Set(builder.report.creatures.map((creature) => creature.id));
+            const modelSkinned = (cls: OdbClass): boolean => {
+                const owner = ownerOf.get(cls);
+                const id = owner && cls.model ? builder.mapModelRef(cls.model.db, cls.model.id, owner) : null;
+                return id !== null && skinnedIds.has(id);
+            };
             const planOpts: PlanOptions = {
                 modelOdbFiles: modelFiles,
                 keepOwnModel: (cls) => convertOwn.has(cls),
@@ -595,11 +601,7 @@ export async function convertOotfLevels(
                           },
                 substituteEngineId: PS2_SUBSTITUTES,
                 modelOdbFile: hostFile,
-                modelSkinned: (cls) => {
-                    const ow = ownerOf.get(cls);
-                    const id = ow && cls.model ? builder.mapModelRef(cls.model.db, cls.model.id, ow) : null;
-                    return id !== null && builder.report.creatures.some((c) => c.id === id);
-                },
+                modelSkinned,
                 templateSkinned: (c, file) => {
                     const st = c.model ? containerStem(file.replace(/\.ODB$/i, ''), c.model.db) : null;
                     return !!c.model && !!st && !!modOf(st)?.find(0x0208, c.model.id);
@@ -620,7 +622,9 @@ export async function convertOotfLevels(
                     ? (cls, file) => {
                           const ow = ownerOf.get(cls);
                           const fStem = file.replace(/\.ODB$/i, '');
-                          if (fStem !== hostStem && ps2.hostFiles?.has(fStem) && modelFiles.has(file)) {
+                          // The shared builder owns skeletons and clips. A class in another ODB must
+                          // reference that model through its dependency, even if it has its own static MOD.
+                          if (!modelSkinned(cls) && fStem !== hostStem && ps2.hostFiles?.has(fStem) && modelFiles.has(file)) {
                               if (!ow || !cls.model) return null;
                               // Particle / flame classes (engine 43, 71, 97) hung the level load while their "Particle Life Time" was 0
                               // (`mergeDefaults` now sets 0.5 s); OOTF_XODB_FX=0 keeps them out of template ODBs again.
