@@ -62,6 +62,16 @@ import { applyMusicTriggers, findMusicTriggers, musicTriggerClassNames } from '.
 import { applyPuzzleLogic } from './ootfpuzzle.ts';
 import type { Ps2TextureOptions, TextureMode } from './ootftex.ts';
 import { TextPlan, isTextField, parseRrcStrings, rewriteClassTextDefaults, rewriteObjectTexts } from './ootftext.ts';
+import {
+    asciiLevelTitle,
+    assertOotfSource,
+    checkOotfSource,
+    isOotfAirArenaLevel,
+    isOotfArenaLevel,
+    ootfLevelKey,
+    pickRrcPath,
+    type OotfSourceProfile,
+} from './ootfsource.ts';
 import { writePs2Srsc, type Ps2Entry } from './ootfcontainer.ts';
 import {
     ENGINE_CLASSES,
@@ -208,6 +218,8 @@ export interface OotfStageResult {
 export interface OotfLevelOut {
     pcPath: string;
     title: string;
+    /** A multiplayer arena (by the level's name id, else its `Multiplayer/` folder): see `isOotfArenaLevel`. */
+    arena: boolean;
     parts: Ps2LevelParts;
     /** Per-level splat files to ship instead of the template's (`TXD` = template splat TXD plus the terrain textures). */
     splats: Record<string, Uint8Array>;
@@ -245,6 +257,8 @@ export interface OotfPipelineResult {
     assets: AssetReport | null;
     classPlan: ClassPlan | null;
     warnings: string[];
+    /** Language of the PC install and the source checks (ootfsource.ts); null when no level loaded. */
+    source: OotfSourceProfile | null;
 }
 
 /** PC multiplayer-only engine ids (launch pads, Soul Crystal, dragon invulnerability) that become arena data, not objects. */
@@ -326,6 +340,7 @@ export async function convertOotfLevels(
         assets: null,
         classPlan: null,
         warnings: [],
+        source: null,
     };
     const stage = async <T>(name: string, fn: () => Promise<T>): Promise<T | null> => {
         try {
@@ -371,11 +386,20 @@ export async function convertOotfLevels(
     // Multiplayer/* levels are arenas, not campaign chapters: one conversion can hold both (a campaign pack and an arena
     // pack converted separately collide on RESOURES/WORLDCON/PROCTEES and on the new class ids). The arenas stay out of
     // the campaign plan (no exits, default titles) and sort after the chapters in `levels`.
-    const campaignPcs = pcs.filter((p) => !isOotfArenaPath(p.path));
-    const plan0: CampaignPlan | null =
-        opt.campaign !== false && campaignPcs.length > 1 ? planCampaign(campaignPcs, { prefix: 'OotF' }) : null;
+    const campaignPcs = pcs.filter((p) => !isOotfArenaLevel(p));
+    const campaignOn = opt.campaign !== false && campaignPcs.length > 1;
+    // The install's language and the facts a localized install could break: fail here with the reasons instead of
+    // writing a pack whose levels have lost classes or exits (docs/journal/2026-11-06/issue-3-localized-ootf.md).
+    const rrc = await loadRrcStrings(src);
+    if (pcs.length) {
+        res.source = checkOotfSource(pcs, rrc, (c) => transitionFieldIndex(c.fields) >= 0, campaignOn);
+        log(`source language: ${res.source.language.language} (${res.source.language.evidence})`);
+        for (const w of res.source.warnings) res.warnings.push(`source: ${w}`);
+        assertOotfSource(res.source);
+    }
+    const plan0: CampaignPlan | null = campaignOn ? planCampaign(campaignPcs, { prefix: 'OotF' }) : null;
     if (plan0) for (const w of plan0.warnings) res.warnings.push(`campaign: ${w}`);
-    const textPlan = new TextPlan({ rrc: await loadRrcStrings(src) });
+    const textPlan = new TextPlan({ rrc: rrc.strings });
 
     // ---- shared assets
     const hostStem = (opt.hostStem ?? 'RESOURES').toUpperCase();
@@ -888,7 +912,7 @@ export async function convertOotfLevels(
             row.ps2Name = musicClass.cls.name;
             row.reason = undefined;
             row.detail = 'music trigger: rewritten to the Triggered Music Loop class';
-        } else if (ARENA_EXPORT_RFL.has(row.rfl) && /^multiplayer[\\/]/i.test(row.pcPath)) {
+        } else if (ARENA_EXPORT_RFL.has(row.rfl) && pc && isOotfArenaLevel(pc)) {
             row.reason = 'arena-export';
             row.detail = 'no PS2 engine class; the editor exports it as an arena spawn / marker (maps/*.ini)';
         }
@@ -1074,10 +1098,13 @@ export async function convertOotfLevels(
                       convertTerrainTextures(pc, src, ps2.splatTxd!, splatDb, opt.terrain),
                   )
                 : null;
-        const title = (
+        // Campaign titles are already runtime-safe; caller names of a localized install may hold umlauts, which the runtime
+        // refuses in a level name (it then ignores the level): transliterate them (ASCII names are unchanged).
+        const title =
             (plan0 && campaignTitle(plan0, pc.path)) ||
-            (opt.name ? opt.name(pc) : pcLevelName(pc.header))
-        ).slice(0, 60);
+            asciiLevelTitle(opt.name ? opt.name(pc) : pcLevelName(pc.header))
+                .slice(0, 60)
+                .trim();
         const convertOnce = (): Ps2LevelParts =>
             convertPcLevel(pc, {
                 template: { header: tplHeader, classes },
@@ -1194,7 +1221,7 @@ export async function convertOotfLevels(
         };
         if (opt.music !== false && musicClass) {
             await stage(`music ${pc.path}`, async () => {
-                applyMusicTriggers(lvl.objects, findMusicTriggers(pc), pc.path, {
+                applyMusicTriggers(lvl.objects, findMusicTriggers(pc), ootfLevelKey(pc), {
                     startOn: opt.musicStartOn,
                     musicClass: {
                         dbIndex: musicClass.t.dbIndex,
@@ -1527,7 +1554,7 @@ export async function convertOotfLevels(
             ] ?? 0,
         );
         if (lf) parts.terrain = parts.terrain.map((L) => ({ ...L, flags: L.flags | lf }));
-        res.levels.push({ pcPath: pc.path, title, parts, splats: tex ? { TXD: tex.txd } : {} });
+        res.levels.push({ pcPath: pc.path, title, arena: isOotfArenaLevel(pc), parts, splats: tex ? { TXD: tex.txd } : {} });
     }
     // The pack lists the levels in this order (mod.toml `levels`, whose first entry is the campaign start): play order,
     // not the order the caller passed them in (a directory listing is alphabetical).
@@ -1725,7 +1752,7 @@ function ensureSingletons(
         'DRAKAN_DBG_DRAGON'
     ];
     if (
-        (/^multiplayer[\\/]air[\\/]/i.test(pc.path) || dbgDragon === '1') &&
+        (isOotfAirArenaLevel(pc) || dbgDragon === '1') &&
         dbgDragon !== '0' &&
         !list.objects.some((o) => rflOf(o) === 28)
     ) {
@@ -1744,13 +1771,15 @@ function ensureSingletons(
 
 export type { ConversionReport };
 
-/** Dragon.rrc strings of the install (`<0xNNNN>` references), empty when the file is missing. */
-async function loadRrcStrings(src: PcFileSource): Promise<Map<number, string>> {
+/** Dragon.rrc strings of the install (`<0xNNNN>` references), empty when the file is missing or unreadable. */
+async function loadRrcStrings(
+    src: PcFileSource,
+): Promise<{ path: string | null; others: string[]; strings: Map<number, string> }> {
+    const { path, others } = pickRrcPath(await src.list());
     try {
-        const path = (await src.list()).find((p) => /(^|\/)dragon\.rrc$/i.test(p));
         const bytes = path ? await src.read(path) : null;
-        return bytes ? await parseRrcStrings(await SrscReader.fromBytes(bytes)) : new Map();
+        return { path, others, strings: bytes ? await parseRrcStrings(await SrscReader.fromBytes(bytes)) : new Map() };
     } catch {
-        return new Map();
+        return { path, others, strings: new Map() };
     }
 }

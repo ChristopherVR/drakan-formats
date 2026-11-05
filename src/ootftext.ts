@@ -13,6 +13,7 @@
 //     text in the XDB is Windows-1252 with `\r\n` line breaks (docs/reference/level-format.md section 13 / 15.4).
 
 import { cp1252Byte } from './xdb.ts';
+import { rawToCp1252 } from './ootfsource.ts';
 import { encodeXdbString } from './xdbwrite.ts';
 import { FIELD_STRING, decodeFieldValue, fieldBase, fieldIsArray, fieldIsIndirect, type ClassFieldDef } from './fields.ts';
 import type { LvlObject, LvlObjectList } from './lvl.ts';
@@ -73,11 +74,12 @@ const SUBST: Record<string, string> = {
 };
 
 /**
- * PC text -> PS2 string: literal `\n` (backslash, n) and `|` line breaks become `\r\n`, bare LF/CR pairs are normalised,
+ * PC text (raw Windows-1252 bytes or Unicode) -> PS2 string: literal `\n` (backslash, n) and `|` line breaks become `\r\n`, bare LF/CR pairs are normalised,
  * trailing blanks go, and anything outside Windows-1252 becomes `?` (listed in `replaced`).
  */
 export function cleanGameText(raw: string): TextCleanup {
-    let t = raw.replace(/\\n/g, '\n').replace(/\r\n|\r|\n/g, '\n').replace(/[ \t]+\n/g, '\n').replace(/\n[ \t]+/g, '\n').trim();
+    // Raw PC bytes 0x80..0x9f are Windows-1252 punctuation (German `„ “`, `’`), not control characters.
+    let t = rawToCp1252(raw).replace(/\\n/g, '\n').replace(/\r\n|\r|\n/g, '\n').replace(/[ \t]+\n/g, '\n').replace(/\n[ \t]+/g, '\n').trim();
     const replaced: string[] = [];
     let out = '';
     for (const ch of t) {

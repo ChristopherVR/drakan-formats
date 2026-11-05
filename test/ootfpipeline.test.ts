@@ -1,6 +1,7 @@
 // Synthetic stage outputs: no game assets. Exercise the pipeline's final object retention policy.
 import { describe, expect, it, vi } from 'vitest';
 import { convertOotfLevels } from '../src/ootfpipeline.ts';
+import { OotfSourceError } from '../src/ootfsource.ts';
 import { loadPcLevel, type PcLevel } from '../src/pc.ts';
 import { convertPcLevel, ps2ClassTables, writePs2Terrain } from '../src/convert.ts';
 import { planClassMapping, type ClassPlan } from '../src/ootfclass.ts';
@@ -181,5 +182,69 @@ describe('cinematic object retention', () => {
         expect(result.levels).toHaveLength(1);
         expect(result.levels[0]!.parts.objects.objects.map((o) => o.id)).toEqual([1000, 2000]);
         expect(result.levels[0]!.parts.objects.objects.find((o) => o.id === 2000)!.links).toEqual([1000]);
+    });
+});
+
+describe('localized source checks (issue #3)', () => {
+    it('stops before writing anything when placed objects come from a database the install lacks', async () => {
+        const header: LvlHeader = {
+            name: { text: '<0x9000>Ruinendorf', raw: new Uint8Array([82, 0]) },
+            maxWidth: 1,
+            maxHeight: 1,
+            dependencies: [{ dbIndex: 3, path: { text: '../../Common/NPC/NPCs', raw: new Uint8Array([78, 0]) } }],
+            trailer: new Uint8Array(),
+        } as unknown as LvlHeader;
+        const placed: LvlObject = {
+            id: 1,
+            classId: 1,
+            dbIndex: 3,
+            prefix0: 0,
+            prefix1: 0,
+            flags: 1,
+            pos: [0, 0, 0],
+            rot: [0, 0, 0],
+            scale: null,
+            links: [],
+            params: [],
+            data: [],
+            initialEvents: 0,
+            radius: null,
+            preSentinel: 0,
+            sentinel: 0xffffffff,
+        };
+        const pc = {
+            path: 'Bergwelt/Ruinendorf/Ruinendorf.lvl',
+            header,
+            terrain: [],
+            list: { objects: [placed], warnings: [] },
+            classes: new Map(),
+            odbPaths: new Map(),
+            warnings: [],
+        } as unknown as PcLevel;
+        vi.mocked(loadPcLevel).mockResolvedValue(pc);
+        vi.mocked(ps2ClassTables).mockReturnValue(new Map());
+        vi.mocked(convertPcLevel).mockClear();
+        const payloads = new Map([
+            [LVL_TYPE_HEADER, writeLevelHeader({ ...header, dependencies: [] })],
+            [LVL_TYPE_OBJECTS, writeObjectList({ objects: [], warnings: [] })],
+            [LVL_TYPE_LAYERS, writePs2Terrain([], () => new Uint8Array())],
+        ]);
+        const template = {
+            entries: [...payloads].map(([type], index) => ({ type, index })),
+            readRaw: async (entry: { type: number }) => payloads.get(entry.type)!,
+        } as unknown as SrscReader;
+        await expect(
+            convertOotfLevels({ list: async () => [], read: async () => null }, [pc.path], {
+                template,
+                odbs: new Map(),
+            }),
+        ).rejects.toThrow(OotfSourceError);
+        await expect(
+            convertOotfLevels({ list: async () => [], read: async () => null }, [pc.path], {
+                template,
+                odbs: new Map(),
+            }),
+        ).rejects.toThrow(/NPCs.*Copy the complete install/);
+        expect(convertPcLevel).not.toHaveBeenCalled();
     });
 });

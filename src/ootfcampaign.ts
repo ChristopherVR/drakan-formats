@@ -36,6 +36,13 @@ import {
 import type { PcLevel } from './pc.ts';
 import { layerHeightAt, terrainGroundBelow, type TerrainLayer } from './terrain.ts';
 import { pcDependencyKey, pcLevelName, resolvePcPath } from './pc.ts';
+import {
+    OOTF_BOOK_LEVEL_ID,
+    OOTF_FIRST_LEVEL_ID,
+    OOTF_INTRO_PATH,
+    asciiLevelTitle,
+    ootfLevelKey,
+} from './ootfsource.ts';
 
 // ---------------------------------------------------------------- types
 
@@ -78,6 +85,9 @@ export interface CampaignExit {
      */
     autoSeconds?: number;
 }
+
+/** Longest level title the converter writes (the pipeline cuts other titles there too); the runtime takes 80. */
+export const CAMPAIGN_TITLE_MAX = 60;
 
 /** Length of the three Intro sequences ("Intro 1", "Intro 2", "Intro 3": 14.5 + 10.2 + 16.4 s) plus a short margin. */
 export const INTRO_SECONDS = 44;
@@ -180,10 +190,16 @@ export function pcExits(pc: PcLevel): PcExit[] {
     return out;
 }
 
+/** Engine class of the player; the fallback when a localized install names its Rynn class differently. */
+const RFL_PLAYER = 9;
+
 function rynnStart(pc: PcLevel): Vec3 | null {
+    const named = pc.list.objects.some(
+        (o) => pc.classes.get(o.dbIndex)?.get(o.classId)?.name.trim().toLowerCase() === 'rynn',
+    );
     for (const o of pc.list.objects) {
         const cls = pc.classes.get(o.dbIndex)?.get(o.classId);
-        if (cls?.name.trim().toLowerCase() === 'rynn') {
+        if (cls?.name.trim().toLowerCase() === 'rynn' || (cls && !named && cls.rflClass === RFL_PLAYER)) {
             // The converted level starts Rynn 400 units over the ground under the PC start (convert.ts); the arrival marker has to
             // match, or the respawned player hangs at the raw PC height (inside the rock or high in the sky) and the camera with her.
             const p: Vec3 = [...o.pos];
@@ -216,7 +232,8 @@ function nameStringId(h: PcLevel['header']): number | null {
 }
 
 function readable(name: string): string {
-    const t = name.trim().replace(/\s+/g, ' ');
+    // Localized names (`Grimstone-Höhlen`) become runtime-safe ASCII (`Grimstone-Hoehlen`); English names are unchanged.
+    const t = asciiLevelTitle(name);
     return t === t.toLowerCase() ? t.replace(/\b[a-z]/g, (c) => c.toUpperCase()) : t;
 }
 
@@ -276,9 +293,12 @@ export function planCampaign(levels: readonly PcLevel[], opt: CampaignOptions = 
         const ib = nameStringId(b.header) ?? -1;
         return ia - ib || a.path.localeCompare(b.path);
     });
-    // Start: explicit, else a level called Intro, else the first.
+    // Start: explicit, else a level called Intro (the retail intro is keyed by path: it has no name id), else the first.
     const startPath =
-        opt.startPath ?? sorted.find((l) => /intro/i.test(l.path) && !/book/i.test(l.path))?.path ?? sorted[0]?.path;
+        opt.startPath ??
+        sorted.find((l) => ootfLevelKey(l) === OOTF_INTRO_PATH)?.path ??
+        sorted.find((l) => /intro/i.test(l.path) && !/book/i.test(l.path))?.path ??
+        sorted[0]?.path;
     if (startPath) {
         const i = sorted.findIndex((l) => normalizeLevelRef(l.path) === normalizeLevelRef(startPath));
         if (i > 0) sorted.unshift(...sorted.splice(i, 1));
@@ -290,8 +310,13 @@ export function planCampaign(levels: readonly PcLevel[], opt: CampaignOptions = 
     const seenMangled = new Map<string, string>();
     sorted.forEach((pc, index) => {
         const pcName = pcLevelName(pc.header);
-        const displayName = readable(pcName.replace(/\s+level$/i, '') || pcName);
-        const title = `${prefix} ${String(index).padStart(pad, '0')} - ${displayName}`;
+        const lead = `${prefix} ${String(index).padStart(pad, '0')} - `;
+        // The title is the level's folder, its LEVELLST name and every exit's destination text, and the pipeline keeps at most
+        // CAMPAIGN_TITLE_MAX characters of a level title: cut long (localized) names here so all of them agree.
+        const displayName = (readable(pcName.replace(/\s+level$/i, '') || pcName) || `Level ${index}`)
+            .slice(0, Math.max(1, CAMPAIGN_TITLE_MAX - lead.length))
+            .trim();
+        const title = `${lead}${displayName}`;
         const mangled = mangleComponent(title);
         const clash = seenMangled.get(mangled);
         if (clash) warnings.push(`"${title}" and "${clash}" both mangle to ${mangled}`);
@@ -327,7 +352,9 @@ export function planCampaign(levels: readonly PcLevel[], opt: CampaignOptions = 
                     `${lv.title}: exit ${e.obj.id} "${e.className}" leads to "${e.text}", which is not in the campaign`,
                 );
             lv.exits.push({
-                ...(/book/i.test(lv.pcName) ? { autoSeconds: BOOK_SECONDS } : {}),
+                ...(lv.nameStringId === OOTF_BOOK_LEVEL_ID || /book/i.test(lv.pcName)
+                    ? { autoSeconds: BOOK_SECONDS }
+                    : {}),
                 reason: 'pc',
                 pcObjectId: e.obj.id,
                 pcClassName: e.className,
@@ -346,7 +373,10 @@ export function planCampaign(levels: readonly PcLevel[], opt: CampaignOptions = 
     const start = out[0];
     const first = opt.firstPath
         ? find(opt.firstPath)
-        : (out.find((l) => /^ruined village$/i.test(l.pcName)) ?? out[1] ?? null);
+        : (out.find((l) => l.nameStringId === OOTF_FIRST_LEVEL_ID) ??
+          out.find((l) => /^ruined village$/i.test(l.pcName)) ??
+          out[1] ??
+          null);
     if (start && first && start !== first && !start.exits.some((e) => e.destPath)) {
         // Where the PC intro ends: the "Stomp" detector the player walks into (it plays the closing sequence). Without one the
         // hand-over sits at the Rynn start.

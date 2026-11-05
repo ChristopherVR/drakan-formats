@@ -36,5 +36,6 @@ export * from './anim.ts';
 export * from './ootfpipeline.ts';
 export * from './ootfcampaign.ts';
 export * from './ootftext.ts';
+export * from './ootfsource.ts';
 export * from './ootfmusic.ts';
 export * from './ootfpuzzle.ts';
