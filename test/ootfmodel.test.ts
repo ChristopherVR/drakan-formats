@@ -160,6 +160,31 @@ describe('PC model -> PS2 model', () => {
         expect(pcToNeutral(pc).stats.polygonsDropped).toBe(1);
     });
 
+    it('points the PC bounds lists at the triangles a split quad or a dropped polygon left', async () => {
+        const pc = (await parsePcModel(await SrscReader.fromBytes(pcModelFile()), 7))!;
+        // PC hierarchy (no 8-byte prefix): a root over two leaves, the first listing PC polygon 1, the second polygon 0 (the quad)
+        const pcb = new Uint8Array(68 + 3 * 4 + 50 + 52 + 52);
+        const dv = new DataView(pcb.buffer);
+        dv.setUint16(64, 3, true);
+        dv.setUint16(66, 1, true);
+        dv.setUint16(68, 1, true); // root: first child 1
+        dv.setUint16(72 + 2, 2, true); // leaf 1: next sibling 2
+        let o = 80 + 50;
+        dv.setUint16(o + 48, 1, true);
+        dv.setUint16(o + 50, 1, true);
+        o += 52;
+        dv.setUint16(o + 48, 1, true);
+        dv.setUint16(o + 50, 0, true);
+        pc.bounds = pcb;
+        const lists = (m: { bounds: Uint8Array | null }) => parseObbHierarchy(m.bounds!)?.map((s) => s.polygons);
+        // the quad became triangles 0 and 1, the triangle is now 2
+        expect(lists(pcToNeutral(pc).model)).toEqual([[], [2], [0, 1]]);
+        // with the triangle's texture unmapped it is gone and its leaf lists nothing
+        const dropped = pcToNeutral(pc, { mapTexture: (t) => (t.id === 11 ? { id: 1, db: 0 } : null) });
+        expect(dropped.stats.polygonsDropped).toBe(1);
+        expect(lists(dropped.model)).toEqual([[], [], [0, 1]]);
+    });
+
     it('computes unit normals in the PS2 sign convention', () => {
         const pos = Float32Array.from([0, 0, 0, 1, 0, 0, 0, 0, 1]);
         // PS2 stores the opposite sign of the counter-clockwise Newell normal (checked on the disc)

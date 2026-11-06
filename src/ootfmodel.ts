@@ -612,6 +612,33 @@ export interface PcToPs2Stats {
     flatToSmooth: boolean;
 }
 
+/**
+ * Rewrite the polygon lists of an OBB 0x0207 hierarchy through `map` (old polygon index -> the new indices it became): the PC
+ * lists name PC polygons, and the conversion splits quads into two triangles and drops polygons of unmapped textures, so the
+ * copied lists named the wrong triangles. Volcanic's sanctum central platform (56 quads among 568 polygons) lost the floor of
+ * its four bridges: Rynn walking from the sanctum floor onto the platform fell into the pit, so the stair to the Runeblade could
+ * not be reached on foot. Shapes and boxes are kept. Null for a sphere hierarchy
+ * or anything `parseObbHierarchy` rejects, and when a list names a polygon `map` does not know.
+ */
+export function remapObbPolygons(bounds: Uint8Array, map: readonly (readonly number[])[]): Uint8Array | null {
+    const shapes = parseObbHierarchy(bounds);
+    if (!shapes || shapes.some((s) => s.polygons.some((p) => p >= map.length))) return null;
+    const lists = shapes.map((s) => s.polygons.flatMap((p) => map[p]!));
+    if (lists.some((l) => l.some((p) => p > 0xffff))) return null;
+    const n = shapes.length;
+    const out = new Uint8Array(76 + n * 4 + lists.reduce((t, l) => t + 50 + l.length * 2, 0));
+    out.set(bounds.subarray(0, 76 + n * 4));
+    const dv = view(out);
+    let o = 76 + n * 4;
+    shapes.forEach((s, i) => {
+        s.box.forEach((v, k) => f32(dv, o + k * 4, v));
+        dv.setUint16(o + 48, lists[i]!.length, true);
+        lists[i]!.forEach((p, k) => dv.setUint16(o + 50 + k * 2, p, true));
+        o += 50 + lists[i]!.length * 2;
+    });
+    return out;
+}
+
 /** Convert a parsed PC static model to the neutral (PS2) form. */
 export function pcToNeutral(pc: PcModel, opt: PcToPs2Options = {}): { model: NeutralModel; stats: PcToPs2Stats } {
     const stats: PcToPs2Stats = {
@@ -624,8 +651,12 @@ export function pcToNeutral(pc: PcModel, opt: PcToPs2Options = {}): { model: Neu
     const slot = new Map<number, number>(); // PC texture index -> PS2 index
     const nv = pc.positions.length / 3;
     const polygons: NeutralPoly[] = [];
+    // PC polygon index -> the indices of what it became (none when dropped, two for a split quad), for the bounds lists.
+    const polyMap: number[][] = [];
     const split = !(opt.keepQuads ?? false);
     for (const p of pc.polygons) {
+        const into: number[] = [];
+        polyMap.push(into);
         let idx = slot.get(p.texture);
         if (idx === undefined) {
             const src = pc.textures[p.texture];
@@ -644,6 +675,7 @@ export function pcToNeutral(pc: PcModel, opt: PcToPs2Options = {}): { model: Neu
         // banners, thin walls and cards vanish from behind without it. Alpha textures are double sided too.
         const flags = opt.doubleSided?.(textures[idx]!) || (p.flags & 2) !== 0 ? 2 : 0;
         if (p.indices.length === 3 || !split) {
+            into.push(polygons.length);
             polygons.push({
                 flags: flags | (p.indices.length === 4 ? 4 : 0),
                 texture: idx,
@@ -656,6 +688,7 @@ export function pcToNeutral(pc: PcModel, opt: PcToPs2Options = {}): { model: Neu
                 [0, 1, 2],
                 [0, 2, 3],
             ]) {
+                into.push(polygons.length);
                 polygons.push({
                     flags,
                     texture: idx,
@@ -675,6 +708,7 @@ export function pcToNeutral(pc: PcModel, opt: PcToPs2Options = {}): { model: Neu
     if (pc.bounds && pc.bounds.length >= 72 && !ootfDebugFlag('OOTF_SYNTH_BOUNDS')) {
         bounds = new Uint8Array(8 + pc.bounds.length);
         bounds.set(pc.bounds, 8);
+        bounds = remapObbPolygons(bounds, polyMap) ?? bounds;
     }
     return {
         model: {
