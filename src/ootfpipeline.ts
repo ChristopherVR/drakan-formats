@@ -74,6 +74,9 @@ import {
     asciiLevelTitle,
     assertOotfSource,
     checkOotfSource,
+    detectOotfLanguage,
+    type OotfLanguageGuess,
+    OotfSourceError,
     isOotfAirArenaLevel,
     isOotfArenaLevel,
     ootfLevelKey,
@@ -390,6 +393,20 @@ export async function convertOotfLevels(
     for (const p of pcPaths) {
         const pc = await stage(`load ${p}`, () => loadPcLevel(src, p));
         if (pc) pcs.push(pc);
+    }
+    if (pcPaths.length && !pcs.length) {
+        // Every selected level failed to read: say so (with the reader's reasons) instead of returning an empty pack.
+        const why = res.stages
+            .filter((x) => !x.ok)
+            .map((x) => `${x.stage}: ${x.error}`)
+            .slice(0, 3);
+        throw new OotfSourceError(
+            `None of the ${pcPaths.length} selected level(s) could be read as Order of the Flame PC levels.\n` +
+                `- ${why.join('\n- ') || 'unknown reason'}\n` +
+                'Check that you chose the folder of the installed game (the one with the level folders and Dragon.rrc), not a disc image, ' +
+                'and that the install is complete. Localized releases (for example German) are supported; if this install is one, ' +
+                'please report it on GitHub issue #3 with the converter log.',
+        );
     }
 
     // ---- campaign plan, text plan
@@ -1977,6 +1994,17 @@ async function loadRrcStrings(
     } catch {
         return { path, others, strings: new Map() };
     }
+}
+
+/**
+ * The language of an install, from its Dragon.rrc (the same detection the conversion logs). For the importer to show
+ * "German install" as soon as a folder is chosen; never throws.
+ */
+export async function detectOotfInstallLanguage(
+    src: PcFileSource,
+): Promise<{ language: OotfLanguageGuess; rrcPath: string | null }> {
+    const rrc = await loadRrcStrings(src);
+    return { language: detectOotfLanguage(rrc.strings.values()), rrcPath: rrc.path };
 }
 
 /** Model refs (`db << 16 | id`) named by the model-typed fields of a PC class (a Morph Plug's "Morphing Models"). */

@@ -8,6 +8,7 @@ import {
     FLAG_VISIBLE,
     LVL_SENTINEL,
     OotfSourceError,
+    RRC_STRING_TYPE,
     TextPlan,
     asciiLevelTitle,
     assertOotfSource,
@@ -22,14 +23,17 @@ import {
     levelNameProblem,
     ootfLevelKey,
     paletteFor,
+    parseRrcStrings,
     pickRrcPath,
     planCampaign,
     rawToCp1252,
     stringToWords,
+    xorRrcString,
     transitionFieldIndex,
     type LvlObject,
     type OdbClass,
     type PcLevel,
+    type SrscReader,
 } from '../src/index.ts';
 
 /** A string the PC readers would return for these Windows-1252 bytes (one code unit per byte). */
@@ -298,5 +302,91 @@ describe('checkOotfSource', () => {
             true,
         );
         expect(unclear.warnings.join('\n')).toMatch(/could not tell/);
+    });
+});
+
+/** A Dragon.rrc as the PC readers see it: XOR-coded Windows-1252 records, one entry per string id. */
+function fakeRrc(texts: Record<number, number[]>): SrscReader {
+    const bodies = new Map(
+        Object.entries(texts).map(([id, b]) => [Number(id), xorRrcString(Uint8Array.from([...b, 0]))]),
+    );
+    return {
+        entries: [...bodies.keys()].map((id) => ({ type: RRC_STRING_TYPE, id })),
+        readRaw: async (e: { id: number }) => bodies.get(e.id)!,
+    } as unknown as SrscReader;
+}
+
+describe('a German Dragon.rrc end to end', () => {
+    const texts: Record<number, number[]> = {
+        0x9000: cp('Ruinendorf'),
+        0x9001: cp('Das Buch'),
+        0x9003: cp('Grimstone-Höhlen'),
+        0x1: [0x84, ...cp('Du hast den Schlüssel nicht'), 0x93],
+        0x2: cp('Die Fackel ist in der Höhle und nicht bei dem Turm für sie.'),
+        0x3: cp('Der Drache und die Fähigkeit des Magiers ist ein Geschenk mit einer Axt.'),
+        0x4: [0x80, 0x20, ...cp('5'), 0x85, 0x20, 0x97, 0x20, 0x92], // € … — ’ (Windows-1252 only)
+    };
+    it('decodes the XOR-coded bytes, detects German and keeps the 0x80..0x9f characters', async () => {
+        const strings = await parseRrcStrings(fakeRrc(texts));
+        expect(strings.size).toBe(Object.keys(texts).length);
+        expect(strings.get(0x9003)).toBe('Grimstone-Höhlen');
+        expect(detectOotfLanguage(strings.values()).language).toBe('german');
+        expect(rawToCp1252(strings.get(4)!)).toBe('€ 5… — ’');
+        expect(cleanGameText(strings.get(1)!).replaced).toEqual([]);
+    });
+    it('turns every localized level title into a name the runtime accepts', async () => {
+        const strings = await parseRrcStrings(fakeRrc(texts));
+        for (const id of [0x9000, 0x9001, 0x9003]) {
+            const title = asciiLevelTitle(`OotF - ${strings.get(id)}`);
+            expect(levelNameProblem(title)).toBeNull();
+        }
+        expect(asciiLevelTitle('OotF - Grimstone-Höhlen')).toBe('OotF - Grimstone-Hoehlen');
+    });
+    it('does not guess from an empty, missing or unreadable file', async () => {
+        expect(detectOotfLanguage([]).language).toBe('unknown');
+        const strings = await parseRrcStrings(fakeRrc({}));
+        expect(strings.size).toBe(0);
+    });
+});
+
+describe('language detection of the other releases', () => {
+    it('recognises French, Italian and Spanish text, and a German title with only an umlaut', () => {
+        expect(
+            detectOotfLanguage([
+                'Vous avez trouvé la clé pour la porte et le dragon est dans une grotte avec votre ami du village.',
+                'Ce n’est pas le chemin pour les mines, pas dans le noir.',
+            ]).language,
+        ).toBe('french');
+        expect(
+            detectOotfLanguage([
+                'Non hai la chiave per il cancello che è nel villaggio di Rynn.',
+                'Questo è il tuo drago, non sono nel castello con gli altri per una ragione.',
+            ]).language,
+        ).toBe('italian');
+        expect(
+            detectOotfLanguage([
+                'No tienes la llave para el portón que es de los magos, pero esta es tu espada.',
+                'Las puertas del castillo son para los que tienen su permiso, con una llave del reino.',
+            ]).language,
+        ).toBe('spanish');
+    });
+    it('keeps English when German proper nouns appear inside English text', () => {
+        expect(detectOotfLanguage([...ENGLISH_RRC, 'Wartok Höhlen', 'Grimstone']).language).toBe('english');
+    });
+});
+
+describe('level title edge cases of localized installs', () => {
+    it('never produces a name the runtime would refuse, for every Latin-1 and Windows-1252 character', () => {
+        for (let c = 0x20; c <= 0xff; c++) {
+            const title = asciiLevelTitle(`OotF 01 - ${String.fromCharCode(c)}x${String.fromCharCode(c)}`);
+            expect(levelNameProblem(title), `char 0x${c.toString(16)} -> '${title}'`).toBeNull();
+            expect(asciiLevelTitle(title)).toBe(title);
+        }
+    });
+    it('keeps a plain ASCII title untouched, including punctuation the runtime allows', () => {
+        for (const t of ["Dragon's Rest", 'Hill of Fire (ground)', 'OotF 12 - Rift World', 'A+B, C&D #1']) {
+            expect(asciiLevelTitle(t)).toBe(t);
+            expect(levelNameProblem(t)).toBeNull();
+        }
     });
 });

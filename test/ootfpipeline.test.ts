@@ -247,4 +247,26 @@ describe('localized source checks (issue #3)', () => {
         ).rejects.toThrow(/NPCs.*Copy the complete install/);
         expect(convertPcLevel).not.toHaveBeenCalled();
     });
+
+    it('stops with the reader reasons and a hint when no selected level can be read', async () => {
+        vi.mocked(loadPcLevel).mockReset();
+        vi.mocked(loadPcLevel).mockRejectedValue(new Error('not a PC level (bad magic)'));
+        vi.mocked(ps2ClassTables).mockReturnValue(new Map());
+        const header = { name: { text: 'x', raw: new Uint8Array([0]) }, dependencies: [], trailer: new Uint8Array() };
+        const payloads = new Map([
+            [LVL_TYPE_HEADER, writeLevelHeader(header as unknown as LvlHeader)],
+            [LVL_TYPE_OBJECTS, writeObjectList({ objects: [], warnings: [] })],
+            [LVL_TYPE_LAYERS, writePs2Terrain([], () => new Uint8Array())],
+        ]);
+        const template = {
+            entries: [...payloads].map(([type], index) => ({ type, index })),
+            readRaw: async (entry: { type: number }) => payloads.get(entry.type)!,
+        } as unknown as SrscReader;
+        const run = convertOotfLevels({ list: async () => [], read: async () => null }, ['Bergwelt/a.lvl'], {
+            template,
+            odbs: new Map(),
+        });
+        await expect(run).rejects.toThrow(OotfSourceError);
+        await expect(run).rejects.toThrow(/bad magic[\s\S]*folder of the installed game[\s\S]*issue #3/);
+    });
 });
