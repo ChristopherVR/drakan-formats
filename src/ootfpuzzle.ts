@@ -379,6 +379,9 @@ function questItemLocks(env: PuzzleEnv, rep: PuzzleReport): void {
 /** PC Trigger Detector "Task" values (the enum order of both platforms). */
 export const DETECTOR_TASK_PLAY_SEQUENCE = 4;
 export const DETECTOR_TASK_TRIGGER_ONLY = 6;
+/** Messages the PS2 Stomp Player handles itself (Off, On, Blow Up, Load) and Play Sequence; see ootfstomp.ts. */
+const PLAYER_OWN_MESSAGES: ReadonlySet<number> = new Set([0, 1, 5, 23]);
+const PLAYER_PLAY_MESSAGE = 4;
 
 export interface SequenceRelayEnv {
     pc: PcLevel;
@@ -438,12 +441,28 @@ export function relayDetectorSequences(env: SequenceRelayEnv): number {
             if (i >= 0) specs.push({ fieldIndex: i, type: pf![i]!.type, name: pf![i]!.name, value });
             else env.warnings.push(`${env.title}: Stomp Player class has no field "${name}"`);
         };
+        // The PS2 player handles Off, Blow Up and Load itself and never compares them with "Message To Play Next" (Volcanic
+        // 978 sends Off: scene 9.2 never played). On arms it, which plays a one-scene list once. For the others a twin of
+        // the detector (same box, gating and senders) starts the player with Play Sequence; the detector keeps its links.
+        const twin = message !== 1 && PLAYER_OWN_MESSAGES.has(message);
         field('Sequence List', [...refs]);
         field('List Play Order', 0);
         field('Initial State', 0);
-        field('Message To Play Next', message);
+        field('Message To Play Next', twin ? PLAYER_PLAY_MESSAGE : message);
         setObjectParams(list, object.id, specs);
-        dst.links = [...new Set([...dst.links, object.id])];
+        if (twin) {
+            const { object: copy } = addObject(list, {
+                classId: dst.classId,
+                dbIndex: dst.dbIndex,
+                pos: dst.pos,
+                rot: dst.rot,
+                templateId: dst.id,
+            });
+            copy.links = [object.id];
+            setNamedParam(list, copy, fields, 'Trigger Message', PLAYER_PLAY_MESSAGE);
+            for (const x of list.objects)
+                if (x !== copy && x.links.includes(dst.id)) x.links = [...new Set([...x.links, copy.id])];
+        } else dst.links = [...new Set([...dst.links, object.id])];
         added++;
     }
     return added;

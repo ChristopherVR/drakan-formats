@@ -39,3 +39,4 @@ export * from './ootftext.ts';
 export * from './ootfsource.ts';
 export * from './ootfmusic.ts';
 export * from './ootfpuzzle.ts';
+export * from './ootfstomp.ts';

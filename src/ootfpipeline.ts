@@ -43,6 +43,7 @@ import {
     writePs2Sdb,
     type PcSoundBank,
 } from './ootfsound.ts';
+import { convertStompPlayers, pcStompPlayer } from './ootfstomp.ts';
 import { convertPcSequences, sequenceSoundRefs, sequenceSsdStem, ssdPackFiles, usedIdsOf } from './ootfseq.ts';
 import { SrscReader } from './srsc.ts';
 import {
@@ -966,6 +967,13 @@ export async function convertOotfLevels(
                         out.push({ owner: ow, ref: v >>> 0, target: resolve?.(o.dbIndex, o.classId) ?? null });
                 }
             }
+            // A Stomp Player without its own list plays its PC class's default list (convertStompPlayers writes it out).
+            const stomp = kind === 'sequence' ? pcStompPlayer(pc, o) : null;
+            if (stomp?.sequencesFromClass && stomp.sequences.length) {
+                await builder.registerOwner(ow);
+                for (const v of stomp.sequences)
+                    out.push({ owner: ow, ref: v, target: resolve?.(o.dbIndex, o.classId) ?? null });
+            }
         }
         return out;
     };
@@ -1342,13 +1350,31 @@ export async function convertOotfLevels(
         if (sequencePlayer && opt.sequences !== false) {
             await stage(`sequence players ${pc.path}`, async () => {
                 const resolve = resolverFor(pc);
+                const classOf = (o: LvlObject): OdbClass | undefined =>
+                    classes.get(o.dbIndex)?.get(o.classId) ??
+                    plan?.synthesized.find((x) => x.dbIndex === o.dbIndex && x.classId === o.classId)?.cls;
+                // PC and PS2 number List Play Order differently and start scenes differently (ootfstomp.ts).
+                const stomps = convertStompPlayers({
+                    pc,
+                    list: lvl.objects,
+                    title,
+                    classOf,
+                    mapSequence: (o, ref) => {
+                        const ow = owner(pc, o.dbIndex);
+                        return ow ? (seqIds.get(`${pc.path}|${ow}|${ref >>> 0}`) ?? null) : null;
+                    },
+                    warnings: res.warnings,
+                });
+                const changed = stomps.filter((s) => s.ps2Order !== s.before || s.classList);
+                if (changed.length)
+                    console.warn(
+                        `sequences ${title}: Stomp Players ${changed.map((s) => `${s.id} order ${s.before}->${s.ps2Order}${s.classList ? ' (class list)' : ''}`).join(', ')}`,
+                    );
                 const n = relayDetectorSequences({
                     pc,
                     list: lvl.objects,
                     title,
-                    classOf: (o) =>
-                        classes.get(o.dbIndex)?.get(o.classId) ??
-                        plan?.synthesized.find((x) => x.dbIndex === o.dbIndex && x.classId === o.classId)?.cls,
+                    classOf,
                     player: { dbIndex: sequencePlayer.t.dbIndex, classId: sequencePlayer.t.classId },
                     relayed: (o) => {
                         const t = resolve?.(o.dbIndex, o.classId);
