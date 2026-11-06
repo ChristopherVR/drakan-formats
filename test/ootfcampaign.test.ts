@@ -445,6 +445,16 @@ describe('applyCampaignExits', () => {
         expect(value(31)).toBeUndefined(); // same as the class default: not written
     });
 
+    it('drops Maintain Player Position on an exit whose destination has no way back (it lands on the Rynn start)', () => {
+        const plan = planCampaign(fixture());
+        const canyon = plan.levels.find((l) => l.path.endsWith('canyon.lvl'))!;
+        // 30 leads to the end, which only gets a synthesized arrival marker; 31 leads back to the village and its exit 11
+        expect(canyon.exits.find((e) => e.pcObjectId === 30)!.maintainPosition).toBe(0);
+        expect(canyon.exits.find((e) => e.pcObjectId === 31)!.maintainPosition).toBe(1);
+        const village = plan.levels.find((l) => l.path.endsWith('Ruined Village.lvl'))!;
+        expect(village.exits.find((e) => e.pcObjectId === 11)!.maintainPosition).toBe(1);
+    });
+
     it('setExitDestinationId keeps string payloads of other parameters intact', () => {
         const o = obj(1, 1, {
             params: [{ fieldIndex: 3, type: FIELD_STRING, name: 'Name', nameRaw: new Uint8Array(6) }],

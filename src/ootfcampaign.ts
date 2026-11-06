@@ -423,6 +423,21 @@ export function planCampaign(levels: readonly PcLevel[], opt: CampaignOptions = 
             b.exits.push(synth(b, a, 'arrival', at, opt.arrivalOffset));
         }
     }
+    // An exit whose destination has no PC way back lands on that synthesized marker, the destination's Rynn start: there is no
+    // exit there to keep the player's offset from, so "Maintain Player Position" is dropped. Kept, the offset from the exit
+    // object put Rynn 76,000 units over the Rift Crystal start (the Islands exit lies at height 0, its detector box over the
+    // bell tower); after the long fall she had no control and the world was no longer drawn
+    // (docs/journal/2026-11-06/ootf-rift-mount-arrival.md).
+    for (const a of out) {
+        for (const e of a.exits) {
+            if (e.reason !== 'pc' || !e.destPath || e.maintainPosition === undefined) continue;
+            const b = byPath.get(normalizeLevelRef(e.destPath))!;
+            const back = b.exits.filter(
+                (x) => x.destPath && normalizeLevelRef(x.destPath) === normalizeLevelRef(a.path),
+            );
+            if (back.length && back.every((x) => x.reason === 'arrival')) e.maintainPosition = 0;
+        }
+    }
 
     // Edges, reachability, roles.
     const edges: CampaignEdge[] = [];
