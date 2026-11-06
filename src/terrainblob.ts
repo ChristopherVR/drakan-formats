@@ -7,6 +7,7 @@ import type { TerrainLayer } from './terrain.ts';
  *
  * ```
  * u16 seq, u16 level_tag, u32 pool, u32 x_lo, u32 x_hi, u32 z_lo, u32 z_hi, u32 chunk_count
+ *   or u32 0 (no chunks): a layer without one drawn cell
  * chunk_count x {
  *   u32 x0, x1, z0, z1                 // cell range of the chunk (x outer, z inner)
  *   u32 ntex, ntex x u32 ref           // textures drawn in the chunk (id | db << 16)
@@ -92,13 +93,26 @@ function poolSize(hi: number): number {
     return p;
 }
 
-/** Build the inline blob for one layer (see the module comment). Pure; the layer is not modified. */
+/**
+ * Build the inline blob for one layer (see the module comment). Pure; the layer is not modified.
+ *
+ * A layer whose every cell is a hole or invisible gets the disc's empty form (`u32 0`, no chunks), as every such layer of the
+ * 14 PAL levels has. Chunks that all list no texture make the engine build a terrain section with zero texture pages, which
+ * its draw pass still links into the section LRU (`0x4dff60`) while the unload (`FUN_0015c820`) only unlinks sections with
+ * pages: after a quick load the list runs through freed memory and the eviction walk (`FUN_0015e5a0`) never returns
+ * (docs/journal/2026-11-07/ootf-quickload-lru.md).
+ */
 export function buildPs2TerrainBlob(layer: TerrainLayer, opts: TerrainBlobOptions = {}): Uint8Array {
     const w = layer.width;
     const h = layer.height;
     const flat = (layer.flags & LAYER_FLAG_FLAT) !== 0;
     const outsideAny = (opts.outside ?? (flat ? 'none' : 'any')) === 'any';
     const o = new Out();
+    if (!layer.cellTexLeft.some((t) => !isSpecial(t))) {
+        o.u32(0);
+        writeNormals(o, layer, flat);
+        return o.done();
+    }
     const xHi = 4 * w - 1;
     const zHi = 4 * h - 1;
     o.u16(opts.seq ?? 1);
@@ -199,7 +213,12 @@ export function buildPs2TerrainBlob(layer: TerrainLayer, opts: TerrainBlobOption
         }
     }
 
-    // Normals: entry 0 is always zero; a flat layer has one more entry pointing up; others have one per vertex.
+    writeNormals(o, layer, flat);
+    return o.done();
+}
+
+/** Normals: entry 0 is always zero; a flat layer has one more entry pointing up; others have one per vertex. */
+function writeNormals(o: Out, layer: TerrainLayer, flat: boolean): void {
     o.u32(0);
     if (flat) {
         o.u8(0);
@@ -207,8 +226,8 @@ export function buildPs2TerrainBlob(layer: TerrainLayer, opts: TerrainBlobOption
         o.u8(0);
         o.u8(127);
     } else {
-        const sw = w + 1;
-        const sh = h + 1;
+        const sw = layer.width + 1;
+        const sh = layer.height + 1;
         const hAt = (x: number, z: number): number =>
             layer.heights[Math.min(Math.max(z, 0), sh - 1) * sw + Math.min(Math.max(x, 0), sw - 1)]!;
         for (let z = 0; z < sh; z++) {
@@ -223,7 +242,6 @@ export function buildPs2TerrainBlob(layer: TerrainLayer, opts: TerrainBlobOption
             }
         }
     }
-    return o.done();
 }
 
 /** The four cells around a vertex, as offsets from the vertex's own (down-right) cell. */

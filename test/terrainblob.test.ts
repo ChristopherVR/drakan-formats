@@ -1,6 +1,7 @@
 // Synthetic layers only; no game bytes.
 import { describe, expect, it } from 'vitest';
-import { TEX_HOLE } from '../src/terrain.ts';
+import { TEX_HOLE, TEX_INVISIBLE } from '../src/terrain.ts';
+import { readPs2Blob, writePs2Blob } from '../src/terrainwrite.ts';
 import type { TerrainLayer } from '../src/terrain.ts';
 import { limitLayerTextures, ps2BlobBuilder, ps2BlobFor, ps2LevelTag, writePs2Terrain } from '../src/convert.ts';
 import { LAYER_FLAG_FLAT, MAX_CHUNK_TEXTURES, buildPs2TerrainBlob, planTerrainSlots, ps2ChunkSplit } from '../src/terrainblob.ts';
@@ -120,6 +121,31 @@ describe('buildPs2TerrainBlob', () => {
             for (let z = z0; z < z1; z++) for (let x = x0; x < x1; x++) cover[z * 24 + x] = (cover[z * 24 + x] ?? 0) + 1;
         expect(cover.every((c) => c === 1)).toBe(true);
         expect(buildPs2TerrainBlob(L, { maxChunkTextures: 0 }).length).toBeLessThan(b.length);
+    });
+
+    it('writes a layer without one drawn cell in the empty form, as the disc does', () => {
+        // Chunks that all list no texture leave the engine a terrain section with zero texture pages: it is linked into the
+        // section LRU but never unlinked, and a quick load later hangs in the eviction walk.
+        const holes = layer(25, 25, 0, (x) => (x % 2 ? TEX_HOLE : TEX_INVISIBLE));
+        holes.heights.forEach((_, i) => (holes.heights[i] = (i % 7) * 64));
+        const b = buildPs2TerrainBlob(holes, { seq: 3, levelTag: 0x18, slot: { xLo: 0, zLo: 0, pool: 128 } });
+        const blob = readPs2Blob(b);
+        expect(blob.empty).toBe(true);
+        expect(blob.chunks).toHaveLength(0);
+        expect(blob.normals.length).toBe(26 * 26 * 4);
+        expect(writePs2Blob(blob)).toEqual(b);
+        // same normals as the drawn form of the same heights
+        const drawn = readPs2Blob(buildPs2TerrainBlob({ ...holes, cellTexLeft: holes.cellTexLeft.map(() => 0x90001) }));
+        expect(blob.normals).toEqual(drawn.normals);
+        const flat = readPs2Blob(ps2BlobBuilder(0x18)(layer(4, 4, LAYER_FLAG_FLAT, () => TEX_HOLE)));
+        expect(flat.empty).toBe(true);
+        expect([...flat.normals]).toEqual([0, 0x7f, 0, 0x7f]);
+        // one drawn cell is enough for the chunked form; its other chunks may list no texture (the disc has such chunks)
+        const one = layer(25, 25, 0, (x, z) => (x === 0 && z === 0 ? 0x90001 : TEX_HOLE));
+        const c = readPs2Blob(buildPs2TerrainBlob(one));
+        expect(c.empty).toBe(false);
+        expect(c.chunks.filter((k) => k.refs.length > 0)).toHaveLength(1);
+        expect(c.chunks.length).toBe(9);
     });
 
     it('does not mutate the layer and is deterministic', () => {
