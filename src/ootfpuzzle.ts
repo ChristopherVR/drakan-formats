@@ -8,12 +8,13 @@
 //                                    they are linked to counts the PS2 death message.
 //   Map Object / Map Trigger (104)   a PS2 map marker with the PC object's name as journal entry and map label.
 
-import { FLAG_SCALED, FLAG_VISIBLE, addObject, objectParamSpecs, setObjectParams, type LvlObject, type LvlObjectList, type ParamSpec, type Vec3 } from './lvl.ts';
+import { FLAG_SCALED, FLAG_VISIBLE, addObject, type LvlObject, type LvlObjectList, type Vec3 } from './lvl.ts';
 import type { PcLevel } from './pc.ts';
 import { terrainGroundBelow } from './terrain.ts';
 import type { OdbClass } from './odb.ts';
-import { fieldIsIndirect, type ClassFieldDef } from './fields.ts';
-import { setExitDestinationId } from './ootfcampaign.ts';
+import { encodeScalar, fieldIsIndirect, type ClassFieldDef } from './fields.ts';
+import { setExitDestinationId, setPlainParam } from './ootfcampaign.ts';
+import { GENERIC_MARKER } from './ootfclass.ts';
 
 export interface PuzzleClassRef {
     dbIndex: number;
@@ -34,6 +35,11 @@ export interface PuzzleEnv {
     timer?: PuzzleClassRef;
     /** XDB id of a text in the XDB of the object's class database (null: no XDB for it). */
     textId?(o: LvlObject, text: string): number | null;
+    /**
+     * Write class defaults (field name -> dword) into the converted object's own synthesized class record. The game reads
+     * a quest's journal entry, map text and type from its class, not from the placed map marker.
+     */
+    setClassDefaults?(o: LvlObject, values: readonly [string, number][]): void;
     warnings: string[];
 }
 
@@ -57,7 +63,7 @@ export function fieldIndexByName(fields: readonly Pick<ClassFieldDef, 'name'>[] 
 }
 
 /** Set (or add) the object parameter of the field `name`; false when the class has no such scalar field. */
-export function setNamedParam(list: LvlObjectList, o: LvlObject, fields: readonly ClassFieldDef[] | undefined, name: string, value: number): boolean {
+export function setNamedParam(_list: LvlObjectList, o: LvlObject, fields: readonly ClassFieldDef[] | undefined, name: string, value: number): boolean {
     const i = fieldIndexByName(fields, name);
     if (i < 0) return false;
     const f = fields![i]!;
@@ -66,9 +72,9 @@ export function setNamedParam(list: LvlObjectList, o: LvlObject, fields: readonl
         setExitDestinationId(o, { fieldIndex: i, type: f.type, name: f.name }, value);
         return true;
     }
-    const specs: ParamSpec[] = objectParamSpecs(o).filter((s) => s.fieldIndex !== i);
-    specs.push({ fieldIndex: i, type: f.type, name: f.name, value });
-    setObjectParams(list, o.id, specs);
+    // setPlainParam keeps the other parameters word for word. Rebuilding the list from decoded values (setObjectParams)
+    // turned a string id set before (dword = id, length 0) into an empty inline string, so the text was lost.
+    setPlainParam(o, { fieldIndex: i, type: f.type, name: f.name }, encodeScalar(f.type, value));
     return true;
 }
 
@@ -203,8 +209,6 @@ function bossHeads(env: PuzzleEnv, rep: PuzzleReport): void {
     }
 }
 
-const GENERIC_MARKER = /^map\s*(trigger|object|message|text|icon)?\s*$/i;
-
 /** Map markers / quest entries (PC engine 104): journal entry and map label are the object's name. */
 function markers(env: PuzzleEnv, rep: PuzzleReport): void {
     const { pc, list } = env;
@@ -241,6 +245,8 @@ function markers(env: PuzzleEnv, rep: PuzzleReport): void {
             ['Map Y Coordinate', Math.max(0, Math.min(255, Math.round(y * 0.4)))],
         ];
         for (const [name, value] of set) setNamedParam(list, dst, fields, name, value);
+        // The quest table keys a quest by its class and draws its text and type from the class record.
+        env.setClassDefaults?.(dst, set);
         rep.markers++;
     }
 }

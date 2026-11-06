@@ -31,7 +31,7 @@ import type { ClassTarget } from './convert.ts';
 import { view } from './bytes.ts';
 import type { ParamSpec } from './lvl.ts';
 import { ODB_CLASS_TYPE, ODB_FIELDS_TYPE, type OdbClass } from './odb.ts';
-import { appendFieldList, joinClassRecord, splitClassRecord } from './odbwrite.ts';
+import { appendFieldList, joinClassRecord, patchClassData, splitClassRecord } from './odbwrite.ts';
 
 // ---------------------------------------------------------------- engine class catalogue
 
@@ -242,9 +242,25 @@ export const CLONE_ADJUST: ReadonlyMap<
     ],
     // Class Messenger: relays the message that arrives (ON from the counter) as the PC object's "Message to send".
     [137, { reset: true, rename: [['Message to send', 'Outgoing Message']], set: [['Incoming Message', 1]] }],
-    // Map Object / Map Trigger (quest markers): one shared PS2 map-marker record, journal text and map position per object.
+    // Map Object / Map Trigger (quest markers): one PS2 map-marker record per marker name (`markerClassIdentity`); the
+    // puzzle pass writes its journal / map text, type and map position into the record (the game reads them from the class).
     [104, { reset: true }],
 ]);
+
+/** Generic PC marker names that carry no text of their own (the converter leaves those markers out). */
+export const GENERIC_MARKER = /^map\s*(trigger|object|message|text|icon)?\s*$/i;
+
+/**
+ * Clone identity of a PC map marker class (engine 104). The game keeps a quest by its System.ODB class id and draws the
+ * journal entry, map text, Type and SubQuest? from the class record, never from the placed object (save rows `+0x18`,
+ * docs/journal/2026-10-31/save-editor.md). Markers that shared one clone therefore all showed the template quest's
+ * German text (issue 5, "Rette die Frau des Bauern ..."); each named marker gets its own record, markers of the same
+ * name (the same quest on two levels) share one. Generic names (no text, left out by the puzzle pass) share one record.
+ */
+export function markerClassIdentity(name: string): string {
+    const n = name.trim();
+    return !n || GENERIC_MARKER.test(n) ? '' : `|marker:${squash(n)}`;
+}
 
 function adjustClone(
     pc: OdbClass,
@@ -276,6 +292,14 @@ const FX_OWN_MODEL_RFL: ReadonlySet<number> = new Set(
 );
 
 export const RETARGET_KINDS: ReadonlySet<ClassKind> = new Set(['logic', 'light', 'sound', 'waypoint', 'spawn']);
+
+/**
+ * Engine classes whose objects only exist with the template's model: a Detector (61) is the FX box model (3727) scaled by
+ * the object, and the engine does not place an object of a model-less detector class at all. PS2MUSIC.ODB ships such a
+ * model-less "trigger"; once the boxed templates had been used, Rift Crystal's "Creature Detector" (its exit box) was
+ * cloned from it and never appeared in the world (issue 5). These classes take a template that carries a model.
+ */
+export const BOXED_TEMPLATE_RFL: ReadonlySet<number> = new Set([61]);
 
 // ---------------------------------------------------------------- inputs
 
@@ -953,7 +977,9 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
                           !!c.odb.raw?.(c.id) &&
                           (c.odb.file === opt.modelOdbFile || !!opt.modelOdbFiles?.has(c.odb.file)),
                   )
-                : cands;
+                : BOXED_TEMPLATE_RFL.has(rfl) && cands.some((c) => c.cls.model && c.odb.raw?.(c.id))
+                  ? cands.filter((c) => c.cls.model && c.odb.raw?.(c.id))
+                  : cands;
         if (wantsModel && opt.modelSkinned?.(cls) && opt.templateSkinned) {
             // Skinned templates also come from the ODBs that list the host (their `modelFor` names the host with its `db` there).
             const sk = cands.filter(
@@ -1085,7 +1111,8 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
         // Reference defaults are relocated after the complete plan exists. Distinct source namespaces must not fold
         // into one clone merely because their unrelated template defaults happened to match before relocation.
         const refIdentity = cls.fields?.some((f) => fieldBase(f.type) === 3) ? `|refs:${key}` : '';
-        const sig = `${c.odb.file}|${c.id}|${m.data.join(',')}|${modelRef ? `${modelRef.db}:${modelRef.id}` : ''}${refIdentity}`;
+        const markerIdentity = rfl === 104 ? markerClassIdentity(cls.name) : '';
+        const sig = `${c.odb.file}|${c.id}|${m.data.join(',')}|${modelRef ? `${modelRef.db}:${modelRef.id}` : ''}${refIdentity}${markerIdentity}`;
         const prev = done.get(sig);
         if (prev) {
             prev.pcKeys.push(key);
@@ -1163,6 +1190,40 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
             return s ? { dbIndex: s.dbIndex, classId: s.classId, cls: s.cls } : null;
         },
     };
+}
+
+const fixedDefaults = new WeakMap<Synthesized, Map<number, number>>();
+
+/**
+ * Write class defaults (field name -> dword; a string field takes the XDB id itself) into a synthesized record and its
+ * parsed `cls`. The first value written to a field wins: a later different value is returned as a conflict (map
+ * coordinates excepted, the placed objects keep their own). Unknown names are ignored.
+ */
+export function setSynthesizedDefaults(s: Synthesized, values: readonly [string, number][]): string[] {
+    const fields = s.cls.fields ?? [];
+    const fixed = fixedDefaults.get(s) ?? fixedDefaults.set(s, new Map()).get(s)!;
+    const edits = new Map<number, number>();
+    const conflicts: string[] = [];
+    for (const [name, value] of values) {
+        const j = fields.findIndex((f) => f.name.trim().toLowerCase() === name.trim().toLowerCase());
+        if (j < 0 || fieldIsArray(fields[j]!.type)) continue;
+        const v = value >>> 0;
+        const had = fixed.get(j);
+        if (had !== undefined) {
+            if (had !== v && !/coordinate/i.test(name))
+                conflicts.push(`class ${s.name}: ${name} ${v} differs from ${had}; kept ${had}`);
+            continue;
+        }
+        fixed.set(j, v);
+        edits.set(j, v);
+    }
+    if (edits.size) {
+        s.record = patchClassData(s.record, edits);
+        const data = [...(s.cls.data ?? [])];
+        for (const [j, v] of edits) data[j] = v;
+        s.cls.data = data;
+    }
+    return conflicts;
 }
 
 // ---------------------------------------------------------------- writer

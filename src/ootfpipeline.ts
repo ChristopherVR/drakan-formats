@@ -85,6 +85,7 @@ import {
     PS2_SUBSTITUTES,
     aliasSquash,
     buildClassEntries,
+    setSynthesizedDefaults,
     levelPropertiesParams,
     planClassMapping,
     type ClassPlan,
@@ -1260,6 +1261,10 @@ export async function convertOotfLevels(
                     textId: (o, text) => {
                         const xdb = xdbOf(o);
                         return xdb ? textPlan.idFor(xdb, text) : null;
+                    },
+                    setClassDefaults: (o, values) => {
+                        const s = plan?.synthesized.find((x) => x.dbIndex === o.dbIndex && x.classId === o.classId);
+                        if (s) res.warnings.push(...setSynthesizedDefaults(s, values));
                     },
                     warnings: res.warnings,
                 });
