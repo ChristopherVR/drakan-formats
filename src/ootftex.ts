@@ -578,26 +578,34 @@ export function encodePs2Texture(src: RgbaImage, opt: Ps2TextureOptions = {}): P
         let lossy = false;
         let palette: number[];
         let lookup: (i: number) => number;
+        let hole: number | undefined;
         if (colors.size <= 256) {
             const order = [...colors.keys()];
             const idx = new Map(order.map((k, i) => [k, i] as const));
             palette = order.flatMap((k) => [k & 255, (k >>> 8) & 255, (k >>> 16) & 255, k >>> 24]);
             lookup = (i) => idx.get(pixelKey(i))!;
+            hole = idx.get(0);
         } else {
             lossy = true;
             const q = refined ?? quantizeRefined(colors, 256);
             palette = q.palette;
             lookup = (i) => q.map.get(pixelKey(i))!;
-            // The transparent entry takes the mean colour along the holes' edges, so filtering at a cut-out edge
-            // blends toward the edge's own colour instead of black.
-            const hole = q.map.get(0);
-            if (hole !== undefined) {
-                const edge = holeEdgeColor(img);
-                for (let c = 0; c < 3; c++) palette[hole * 4 + c] = edge[c]!;
-            }
+            hole = q.map.get(0);
         }
+        // The transparent entry takes the mean colour along the holes' edges, so filtering at a cut-out edge blends toward
+        // the edge's own colour instead of black (the disc's 8 bpp textures with holes never use a black alpha-0 entry).
+        if (hole !== undefined && transparent < px) {
+            const edge = holeEdgeColor(img);
+            for (let c = 0; c < 3; c++) palette[hole * 4 + c] = edge[c]!;
+        }
+        // Flags word = the engine's alpha selector (sub_1bf838 maps 1 / 2 / 4 / 7, 8 to native 0x10000 .. 0x80000; the draw
+        // path sub_18c52c turns texture alpha on only for a nonzero selector or a colour key). 0 means opaque: an 8 bpp
+        // texture with holes and flags word 0 draws its holes in the hole colour. Graded alpha takes 8 (blend), as the disc's
+        // 8 bpp textures with soft edges; hard cut-outs (every pixel opaque or clear) take 1, the binary-alpha test of the
+        // disc's 16 bpp cut-outs and of its 8 bpp cut-out NPCS 6314.
+        const selector = translucent > 0 || transparent === px ? 8 : transparent > 0 ? 1 : 0;
         const body = new Uint8Array(0x40 + 16 + 1024 + px);
-        body.set(header(w, h, 8, translucent > 0 || transparent === px ? 8 : 0, hasAlpha, fps, opt.slot), 0);
+        body.set(header(w, h, 8, selector, hasAlpha, fps, opt.slot), 0);
         const dv = view(body);
         dv.setUint32(0x40, 1, true);
         dv.setUint32(0x44, 256, true);

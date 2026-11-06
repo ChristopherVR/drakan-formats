@@ -169,6 +169,32 @@ describe('PS2 texture encode', () => {
         expect(t.body[37]).toBe(2); // alpha flag byte
     });
 
+    it('gives an 8 bpp cut-out the alpha-test selector (flags word 1) and its holes the edge colour', () => {
+        // Flags word 0 turns texture alpha off in the engine: a cut-out (leaves, grate, fence) drew its holes solid.
+        const leaf = img(8, 8, (x) => (x < 3 ? [0, 0, 0, 0] : [40, 120, 30, 255]));
+        const t = encodePs2Texture(leaf);
+        expect(t).toMatchObject({ bpp: 8, hasAlpha: true, lossy: false });
+        const d = decodeTxd(t.body, { upright: false });
+        expect(d.flags).toBe(1);
+        expect(t.body[37]).toBe(2);
+        expect(Array.from(d.rgba.slice(0, 4))).toEqual([40, 120, 30, 0]); // hole: edge colour, alpha 0
+        expect(Array.from(d.rgba.slice(3 * 4, 3 * 4 + 4))).toEqual([40, 120, 30, 254]);
+        // forced 8 bpp (skinned models, fast-draw weapons) and a quantised cut-out take the same selector
+        expect(decodeTxd(encodePs2Texture(leaf, { mode: 'indexed', square: true }).body).flags).toBe(1);
+        const many = img(32, 32, (x, y) => (x < 4 ? [0, 0, 0, 0] : [x * 8, y * 8, (x * y) & 255, 255]));
+        const q = encodePs2Texture(many, { mode: 'indexed' });
+        expect(q).toMatchObject({ bpp: 8, lossy: true });
+        expect(decodeTxd(q.body).flags).toBe(1);
+        // a 16 bpp cut-out upgraded to a square 8 bpp texture keeps a nonzero selector
+        const t16 = encodePs2Texture(many, { mode: 'auto', maxSize: 32 });
+        expect([t16.bpp, decodeTxd(t16.body).flags]).toEqual([16, 1]);
+        const up = upgradeIndexedSquareTexture(t16.body)!;
+        expect([up.bpp, decodeTxd(up.body).flags, up.body[37]]).toEqual([8, 1, 2]);
+        // graded alpha keeps the blend selector 8, opaque textures stay 0
+        expect(decodeTxd(encodePs2Texture(img(8, 8, (x) => [9, 9, 9, x ? 255 : 100])).body).flags).toBe(8);
+        expect(decodeTxd(encodePs2Texture(img(8, 8, () => [9, 9, 9, 255])).body).flags).toBe(0);
+    });
+
     it('writes a wholly transparent texture like the disc invisiblewall (16 bpp, flags word 1), 8 bpp flags 8 when forced', () => {
         const clear = img(16, 16, () => [0, 0, 0, 0]);
         const t = encodePs2Texture(clear);
