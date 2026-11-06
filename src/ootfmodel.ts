@@ -220,6 +220,136 @@ export function sphereHierarchyCount(bounds: Uint8Array): number | null {
     return count;
 }
 
+/** One shape of an OBB 0x0207 hierarchy: `(first child, next sibling)`, the box (minimum corner, 3 scaled axes), polygons. */
+export interface ObbShape {
+    child: number;
+    sibling: number;
+    box: number[];
+    polygons: number[];
+}
+
+/**
+ * Parse an OBB 0x0207 hierarchy (`num_shapes`, `is_obb` 1 at +72): `num_shapes` pairs `(first child, next sibling)`, then
+ * per shape the box (12 floats) and `u16 count, u16 polygon[count]`. Every OBB block of the disc and the PC install has this
+ * layout (2026-11-06). Null for a sphere hierarchy or anything that does not fit exactly.
+ */
+export function parseObbHierarchy(bounds: Uint8Array): ObbShape[] | null {
+    if (bounds.length < 76) return null;
+    const dv = view(bounds);
+    const n = dv.getUint16(72, true);
+    if (dv.getUint16(74, true) !== 1 || n === 0) return null;
+    let o = 76 + n * 4;
+    const shapes: ObbShape[] = [];
+    for (let i = 0; i < n; i++) {
+        if (o + 50 > bounds.length) return null;
+        const box = Array.from({ length: 12 }, (_, k) => dv.getFloat32(o + k * 4, true));
+        const count = dv.getUint16(o + 48, true);
+        o += 50;
+        if (o + count * 2 > bounds.length) return null;
+        const polygons = Array.from({ length: count }, (_, k) => dv.getUint16(o + k * 2, true));
+        o += count * 2;
+        const child = dv.getUint16(76 + i * 4, true);
+        const sibling = dv.getUint16(78 + i * 4, true);
+        if (child >= n || sibling >= n || box.some((v) => !Number.isFinite(v))) return null;
+        shapes.push({ child, sibling, box, polygons });
+    }
+    return o === bounds.length ? shapes : null;
+}
+
+/** Where `p` lies in a box's own frame (0..1 on each axis inside); the axes are scaled by the box size. */
+function boxCoords(box: readonly number[], p: readonly number[]): number[] {
+    const d = [p[0]! - box[0]!, p[1]! - box[1]!, p[2]! - box[2]!];
+    return [0, 1, 2].map((k) => {
+        const a = box.slice(3 + k * 3, 6 + k * 3);
+        const len2 = a[0]! * a[0]! + a[1]! * a[1]! + a[2]! * a[2]!;
+        return len2 > 0 ? (d[0]! * a[0]! + d[1]! * a[1]! + d[2]! * a[2]!) / len2 : 0;
+    });
+}
+
+/** Squared distance (in box units, scaled by the box's longest axis) from `p` to the box; 0 inside. */
+function boxDistance2(box: readonly number[], p: readonly number[]): number {
+    let s = 0;
+    for (let k = 0; k < 3; k++) {
+        const a = box.slice(3 + k * 3, 6 + k * 3);
+        const len = Math.hypot(a[0]!, a[1]!, a[2]!);
+        const t = boxCoords(box, p)[k]!;
+        const out = t < 0 ? -t : t > 1 ? t - 1 : 0;
+        s += (out * len) ** 2;
+    }
+    return s;
+}
+
+/**
+ * Keep a source OBB hierarchy (shapes and boxes) for a model whose polygons were rebuilt (split, reordered, re-indexed for a
+ * display list): the polygon lists of the leaf shapes (shapes that listed polygons) are filled again from the new polygons,
+ * each going to the leaf whose box holds its centre (else the nearest leaf). Collapsing such a hierarchy into one box made a
+ * hollow model solid: Arokh's flight look-ahead counts a hit on any box he is inside, so the Islands arrival tunnel (inside
+ * the PC "Warp Gate" model) stopped him dead (docs/journal/2026-11-06/ootf-arokh-flight.md). Null when `bounds` is not an
+ * OBB hierarchy with leaves.
+ */
+export function rebuildObbHierarchy(
+    bounds: Uint8Array,
+    positions: Float32Array,
+    polygons: readonly NeutralPoly[],
+): Uint8Array | null {
+    const shapes = parseObbHierarchy(bounds);
+    if (!shapes) return null;
+    // Leaves have no child; only leaves that listed polygons get them again (a leaf without polygons is a plain blocker box).
+    const leaves = shapes.flatMap((s, i) => (s.child === 0 && s.polygons.length ? [i] : []));
+    if (!leaves.length) return null;
+    const lists = new Map<number, number[]>(leaves.map((i) => [i, []]));
+    polygons.forEach((p, pi) => {
+        const c = [0, 1, 2].map((k) => p.indices.reduce((s, v) => s + positions[v * 3 + k]!, 0) / p.indices.length);
+        let best = leaves[0]!;
+        let bestD = Infinity;
+        for (const i of leaves) {
+            const d = boxDistance2(shapes[i]!.box, c);
+            if (d < bestD) {
+                bestD = d;
+                best = i;
+                if (d === 0) break;
+            }
+        }
+        lists.get(best)!.push(pi);
+    });
+    // An inner shape that listed polygons (the PC lists its whole subtree there; the disc's inner shapes list none) lists
+    // the union of its leaves again.
+    const seen = new Set<number>();
+    const subtree = (i: number): number[] => {
+        if (seen.has(i)) return [];
+        seen.add(i);
+        const out = [...(lists.get(i) ?? [])];
+        for (let c = shapes[i]!.child; c !== 0 && !seen.has(c); c = shapes[c]!.sibling) out.push(...subtree(c));
+        return out;
+    };
+    const inner = new Map<number, number[]>();
+    shapes.forEach((s, i) => {
+        if (s.child === 0 || !s.polygons.length) return;
+        seen.clear();
+        inner.set(
+            i,
+            [...new Set(subtree(i))].sort((a, b) => a - b),
+        );
+    });
+    for (const [i, l] of inner) lists.set(i, l);
+    if (polygons.length > 0xffff) return null;
+    const n = shapes.length;
+    let size = 76 + n * 4;
+    for (let i = 0; i < n; i++) size += 50 + (lists.get(i)?.length ?? 0) * 2;
+    const out = new Uint8Array(size);
+    out.set(bounds.subarray(0, 76 + n * 4));
+    const dv = view(out);
+    let o = 76 + n * 4;
+    for (let i = 0; i < n; i++) {
+        shapes[i]!.box.forEach((v, k) => f32(dv, o + k * 4, v));
+        const list = lists.get(i) ?? [];
+        dv.setUint16(o + 48, list.length, true);
+        list.forEach((pi, k) => dv.setUint16(o + 50 + k * 2, pi, true));
+        o += 50 + list.length * 2;
+    }
+    return out;
+}
+
 /**
  * Bounds from the vertices when the source has none: sphere around the box centre, one OBB (`center` = minimum corner,
  * axes scaled by the box size, as the disc models), `num_shapes 1, is_obb 1`, hierarchy (0,0), the box again and the

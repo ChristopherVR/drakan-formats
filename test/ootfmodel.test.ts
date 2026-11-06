@@ -11,6 +11,8 @@ import {
     readPs2Neutral,
     synthesizeBounds,
     sphereHierarchyCount,
+    parseObbHierarchy,
+    rebuildObbHierarchy,
     writePs2ModelRecords,
 } from '../src/ootfmodel.ts';
 
@@ -268,5 +270,100 @@ describe('sphere-only collision hierarchy recognition', () => {
         const b = record(1);
         new DataView(b.buffer).setFloat32(92, radius, true);
         expect(sphereHierarchyCount(b)).toBeNull();
+    });
+});
+
+describe('OBB collision hierarchy kept for rebuilt polygons', () => {
+    // A hollow tunnel shell: a root box over two wall boxes (x 0..1 and x 9..10), the space between them empty.
+    const box = (x: number, w: number): number[] => [x, 0, 0, w, 0, 0, 0, 10, 0, 0, 0, 10];
+    const record = (lists: number[][], root: number[] = []): Uint8Array => {
+        const shapes = [
+            { child: 1, sibling: 0, box: box(0, 10), polygons: root },
+            { child: 0, sibling: 2, box: box(0, 1), polygons: lists[0]! },
+            { child: 0, sibling: 0, box: box(9, 1), polygons: lists[1]! },
+        ];
+        const size = 76 + shapes.length * 4 + shapes.reduce((s, x) => s + 50 + x.polygons.length * 2, 0);
+        const b = new Uint8Array(size);
+        const dv = new DataView(b.buffer);
+        dv.setUint16(72, shapes.length, true);
+        dv.setUint16(74, 1, true);
+        shapes.forEach((s, i) => {
+            dv.setUint16(76 + i * 4, s.child, true);
+            dv.setUint16(78 + i * 4, s.sibling, true);
+        });
+        let o = 76 + shapes.length * 4;
+        for (const s of shapes) {
+            s.box.forEach((v, k) => dv.setFloat32(o + k * 4, v, true));
+            dv.setUint16(o + 48, s.polygons.length, true);
+            s.polygons.forEach((p, k) => dv.setUint16(o + 50 + k * 2, p, true));
+            o += 50 + s.polygons.length * 2;
+        }
+        return b;
+    };
+    // Triangles: two on the left wall (x 0.5), two on the right wall (x 9.5), in a new order (as after a quad split and a
+    // display-list reorder), plus one just outside the right wall's box.
+    const positions = Float32Array.from([0.5, 1, 1, 0.5, 2, 1, 0.5, 1, 2, 9.5, 1, 1, 9.5, 2, 1, 9.5, 1, 2, 10.5, 5, 5]);
+    const tri = (a: number, b: number, c: number) => ({
+        flags: 0,
+        texture: 0,
+        indices: [a, b, c],
+        uvs: [0, 0, 0, 0, 0, 0],
+    });
+    const polygons = [tri(3, 4, 5), tri(0, 1, 2), tri(3, 5, 4), tri(0, 2, 1), tri(3, 4, 6)];
+
+    it('parses the disc layout and rejects records that do not fit', () => {
+        const b = record([[0], [1, 2]]);
+        expect(parseObbHierarchy(b)?.map((s) => [s.child, s.sibling, s.polygons])).toEqual([
+            [1, 0, []],
+            [0, 2, [0]],
+            [0, 0, [1, 2]],
+        ]);
+        expect(parseObbHierarchy(b.slice(0, -1))).toBeNull();
+        expect(parseObbHierarchy(new Uint8Array([...b, 0, 0]))).toBeNull();
+        const sphere = b.slice();
+        new DataView(sphere.buffer).setUint16(74, 0, true);
+        expect(parseObbHierarchy(sphere)).toBeNull();
+    });
+
+    it('keeps every shape and refills the leaf lists from the new polygons', () => {
+        const out = rebuildObbHierarchy(
+            record([
+                [0, 1],
+                [2, 3],
+            ]),
+            positions,
+            polygons,
+        )!;
+        const shapes = parseObbHierarchy(out)!;
+        expect(shapes.map((s) => [s.child, s.sibling, s.box])).toEqual([
+            [1, 0, box(0, 10)],
+            [0, 2, box(0, 1)],
+            [0, 0, box(9, 1)],
+        ]);
+        expect(shapes.map((s) => s.polygons)).toEqual([[], [1, 3], [0, 2, 4]]);
+    });
+
+    it('lists the whole subtree again on an inner shape that listed polygons (the PC convention)', () => {
+        const out = rebuildObbHierarchy(
+            record(
+                [
+                    [0, 1],
+                    [2, 3],
+                ],
+                [0, 1, 2, 3],
+            ),
+            positions,
+            polygons,
+        )!;
+        expect(parseObbHierarchy(out)!.map((s) => s.polygons)).toEqual([
+            [0, 1, 2, 3, 4],
+            [1, 3],
+            [0, 2, 4],
+        ]);
+    });
+
+    it('leaves a model without an OBB hierarchy to the caller', () => {
+        expect(rebuildObbHierarchy(record([[], []]), positions, polygons)).toBeNull();
+        expect(rebuildObbHierarchy(synthesizeBounds(positions, 0).slice(0, 70), positions, polygons)).toBeNull();
     });
 });

@@ -10,6 +10,7 @@ import {
     writePs2ModelRecords,
     synthesizeBounds,
     sphereHierarchyCount,
+    rebuildObbHierarchy,
     parsePcModel,
     pcToNeutral,
     type PcToPs2Options,
@@ -91,6 +92,13 @@ function rigidDisplayList(model: NeutralModel): ReturnType<typeof withDisplayLis
     // In particular, native rigid weapons reject an OBB replacement and delete the item on attack.
     if (sphereHierarchyCount(original) !== null) {
         dl.model.bounds = original;
+        return dl;
+    }
+    // An OBB hierarchy keeps its shapes (a hollow model, e.g. a tunnel shell, must stay hollow); only the leaf polygon
+    // lists are rebuilt for the new polygons.
+    const kept = rebuildObbHierarchy(original, dl.model.positions, dl.model.polygons);
+    if (kept) {
+        dl.model.bounds = kept;
         return dl;
     }
     const bounds = synthesizeBounds(model.positions, dl.model.polygons.length);
