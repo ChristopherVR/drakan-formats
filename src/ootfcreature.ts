@@ -452,7 +452,8 @@ export function convertCreatureAssets(input: CreatureInput, opt: ConvertAnimOpti
     const target = mode === 'reuse-ps2' ? ps2! : pcS;
     const rig = buildRig(target, 0);
     const basis = bindBasis(rig);
-    const channels = mode === 'reuse-ps2' || input.keepChannels ? target.channels.length : Math.min(target.channels.length, 4);
+    const channels =
+        mode === 'reuse-ps2' || input.keepChannels ? target.channels.length : Math.min(target.channels.length, 4);
     const ps2Anims = input.ps2Anims ?? new Map<number, Ps2Anim>();
     const ps2Named: NamedAnim[] = [...ps2Anims].map(([id, a]) => ({ id, name: a.name }));
     const pcNamed: NamedAnim[] = [...pcAnims].map(([id, a]) => ({ id, name: a.name }));

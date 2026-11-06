@@ -209,7 +209,9 @@ export class TerrainTextureBuilder {
                 slot: opt.slot ?? env('DRAKAN_TERRAIN_SLOT') ?? TERRAIN_TEXTURE_SLOT,
                 // Native terrain shares a ~5.4 MiB texture cache with objects. RGBA tiles can evict each other
                 // while cinematic actors wait for resources. Retain dimensions and use the native palette path.
-                mode: ({ 0: 'indexed', 1: 'auto', 2: 'truecolor' } as const)[env('DRAKAN_TERRAIN_TEX_MODE') ?? 0] ?? 'indexed',
+                mode:
+                    ({ 0: 'indexed', 1: 'auto', 2: 'truecolor' } as const)[env('DRAKAN_TERRAIN_TEX_MODE') ?? 0] ??
+                    'indexed',
                 maxTruecolorPixels: Infinity, // explicit truecolor experiments may retain their original dimensions
                 ...opt.texture,
             });
@@ -350,7 +352,13 @@ export function limitVisibleEntries(
             : {
                   ...L,
                   visible: L.visible
-                      .map((v) => ({ v, d: Math.hypot((byIndex.get(v)?.originX ?? 0) - L.originX, (byIndex.get(v)?.originZ ?? 0) - L.originZ) }))
+                      .map((v) => ({
+                          v,
+                          d: Math.hypot(
+                              (byIndex.get(v)?.originX ?? 0) - L.originX,
+                              (byIndex.get(v)?.originZ ?? 0) - L.originZ,
+                          ),
+                      }))
                       .sort((x, y) => x.d - y.d)
                       .slice(0, lo)
                       .map((x) => x.v),

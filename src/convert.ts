@@ -377,12 +377,24 @@ export function convertPcLevel(pc: PcLevel, opt: ConvertOptions): Ps2LevelParts 
             let value = s.value;
             if (fieldBase(f.type) === FIELD_CLASS) {
                 const hook = opt.mapClassRef;
-                const ctx: ResourceContext = { pc, ownerDb: src.dbIndex, classId: src.classId, field: f.name, target: t };
+                const ctx: ResourceContext = {
+                    pc,
+                    ownerDb: src.dbIndex,
+                    classId: src.classId,
+                    field: f.name,
+                    target: t,
+                };
                 const one = hook ? (v: number): number => (v ? (hook(v, ctx) ?? 0) : 0) : mapClassRef;
                 value = Array.isArray(value) ? value.map(one) : one(value as number);
             } else if (isResourceField(f.type)) {
                 const kind = resourceKind(f.type)!;
-                const ctx: ResourceContext = { pc, ownerDb: src.dbIndex, classId: src.classId, field: f.name, target: t };
+                const ctx: ResourceContext = {
+                    pc,
+                    ownerDb: src.dbIndex,
+                    classId: src.classId,
+                    field: f.name,
+                    target: t,
+                };
                 const one = (v: number): number => {
                     const m = v ? (opt.mapResource?.(kind, v, ctx) ?? null) : null;
                     if (m === null) report.zeroedResourceParams++;
@@ -400,7 +412,8 @@ export function convertPcLevel(pc: PcLevel, opt: ConvertOptions): Ps2LevelParts 
             pcCls!.fields?.forEach((pf, k) => {
                 const key = pf.name.trim().toLowerCase();
                 const base = fieldBase(pf.type);
-                if (given.has(key) || fieldIsArray(pf.type) || fieldIsIndirect(pf.type) || !SCALAR_BASES.has(base)) return;
+                if (given.has(key) || fieldIsArray(pf.type) || fieldIsIndirect(pf.type) || !SCALAR_BASES.has(base))
+                    return;
                 const i = byName.get(key);
                 const f = i === undefined ? undefined : fields![i]!;
                 if (i === undefined || !f || fieldBase(f.type) !== base || fieldIsArray(f.type) || taken.has(i)) return;
@@ -411,7 +424,10 @@ export function convertPcLevel(pc: PcLevel, opt: ConvertOptions): Ps2LevelParts 
                 specs.push({ fieldIndex: i, type: f.type, name: f.name, value });
                 taken.add(i);
                 const was = decodeFieldValue(f.type, tv, t.cls.data!) as number;
-                bump((report.pcDefaultsKept ??= new Map()), `${pcCls!.name.trim()}.${pf.name.trim()} ${value} (PS2 ${was})`);
+                bump(
+                    (report.pcDefaultsKept ??= new Map()),
+                    `${pcCls!.name.trim()}.${pf.name.trim()} ${value} (PS2 ${was})`,
+                );
             });
         }
         if (specs.length) setObjectParams(list, dst.id, specs);
@@ -494,7 +510,9 @@ function convertLayer(L: TerrainLayer, pc: PcLevel, opt: ConvertOptions, report:
 export const MAX_LAYER_TEXTURES = 0;
 
 function layerTexEnv(): number | undefined {
-    const v = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['DRAKAN_TERRAIN_LAYERTEX'];
+    const v = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.[
+        'DRAKAN_TERRAIN_LAYERTEX'
+    ];
     return v ? Number(v) : undefined;
 }
 
@@ -506,7 +524,12 @@ export function limitLayerTextures(tex: Uint32Array, w: number, h: number, max: 
     const count = new Map<number, number>();
     for (const t of tex) if (t !== TEX_HOLE && t !== TEX_INVISIBLE) count.set(t, (count.get(t) ?? 0) + 1);
     if (count.size <= max) return;
-    const keep = new Set([...count].sort((a, b) => b[1] - a[1] || a[0] - b[0]).slice(0, max).map((x) => x[0]));
+    const keep = new Set(
+        [...count]
+            .sort((a, b) => b[1] - a[1] || a[0] - b[0])
+            .slice(0, max)
+            .map((x) => x[0]),
+    );
     const done = new Uint8Array(tex.length);
     let queue: number[] = [];
     for (let i = 0; i < tex.length; i++) {
@@ -520,7 +543,12 @@ export function limitLayerTextures(tex: Uint32Array, w: number, h: number, max: 
         for (const i of queue) {
             const x = i % w;
             const z = (i / w) | 0;
-            for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+            for (const [dx, dz] of [
+                [1, 0],
+                [-1, 0],
+                [0, 1],
+                [0, -1],
+            ] as const) {
                 const nx = x + dx;
                 const nz = z + dz;
                 if (nx < 0 || nz < 0 || nx >= w || nz >= h) continue;

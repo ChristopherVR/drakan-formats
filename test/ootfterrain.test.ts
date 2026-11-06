@@ -35,7 +35,9 @@ describe('terrain textures', () => {
         header: { dependencies: [{ dbIndex: 24, path: { text: 'Lvl_splats' } }] },
         terrain: [{ cellTexLeft: new Uint32Array([5, 6, 6, 7, 0xffffffff, 0xfffffffe, 99]) }],
     } as unknown as PcLevel;
-    const base = buildPs2Txd([{ id: 3, body: encodePs2Texture({ width: 8, height: 8, rgba: new Uint8Array(256).fill(255) }).body }]);
+    const base = buildPs2Txd([
+        { id: 3, body: encodePs2Texture({ width: 8, height: 8, rgba: new Uint8Array(256).fill(255) }).body },
+    ]);
 
     it('appends converted textures to the target TXD under fresh ids', async () => {
         const t = await convertTerrainTextures(pc, src, base, 24, { minSize: 0 });

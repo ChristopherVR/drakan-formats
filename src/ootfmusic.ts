@@ -17,7 +17,16 @@
 // DirectMusic segments is phase 2 (see the journal note); the palette below is the concrete, shippable result today.
 
 import { floatBits, bitsFloat, decodeFieldValue, type ClassFieldDef } from './fields.ts';
-import { FLAG_SCALED, addObject, setObjectLinks, setObjectParams, type LvlObject, type LvlObjectList, type ParamSpec, type Vec3 } from './lvl.ts';
+import {
+    FLAG_SCALED,
+    addObject,
+    setObjectLinks,
+    setObjectParams,
+    type LvlObject,
+    type LvlObjectList,
+    type ParamSpec,
+    type Vec3,
+} from './lvl.ts';
 import type { PcLevel } from './pc.ts';
 
 // ---------------------------------------------------------------- PS2 tracks
@@ -35,10 +44,14 @@ export interface Ps2MusicTrack {
     role: 'ambient' | 'action' | 'stinger';
 }
 
-const T = (id: number, name: string, group: number, loops: boolean, adpcm: number, role: Ps2MusicTrack['role']): [number, Ps2MusicTrack] => [
-    id,
-    { id, name, group, loops, adpcm, role },
-];
+const T = (
+    id: number,
+    name: string,
+    group: number,
+    loops: boolean,
+    adpcm: number,
+    role: Ps2MusicTrack['role'],
+): [number, Ps2MusicTrack] => [id, { id, name, group, loops, adpcm, role }];
 
 /** The PS2 tracks the palettes draw from (ids and sizes read from the PAL disc's PS2MUSIC.SDB). */
 export const PS2_TRACKS: ReadonlyMap<number, Ps2MusicTrack> = new Map([
@@ -134,7 +147,8 @@ export function musicTriggerClassNames(pc: PcLevel): string[] {
     const names = new Set<string>();
     for (const t of pc.classes.values())
         for (const c of t.values())
-            if (c.fields?.some((f) => F_MUSIC1.test(f.name)) && c.fields.some((f) => F_MUSIC2.test(f.name))) names.add(c.name);
+            if (c.fields?.some((f) => F_MUSIC1.test(f.name)) && c.fields.some((f) => F_MUSIC2.test(f.name)))
+                names.add(c.name);
     return [...names];
 }
 
@@ -196,7 +210,15 @@ export interface ApplyMusicResult {
     tracks: Map<number, number>;
 }
 
-function specsFor(fields: readonly ClassFieldDef[], track: number, soundDb: number, overlay: boolean, fadeIn: number, fadeOut: number, startOn = false): ParamSpec[] {
+function specsFor(
+    fields: readonly ClassFieldDef[],
+    track: number,
+    soundDb: number,
+    overlay: boolean,
+    fadeIn: number,
+    fadeOut: number,
+    startOn = false,
+): ParamSpec[] {
     const out: ParamSpec[] = [];
     const add = (re: RegExp, value: number | number[]): void => {
         const i = fields.findIndex((f) => re.test(f.name.trim()));
@@ -247,7 +269,15 @@ export function applyMusicTriggers(
         let first = list.objects.find((o) => o.id === t.objectId);
         slots.forEach((s, k) => {
             const track = use(trackFor(levelPath, s.slot, s.id));
-            const specs = specsFor(opt.musicClass.fields, track, soundDb, s.slot === 2, s.fadeIn, s.fadeOut, opt.startOn);
+            const specs = specsFor(
+                opt.musicClass.fields,
+                track,
+                soundDb,
+                s.slot === 2,
+                s.fadeIn,
+                s.fadeOut,
+                opt.startOn,
+            );
             let obj: LvlObject;
             if (k === 0 && first) {
                 obj = first;
@@ -255,12 +285,19 @@ export function applyMusicTriggers(
                 res.replaced++;
             } else {
                 const maxId = list.objects.reduce((m, o) => Math.max(m, o.id), 0);
-                obj = addObject(list, { classId: opt.musicClass.classId, dbIndex: opt.musicClass.dbIndex, pos: t.pos, rot: t.rot, id: maxId + 1 }).object;
+                obj = addObject(list, {
+                    classId: opt.musicClass.classId,
+                    dbIndex: opt.musicClass.dbIndex,
+                    pos: t.pos,
+                    rot: t.rot,
+                    id: maxId + 1,
+                }).object;
                 retarget(obj, opt.musicClass);
                 if (k === 0) first = obj;
                 else {
                     for (const src of list.objects) {
-                        if (src !== obj && src.links.includes(t.objectId)) setObjectLinks(list, src.id, [...src.links, obj.id]);
+                        if (src !== obj && src.links.includes(t.objectId))
+                            setObjectLinks(list, src.id, [...src.links, obj.id]);
                     }
                 }
                 res.added++;

@@ -81,7 +81,13 @@ export function fieldIndexByName(fields: readonly Pick<ClassFieldDef, 'name'>[] 
 }
 
 /** Set (or add) the object parameter of the field `name`; false when the class has no such scalar field. */
-export function setNamedParam(_list: LvlObjectList, o: LvlObject, fields: readonly ClassFieldDef[] | undefined, name: string, value: number): boolean {
+export function setNamedParam(
+    _list: LvlObjectList,
+    o: LvlObject,
+    fields: readonly ClassFieldDef[] | undefined,
+    name: string,
+    value: number,
+): boolean {
     const i = fieldIndexByName(fields, name);
     if (i < 0) return false;
     const f = fields![i]!;
@@ -127,7 +133,9 @@ function newDetector(env: PuzzleEnv, pos: Vec3, size: Vec3, params: readonly [st
     object.params = [];
     object.data = [];
     const fields = env.classOf(object)?.fields;
-    for (const [name, value] of params) if (!setNamedParam(env.list, object, fields, name, value)) env.warnings.push(`${env.title}: detector class has no field "${name}"`);
+    for (const [name, value] of params)
+        if (!setNamedParam(env.list, object, fields, name, value))
+            env.warnings.push(`${env.title}: detector class has no field "${name}"`);
     return object;
 }
 
@@ -152,8 +160,17 @@ function platesToDetectors(env: PuzzleEnv, rep: PuzzleReport): void {
         const size: Vec3 = [Math.max(2, 2 * sc[0]), 1.5, Math.max(2, 2 * sc[2])];
         // Test aid (`OOTF_TEST_PLATE_AT=x,y,z`): the detector goes there (where the harness player stands) instead of over the plate, so a
         // run can prove the plate -> mover chain by state without walking to the plate.
-        const at = ((globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_TEST_PLATE_AT'] ?? '').split(',').map(Number);
-        const where: Vec3 = at.length === 3 && at.every(Number.isFinite) ? [at[0]!, at[1]!, at[2]!] : [dst.pos[0], dst.pos[1] + 1000, dst.pos[2]];
+        const at = (
+            (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.[
+                'OOTF_TEST_PLATE_AT'
+            ] ?? ''
+        )
+            .split(',')
+            .map(Number);
+        const where: Vec3 =
+            at.length === 3 && at.every(Number.isFinite)
+                ? [at[0]!, at[1]!, at[2]!]
+                : [dst.pos[0], dst.pos[1] + 1000, dst.pos[2]];
         const d = newDetector(env, where, size, [
             ['Task', 6],
             ['Trigger Message', bottom],
@@ -186,7 +203,12 @@ function messengers(env: PuzzleEnv, rep: PuzzleReport): void {
         const recv = pcFieldNumber(pc, m, 'Receiver Class');
         if (recv === undefined) continue;
         const cid = recv & 0xffff;
-        const targets = pc.list.objects.filter((o) => o.classId === cid && (recv >>> 16 === 0 || o.dbIndex === recv >>> 16) && list.objects.some((x) => x.id === o.id));
+        const targets = pc.list.objects.filter(
+            (o) =>
+                o.classId === cid &&
+                (recv >>> 16 === 0 || o.dbIndex === recv >>> 16) &&
+                list.objects.some((x) => x.id === o.id),
+        );
         if (!targets.length) {
             env.warnings.push(`${env.title}: Class Messenger ${m.id}: no converted object of class ${cid}`);
             continue;
@@ -214,7 +236,11 @@ function bossHeads(env: PuzzleEnv, rep: PuzzleReport): void {
         dst.scale = [1.6, 1.6, 1.6];
         // Test aid (`OOTF_TEST_HEADHP=<hp>`): heads with few hit points, so the harness can kill them with real blows and watch the
         // engine's own death message reach the counter.
-        const testHp = Number((globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_TEST_HEADHP'] ?? 0);
+        const testHp = Number(
+            (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.[
+                'OOTF_TEST_HEADHP'
+            ] ?? 0,
+        );
         if (testHp > 0) setNamedParam(list, dst, env.classOf(dst)?.fields, 'Initial Health', testHp);
         // Face the middle of the altar (the heads stand around it).
         rep.bossHeads++;
@@ -274,19 +300,32 @@ function markers(env: PuzzleEnv, rep: PuzzleReport): void {
  * seconds, so the ending chain (counter, end timer, sequence, credits) can be run without fighting.
  */
 function testEnding(env: PuzzleEnv, counterIds: ReadonlySet<number>): void {
-    const sec = Number((globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_TEST_ENDING'] ?? 0);
+    const sec = Number(
+        (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_TEST_ENDING'] ??
+            0,
+    );
     if (!sec || !env.timer || !counterIds.size) return;
     const fields = ((): readonly ClassFieldDef[] | undefined => {
         const t = env.list.objects.find((o) => o.classId === env.timer!.classId && o.dbIndex === env.timer!.dbIndex);
         return t ? env.classOf(t)?.fields : undefined;
     })();
     // OOTF_TEST_DIRECT=<step>: skip the counter (1) or the counter and the end timer (2) and message the next object of the chain.
-    const direct = Number((globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_TEST_DIRECT'] ?? 0);
+    const direct = Number(
+        (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_TEST_DIRECT'] ??
+            0,
+    );
     let targets = [...counterIds];
-    if (direct >= 1) targets = [...new Set(targets.flatMap((id) => env.list.objects.find((o) => o.id === id)?.links ?? []))];
-    if (direct >= 2) targets = [...new Set(targets.flatMap((id) => env.list.objects.find((o) => o.id === id)?.links ?? []))];
+    if (direct >= 1)
+        targets = [...new Set(targets.flatMap((id) => env.list.objects.find((o) => o.id === id)?.links ?? []))];
+    if (direct >= 2)
+        targets = [...new Set(targets.flatMap((id) => env.list.objects.find((o) => o.id === id)?.links ?? []))];
     for (let k = 0; k < (direct ? 1 : 4); k++) {
-        const { object } = addObject(env.list, { classId: env.timer.classId, dbIndex: env.timer.dbIndex, pos: [0, 0, 0], rot: [0, 0, 0] });
+        const { object } = addObject(env.list, {
+            classId: env.timer.classId,
+            dbIndex: env.timer.dbIndex,
+            pos: [0, 0, 0],
+            rot: [0, 0, 0],
+        });
         object.params = [];
         object.data = [];
         object.links = targets;
@@ -299,12 +338,22 @@ function testEnding(env: PuzzleEnv, counterIds: ReadonlySet<number>): void {
 
 /** Test aid (`OOTF_TEST_WAKE=<seconds>`): a timer that sends ON to whatever wakes the Dr. Evil stand-ins (the level's own trigger). */
 function testWake(env: PuzzleEnv): void {
-    const sec = Number((globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_TEST_WAKE'] ?? 0);
+    const sec = Number(
+        (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_TEST_WAKE'] ??
+            0,
+    );
     if (!sec || !env.timer) return;
     const heads = new Set(env.pc.list.objects.filter((o) => rflOf(env.pc, o) === 92).map((o) => o.id));
-    const wakers = env.list.objects.filter((o) => !heads.has(o.id) && o.links.some((l) => heads.has(l))).map((o) => o.id);
+    const wakers = env.list.objects
+        .filter((o) => !heads.has(o.id) && o.links.some((l) => heads.has(l)))
+        .map((o) => o.id);
     if (!wakers.length) return;
-    const { object } = addObject(env.list, { classId: env.timer.classId, dbIndex: env.timer.dbIndex, pos: [0, 0, 0], rot: [0, 0, 0] });
+    const { object } = addObject(env.list, {
+        classId: env.timer.classId,
+        dbIndex: env.timer.dbIndex,
+        pos: [0, 0, 0],
+        rot: [0, 0, 0],
+    });
     object.params = [];
     object.data = [];
     object.links = wakers;
@@ -346,7 +395,9 @@ function questItemLocks(env: PuzzleEnv, rep: PuzzleReport): void {
         if (!item || !dst) continue;
         const ref = env.classRef(item.db, item.id, env.detector);
         if (!ref) {
-            env.warnings.push(`${env.title}: lock ${lock.id} (${nameOf(pc, lock)}): its quest item class is not reachable from the detector class`);
+            env.warnings.push(
+                `${env.title}: lock ${lock.id} (${nameOf(pc, lock)}): its quest item class is not reachable from the detector class`,
+            );
             continue;
         }
         const sc = lock.flags & FLAG_SCALED && lock.scale ? lock.scale : ([1, 1, 1] as Vec3);
@@ -371,7 +422,8 @@ function questItemLocks(env: PuzzleEnv, rep: PuzzleReport): void {
         if (!d) continue;
         d.links = [...dst.links];
         dst.links = [];
-        for (const o of list.objects) if (o !== d && o.links.includes(dst.id)) o.links = [...new Set([...o.links, d.id])];
+        for (const o of list.objects)
+            if (o !== d && o.links.includes(dst.id)) o.links = [...new Set([...o.links, d.id])];
         rep.questLocks++;
     }
 }
@@ -416,7 +468,9 @@ export function relayDetectorSequences(env: SequenceRelayEnv): number {
         const dst = list.objects.find((x) => x.id === o.id);
         if (!dst) continue;
         if (rflOf(pc, o) !== 61) {
-            env.warnings.push(`${env.title}: object ${o.id} (${nameOf(pc, o)}) names a sequence its PS2 class cannot reach; dropped`);
+            env.warnings.push(
+                `${env.title}: object ${o.id} (${nameOf(pc, o)}) names a sequence its PS2 class cannot reach; dropped`,
+            );
             continue;
         }
         const fields = env.classOf(dst)?.fields;
@@ -496,7 +550,9 @@ function quietCloudRings(env: PuzzleEnv, rep: PuzzleReport): void {
  * item without its level's puzzle (the Islands Bell Hammer 6135 floats over a hole west of the bell tower).
  */
 function testMove(env: PuzzleEnv): void {
-    const spec = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_TEST_MOVE'] ?? '';
+    const spec =
+        (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_TEST_MOVE'] ??
+        '';
     for (const part of spec.split(';')) {
         const [title, id, at] = part.split('|');
         const pos = (at ?? '').split(',').map(Number);
@@ -526,7 +582,9 @@ export function applyPuzzleLogic(env: PuzzleEnv): PuzzleReport {
     markers(env, rep);
     quietCloudRings(env, rep);
     const counters = new Set<number>();
-    for (const o of env.pc.list.objects) if (rflOf(env.pc, o) === 92) for (const l of env.list.objects.find((x) => x.id === o.id)?.links ?? []) counters.add(l);
+    for (const o of env.pc.list.objects)
+        if (rflOf(env.pc, o) === 92)
+            for (const l of env.list.objects.find((x) => x.id === o.id)?.links ?? []) counters.add(l);
     testEnding(env, counters);
     testWake(env);
     testMove(env);

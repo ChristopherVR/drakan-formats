@@ -4,7 +4,13 @@ import { TEX_HOLE, TEX_INVISIBLE } from '../src/terrain.ts';
 import { readPs2Blob, writePs2Blob } from '../src/terrainwrite.ts';
 import type { TerrainLayer } from '../src/terrain.ts';
 import { limitLayerTextures, ps2BlobBuilder, ps2BlobFor, ps2LevelTag, writePs2Terrain } from '../src/convert.ts';
-import { LAYER_FLAG_FLAT, MAX_CHUNK_TEXTURES, buildPs2TerrainBlob, planTerrainSlots, ps2ChunkSplit } from '../src/terrainblob.ts';
+import {
+    LAYER_FLAG_FLAT,
+    MAX_CHUNK_TEXTURES,
+    buildPs2TerrainBlob,
+    planTerrainSlots,
+    ps2ChunkSplit,
+} from '../src/terrainblob.ts';
 
 function layer(w: number, h: number, flags: number, tex: (x: number, z: number) => number): TerrainLayer {
     const nv = (w + 1) * (h + 1);
@@ -106,7 +112,13 @@ describe('buildPs2TerrainBlob', () => {
         let p = 28;
         const rects: number[][] = [];
         for (let i = 0; i < n; i++) {
-            const [x0, x1, z0, z1, nt] = [0, 4, 8, 12, 16].map((k) => u32(b, p + k)) as [number, number, number, number, number];
+            const [x0, x1, z0, z1, nt] = [0, 4, 8, 12, 16].map((k) => u32(b, p + k)) as [
+                number,
+                number,
+                number,
+                number,
+                number,
+            ];
             expect(nt).toBeLessThanOrEqual(MAX_CHUNK_TEXTURES);
             const vw = u32(b, p + 20 + 4 * nt);
             const vh = u32(b, p + 24 + 4 * nt);
@@ -118,7 +130,8 @@ describe('buildPs2TerrainBlob', () => {
         expect(n).toBeGreaterThan(4);
         const cover = new Uint8Array(24 * 24);
         for (const [x0, x1, z0, z1] of rects as [number, number, number, number][])
-            for (let z = z0; z < z1; z++) for (let x = x0; x < x1; x++) cover[z * 24 + x] = (cover[z * 24 + x] ?? 0) + 1;
+            for (let z = z0; z < z1; z++)
+                for (let x = x0; x < x1; x++) cover[z * 24 + x] = (cover[z * 24 + x] ?? 0) + 1;
         expect(cover.every((c) => c === 1)).toBe(true);
         expect(buildPs2TerrainBlob(L, { maxChunkTextures: 0 }).length).toBeLessThan(b.length);
     });
@@ -169,7 +182,12 @@ describe('buildPs2TerrainBlob', () => {
     });
 
     it('planTerrainSlots packs layers into groups of one pool without overlap', () => {
-        const layers = Array.from({ length: 40 }, (_, i) => ({ ...layer(12, 12, 0, () => 0x90001), index: i, originX: i % 8, originZ: (i / 8) | 0 }));
+        const layers = Array.from({ length: 40 }, (_, i) => ({
+            ...layer(12, 12, 0, () => 0x90001),
+            index: i,
+            originX: i % 8,
+            originZ: (i / 8) | 0,
+        }));
         const plan = planTerrainSlots(layers);
         const bySeq = new Map<number, { x0: number; x1: number; z0: number; z1: number }[]>();
         for (const L of layers) {
@@ -177,7 +195,8 @@ describe('buildPs2TerrainBlob', () => {
             expect(s.xLo + 48).toBeLessThanOrEqual(s.pool);
             expect(s.zLo + 48).toBeLessThanOrEqual(s.pool);
             const list = bySeq.get(s.seq) ?? [];
-            for (const r of list) expect(s.xLo >= r.x1 || s.xLo + 48 <= r.x0 || s.zLo >= r.z1 || s.zLo + 48 <= r.z0).toBe(true);
+            for (const r of list)
+                expect(s.xLo >= r.x1 || s.xLo + 48 <= r.x0 || s.zLo >= r.z1 || s.zLo + 48 <= r.z0).toBe(true);
             list.push({ x0: s.xLo, x1: s.xLo + 48, z0: s.zLo, z1: s.zLo + 48 });
             bySeq.set(s.seq, list);
         }

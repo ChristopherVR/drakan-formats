@@ -15,7 +15,14 @@
 import { cp1252Byte } from './xdb.ts';
 import { rawToCp1252 } from './ootfsource.ts';
 import { encodeXdbString } from './xdbwrite.ts';
-import { FIELD_STRING, decodeFieldValue, fieldBase, fieldIsArray, fieldIsIndirect, type ClassFieldDef } from './fields.ts';
+import {
+    FIELD_STRING,
+    decodeFieldValue,
+    fieldBase,
+    fieldIsArray,
+    fieldIsIndirect,
+    type ClassFieldDef,
+} from './fields.ts';
 import type { LvlObject, LvlObjectList } from './lvl.ts';
 import type { SrscReader } from './srsc.ts';
 
@@ -25,8 +32,8 @@ export const RRC_STRING_TYPE = 0x0400;
 
 /** Repeating XOR key of the 0x0400 records of the PC `Dragon.rrc` (period 32). */
 export const RRC_STRING_KEY: readonly number[] = [
-    0x0d, 0x6a, 0x57, 0xbf, 0xfd, 0xee, 0x74, 0xa7, 0x39, 0xc8, 0x43, 0x1a, 0xd5, 0xaf, 0x7f, 0xfb, 0xdd, 0xe9, 0x4e, 0x72, 0x90, 0x86,
-    0x35, 0xab, 0x5f, 0xfe, 0xf7, 0xba, 0xd3, 0x9c, 0xe4, 0x21,
+    0x0d, 0x6a, 0x57, 0xbf, 0xfd, 0xee, 0x74, 0xa7, 0x39, 0xc8, 0x43, 0x1a, 0xd5, 0xaf, 0x7f, 0xfb, 0xdd, 0xe9, 0x4e,
+    0x72, 0x90, 0x86, 0x35, 0xab, 0x5f, 0xfe, 0xf7, 0xba, 0xd3, 0x9c, 0xe4, 0x21,
 ];
 
 /** XOR a record body with the key (the same call encodes and decodes). */
@@ -79,7 +86,12 @@ const SUBST: Record<string, string> = {
  */
 export function cleanGameText(raw: string): TextCleanup {
     // Raw PC bytes 0x80..0x9f are Windows-1252 punctuation (German `„ “`, `’`), not control characters.
-    let t = rawToCp1252(raw).replace(/\\n/g, '\n').replace(/\r\n|\r|\n/g, '\n').replace(/[ \t]+\n/g, '\n').replace(/\n[ \t]+/g, '\n').trim();
+    let t = rawToCp1252(raw)
+        .replace(/\\n/g, '\n')
+        .replace(/\r\n|\r|\n/g, '\n')
+        .replace(/[ \t]+\n/g, '\n')
+        .replace(/\n[ \t]+/g, '\n')
+        .trim();
     const replaced: string[] = [];
     let out = '';
     for (const ch of t) {
@@ -163,7 +175,8 @@ export class TextPlan {
     idFor(xdbFile: string, raw: string): number {
         const { text, replaced } = cleanGameText(resolveText(raw, this.rrc));
         if (!text) return 0;
-        if (replaced.length) this.warnings.push(`"${text.slice(0, 40)}": replaced ${[...new Set(replaced)].join(' ')} with ASCII`);
+        if (replaced.length)
+            this.warnings.push(`"${text.slice(0, 40)}": replaced ${[...new Set(replaced)].join(' ')} with ASCII`);
         const f = this.file(xdbFile);
         let id = f.ids.get(text);
         if (id === undefined) {
@@ -180,7 +193,14 @@ export class TextPlan {
         const out: TextEntryChange[] = [];
         for (const [file, f] of [...this.byFile].sort((a, b) => a[0].localeCompare(b[0]))) {
             for (const [text, id] of [...f.ids].sort((a, b) => a[1] - b[1])) {
-                out.push({ file, type: RRC_STRING_TYPE, id, sub: this.sub, data: encodeXdbString({ id, sub: this.sub, text: [text] }), isNew: true });
+                out.push({
+                    file,
+                    type: RRC_STRING_TYPE,
+                    id,
+                    sub: this.sub,
+                    data: encodeXdbString({ id, sub: this.sub, text: [text] }),
+                    isNew: true,
+                });
             }
         }
         return out;
@@ -220,7 +240,11 @@ export function rewriteClassTextDefaults(
  * Object overrides of a converted PS2 list: every text-field parameter that still holds literal text (the converter copies
  * strings by value) becomes a plain XDB id. `xdbFileOf(o)` names the XDB of the object's class database (null: leave).
  */
-export function rewriteObjectTexts(list: LvlObjectList, plan: TextPlan, xdbFileOf: (o: LvlObject) => string | null): number {
+export function rewriteObjectTexts(
+    list: LvlObjectList,
+    plan: TextPlan,
+    xdbFileOf: (o: LvlObject) => string | null,
+): number {
     let n = 0;
     for (const o of list.objects) {
         if (!o.params.some((p) => isTextField(p))) continue;
