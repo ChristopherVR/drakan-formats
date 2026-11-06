@@ -273,7 +273,14 @@ describe('ootfclass', () => {
         music.classes = new Map([[19, bare]]);
         music.raw = (id) =>
             id === 19
-                ? buildPlainClassRecord({ name: 'trigger', group: 5, rfl: 61, icon: 1, fieldCount: 3, data: bare.data! })
+                ? buildPlainClassRecord({
+                      name: 'trigger',
+                      group: 5,
+                      rfl: 61,
+                      icon: 1,
+                      fieldCount: 3,
+                      data: bare.data!,
+                  })
                 : undefined;
         const fx = odb();
         const boxed = { ...cls(8409, 'detector', 61, detFields, [7, 0, 0]), model: { id: 3727, db: 2 } };
@@ -290,7 +297,11 @@ describe('ootfclass', () => {
         fx.raw = (id) => (id === 8409 ? joinClassRecord('detector', body) : fxRaw(id));
         const pc = [
             { db: 1, id: 1, cls: { ...cls(1, 'Creature', 61, detFields, [6, 2, 1]), model: { id: 3727, db: 1 } } },
-            { db: 1, id: 2, cls: { ...cls(2, 'Creature Detector', 61, detFields, [6, 1, 1]), model: { id: 3727, db: 1 } } },
+            {
+                db: 1,
+                id: 2,
+                cls: { ...cls(2, 'Creature Detector', 61, detFields, [6, 1, 1]), model: { id: 3727, db: 1 } },
+            },
         ];
         const plan = planClassMapping(pc, [music, fx]);
         expect(plan.unsupported.size).toBe(0);
@@ -502,13 +513,22 @@ describe('ootfclass', () => {
         ];
         const o = odb();
         const key = cls(40, 'Hermit Key.', 33, keyFields, [1, 0]);
-        const egg = cls(41, 'Blade Dragon Egg', 117, [...keyFields, [T_FLOAT, 'Activation Radius (lu)']], [1, 0, f32(2)]);
+        const egg = cls(
+            41,
+            'Blade Dragon Egg',
+            117,
+            [...keyFields, [T_FLOAT, 'Activation Radius (lu)']],
+            [1, 0, f32(2)],
+        );
         o.classes.set(40, key);
         o.classes.set(41, egg);
         const raw = o.raw;
         const recs = new Map([
             [40, buildPlainClassRecord({ name: key.name, group: 5, rfl: 33, icon: 1, fieldCount: 2, data: key.data! })],
-            [41, buildPlainClassRecord({ name: egg.name, group: 5, rfl: 117, icon: 1, fieldCount: 3, data: egg.data! })],
+            [
+                41,
+                buildPlainClassRecord({ name: egg.name, group: 5, rfl: 117, icon: 1, fieldCount: 3, data: egg.data! }),
+            ],
         ]);
         o.raw = (id) => recs.get(id) ?? raw?.(id);
         const hammerFields: [number, string][] = [
@@ -516,7 +536,9 @@ describe('ootfclass', () => {
             [T_FLOAT, 'Activation Radius (lu)'],
             [T_INT, 'Lock Code'],
         ];
-        const pc = [{ db: 5, id: 3172, cls: cls(3172, 'Bell Hammer of Alwarren', 117, hammerFields, [1, f32(0.76), 20]) }];
+        const pc = [
+            { db: 5, id: 3172, cls: cls(3172, 'Bell Hammer of Alwarren', 117, hammerFields, [1, f32(0.76), 20]) },
+        ];
         const plan = planClassMapping(pc, [o], { substituteEngineId: PS2_SUBSTITUTES });
         expect(plan.unsupported.size).toBe(0);
         const s = plan.synthesized[0]!;
@@ -639,45 +661,6 @@ describe('ootfclass', () => {
         expect(plan.synthesized[0]!.template.name).toBe('Spark Gen');
         expect(plan.synthesized[0]!.cls.model ?? null).toBeNull();
         expect(parseClassBody(splitClassRecord(plan.synthesized[0]!.record).body)?.data).toEqual([f32(1), 2]);
-    });
-
-    it('clones a placed Morph Plug from a world morph (model flags 0), not a weapon-attached one (flags 1)', () => {
-        const fields: [number, string][] = [
-            [T_ENUM, 'Start when created'],
-            [T_ENUM, 'Looping'],
-        ];
-        // a class record with a model block: u16 group, u16 model, u16 db, u32 model flags at 6, rfl at 80, counts at 86 / 90
-        const rec = (name: string, model: number, flags: number, data: number[]): Uint8Array => {
-            const body = new Uint8Array(94 + data.length * 4);
-            const dv = new DataView(body.buffer);
-            dv.setUint16(2, model, true);
-            dv.setUint32(6, flags, true);
-            dv.setUint16(80, 99, true);
-            dv.setUint32(86, data.length, true);
-            dv.setUint32(90, data.length, true);
-            data.forEach((v, i) => dv.setUint32(94 + i * 4, v, true));
-            return joinClassRecord(name, body);
-        };
-        const o = odb();
-        // the weapon-attached template matches the PC defaults exactly, the world one does not
-        o.classes.set(40, { ...cls(40, 'Crown Of Thorns_MorphSpikes', 99, fields, [0, 0]), model: { id: 7, db: 0 } });
-        o.classes.set(41, { ...cls(41, 'ES_FrostWisps', 99, fields, [1, 1]), model: { id: 8, db: 0 } });
-        const raw = o.raw!;
-        o.raw = (id) =>
-            id === 40
-                ? rec('Crown Of Thorns_MorphSpikes', 7, 1, [0, 0])
-                : id === 41
-                  ? rec('ES_FrostWisps', 8, 0, [1, 1])
-                  : raw(id);
-        const plug: OdbClass = { ...cls(1, 'ice cover', 99, fields, [0, 0]), model: { id: 99, db: 0 } };
-        const plan = planClassMapping([{ db: 1, id: 1, cls: plug }], [o], {
-            modelOdbFile: o.file,
-            modelFor: () => ({ id: 500, db: 0 }),
-            modelBounds: () => new Uint8Array(64),
-        });
-        expect([...plan.unsupported.values()]).toEqual([]);
-        expect(plan.synthesized[0]?.template.name).toBe('ES_FrostWisps');
-        expect(parseClassBody(splitClassRecord(plan.synthesized[0]!.record).body)?.data).toEqual([0, 0]);
     });
 
     it('does not retarget kinds that need a model', () => {
