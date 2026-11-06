@@ -24,7 +24,14 @@ import {
     type LvlObject,
     type ParamSpec,
 } from './lvl.ts';
-import { ODB_CLASS_TYPE, ODB_FIELDS_TYPE, buildOdbIndex, parseOdbClasses, type OdbClass } from './odb.ts';
+import {
+    ODB_CLASS_TYPE,
+    ODB_FIELDS_TYPE,
+    buildOdbIndex,
+    classFieldDefault,
+    parseOdbClasses,
+    type OdbClass,
+} from './odb.ts';
 import { resourceKind, type ResourceContext, type ResourceKind } from './convert.ts';
 import { FIELD_SOUND } from './fields.ts';
 import {
@@ -648,7 +655,12 @@ export async function convertOotfLevels(
                           const fStem = file.replace(/\.ODB$/i, '');
                           // The shared builder owns skeletons and clips. A class in another ODB must
                           // reference that model through its dependency, even if it has its own static MOD.
-                          if (!modelSkinned(cls) && fStem !== hostStem && ps2.hostFiles?.has(fStem) && modelFiles.has(file)) {
+                          if (
+                              !modelSkinned(cls) &&
+                              fStem !== hostStem &&
+                              ps2.hostFiles?.has(fStem) &&
+                              modelFiles.has(file)
+                          ) {
                               if (!ow || !cls.model) return null;
                               // Particle / flame classes (engine 43, 71, 97) hung the level load while their "Particle Life Time" was 0
                               // (`mergeDefaults` now sets 0.5 s); OOTF_XODB_FX=0 keeps them out of template ODBs again.
@@ -1266,8 +1278,17 @@ export async function convertOotfLevels(
                     return i >= 0 ? { fieldIndex: i, type: c!.fields![i]!.type, name: c!.fields![i]!.name } : null;
                 };
                 const i = transitionFieldIndex(exitClass.cls.fields);
+                // Converted PC detectors are clones of a PS2 detector class (synthesized for this pack) or template classes.
+                const detectorFieldsOf = (o: LvlObject) => {
+                    const c =
+                        classes.get(o.dbIndex)?.get(o.classId) ??
+                        plan?.synthesized.find((x) => x.dbIndex === o.dbIndex && x.classId === o.classId)?.cls;
+                    if (c?.rflClass !== 61 || !c.fields) return null;
+                    return { fields: c.fields, defaults: (k: number) => Number(classFieldDefault(c, k) ?? 0) };
+                };
                 const r = applyCampaignExits(lvl.objects, cl, plan0, {
                     exitFieldOf: exitField,
+                    detectorFieldsOf,
                     terrain: pc.terrain,
                     ...(detectorClass
                         ? { detectorClass: { dbIndex: detectorClass.t.dbIndex, classId: detectorClass.t.classId } }
@@ -1290,7 +1311,7 @@ export async function convertOotfLevels(
                         : {}),
                     ...(detectorClass
                         ? {
-                              // SYSTEM's Trigger Detector sends ON by default; FX's sends touch. Never depend on database order.
+                              // Exit detectors send ON (as on the disc); the Trigger Detector defaults differ per database, so never rely on them.
                               detectorParams: exitDetectorParams(
                                   detectorClass.cls.fields!,
                                   dbgEnv0['OOTF_DETECT_WHICH'] === undefined ? 0 : Number(dbgEnv0['OOTF_DETECT_WHICH']),
@@ -1314,6 +1335,21 @@ export async function convertOotfLevels(
                             type: exitClass.cls.fields![i]!.type,
                             name: exitClass.cls.fields![i]!.name,
                         },
+                        ...(() => {
+                            const mi = exitClass.cls.fields!.findIndex((f) =>
+                                /^maintain player position$/i.test(f.name.trim()),
+                            );
+                            return mi >= 0
+                                ? {
+                                      maintain: {
+                                          fieldIndex: mi,
+                                          type: exitClass.cls.fields![mi]!.type,
+                                          name: exitClass.cls.fields![mi]!.name,
+                                          default: Number(classFieldDefault(exitClass.cls, mi) ?? 1),
+                                      },
+                                  }
+                                : {};
+                        })(),
                     },
                 });
                 for (const w of r.warnings) res.warnings.push(w);
@@ -1554,7 +1590,13 @@ export async function convertOotfLevels(
             ] ?? 0,
         );
         if (lf) parts.terrain = parts.terrain.map((L) => ({ ...L, flags: L.flags | lf }));
-        res.levels.push({ pcPath: pc.path, title, arena: isOotfArenaLevel(pc), parts, splats: tex ? { TXD: tex.txd } : {} });
+        res.levels.push({
+            pcPath: pc.path,
+            title,
+            arena: isOotfArenaLevel(pc),
+            parts,
+            splats: tex ? { TXD: tex.txd } : {},
+        });
     }
     // The pack lists the levels in this order (mod.toml `levels`, whose first entry is the campaign start): play order,
     // not the order the caller passed them in (a directory listing is alphabetical).

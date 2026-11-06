@@ -13,6 +13,7 @@ import {
     isOotfArenaPath,
     exitBoxes,
     exitDetectorParams,
+    EXIT_DETECTOR_MESSAGE,
     type TerrainLayer,
     campaignExitStrings,
     campaignRegistration,
@@ -226,14 +227,15 @@ describe('applyCampaignExits', () => {
         exitClass: { dbIndex: 8, classId: 966, field: exitField },
     });
 
-    it('sends touch explicitly on foot and mounted detectors, replacing a debug Detect Which override once', () => {
+    it('sends ON (as every disc exit detector does) on foot and mounted detectors, replacing a debug Detect Which override once', () => {
         const fields = [
             { name: 'Task', type: 7 },
             { name: 'Detect Which?', type: 7 },
             { name: 'Trigger Message', type: 7 },
         ];
         const params = exitDetectorParams(fields, 2);
-        expect(params.map((p) => p.value)).toEqual([6, 2, 5]);
+        expect(params.map((p) => p.value)).toEqual([6, 2, 1]);
+        expect(EXIT_DETECTOR_MESSAGE).toBe(1);
         const plan = planCampaign(fixture());
         const village = plan.levels.find((l) => l.path.endsWith('Ruined Village.lvl'))!;
         const list: LvlObjectList = { objects: [obj(1, 1)], warnings: [] };
@@ -248,7 +250,7 @@ describe('applyCampaignExits', () => {
         for (const detector of detectors) {
             expect(detector.params.map((p) => p.fieldIndex)).toEqual([0, 1, 2]);
             expect(detector.data[0]).toBe(6);
-            expect(detector.data[2]).toBe(5);
+            expect(detector.data[2]).toBe(1); // ON: message 5 never queues the level change
         }
         expect(detectors.some((d) => d.data[1] === 1)).toBe(true);
         expect(detectors.some((d) => d.data[1] === 2)).toBe(true);
@@ -346,6 +348,101 @@ describe('applyCampaignExits', () => {
         expect(new DataView(new Uint32Array([timer.data[0]!]).buffer).getFloat32(0, true)).toBeCloseTo(44, 3);
         expect(timer.data[1]).toBe(0); // Start Mode: at once
         expect(timer.data[2]).toBe(5);
+    });
+
+    it("puts the walk-in detectors on the level's own exit detector box, keeping its gating", () => {
+        const plan = planCampaign(fixture());
+        const village = plan.levels.find((l) => l.path.endsWith('Ruined Village.lvl'))!;
+        const fields = [
+            { name: 'Task', type: 7 },
+            { name: 'Detect Which?', type: 7 },
+            { name: 'Initial State', type: 7 },
+            { name: 'Trigger Message', type: 7 },
+        ];
+        const defaults = [6, 2, 0, 1];
+        const nameRaw = new Uint8Array(16);
+        // 40: PC detector (Both, class defaults) far from exit 10 and also driving a door 50; 41: mount-only, disabled until
+        // switch 43 enables it, firing exit 11.
+        const pcBoth = obj(40, 4390, {
+            links: [10, 50],
+            scale: [4, 2, 1],
+            flags: FLAG_VISIBLE | 0x100,
+            rot: [0, 180, 0],
+        });
+        const pcMount = obj(41, 4390, {
+            links: [11],
+            scale: [7, 8, 3],
+            flags: FLAG_VISIBLE | 0x100,
+            params: [
+                { fieldIndex: 1, type: 7, name: 'Detect Which?', nameRaw },
+                { fieldIndex: 2, type: 7, name: 'Initial State', nameRaw },
+            ],
+            data: [1, 1],
+        });
+        const list: LvlObjectList = {
+            objects: [obj(1, 1), obj(10, 5), obj(11, 5), pcBoth, pcMount, obj(43, 7, { links: [41] }), obj(50, 9)],
+            warnings: [],
+        };
+        const r = applyCampaignExits(list, village, plan, {
+            ...ctxFor((o) => o.classId === 5),
+            detectorClass: { dbIndex: 2, classId: 3050 },
+            mountDetector: { fieldIndex: 1, type: 7, name: 'Detect Which?' },
+            detectorFieldsOf: (o) => (o.classId === 4390 ? { fields, defaults: (i) => defaults[i]! } : null),
+        });
+        const param = (o: LvlObject, i: number) => {
+            const k = o.params.findIndex((p) => p.fieldIndex === i);
+            return k >= 0 ? o.data[k] : undefined;
+        };
+        // no boxes on the exit objects: the level's detectors fire them
+        expect(list.objects.some((o) => o.classId === 3050)).toBe(false);
+        const to10 = list.objects.filter((o) => o.classId === 4390 && o.id > 50 && o.links.includes(10));
+        const to11 = list.objects.filter((o) => o.classId === 4390 && o.id > 50 && o.links.includes(11));
+        expect(to10.map((o) => param(o, 1)).sort()).toEqual([0, 1]); // Both -> foot and mount copies
+        expect(to11.map((o) => param(o, 1))).toEqual([1]); // mount only stays mount only
+        for (const c of [...to10, ...to11]) {
+            expect(param(c, 3)).toBe(1); // ON
+            expect(c.links).toHaveLength(1);
+        }
+        expect(to10[0]!.pos).toEqual(pcBoth.pos);
+        expect(to10[0]!.scale).toEqual([4, 2, 1]);
+        expect(to10[0]!.rot).toEqual([0, 180, 0]);
+        expect(param(to11[0]!, 2)).toBe(1); // still disabled at start
+        expect(list.objects.find((o) => o.id === 43)!.links).toEqual([41, to11[0]!.id]); // and enabled with it
+        expect(pcBoth.links).toEqual([10, 50]); // the PC detector itself is unchanged
+        expect(r.detectors).toBe(3);
+    });
+
+    it("keeps a PC exit's Maintain Player Position 0 instead of the PS2 default 1", () => {
+        const levels = fixture();
+        const canyon = levels.find((l) => l.path.endsWith('canyon.lvl'))!;
+        const o30 = canyon.list.objects.find((o) => o.id === 30)!;
+        o30.params = [
+            { fieldIndex: 1, type: FIELD_INT, name: 'Maintain Player Position', nameRaw: new Uint8Array(26) },
+        ];
+        o30.data = [0];
+        const plan = planCampaign(levels);
+        const lv = plan.levels.find((l) => l.path.endsWith('canyon.lvl'))!;
+        expect(lv.exits.find((e) => e.pcObjectId === 30)!.maintainPosition).toBe(0);
+        expect(lv.exits.find((e) => e.pcObjectId === 31)!.maintainPosition).toBe(1);
+        const list: LvlObjectList = { objects: [obj(1, 1), obj(30, 5), obj(31, 5)], warnings: [] };
+        const maintain = { fieldIndex: 2, type: 7, name: 'Maintain Player Position', default: 1 };
+        applyCampaignExits(list, lv, plan, {
+            exitFieldOf: (o) =>
+                o.classId === 5 ? { fieldIndex: 0, type: FIELD_STRING, name: 'Transition To...' } : null,
+            exitClass: {
+                dbIndex: 8,
+                classId: 966,
+                field: { fieldIndex: 0, type: FIELD_STRING, name: 'Transition To...' },
+                maintain,
+            },
+        });
+        const value = (id: number) => {
+            const o = list.objects.find((x) => x.id === id)!;
+            const k = o.params.findIndex((p) => p.fieldIndex === 2);
+            return k >= 0 ? o.data[k] : undefined;
+        };
+        expect(value(30)).toBe(0);
+        expect(value(31)).toBeUndefined(); // same as the class default: not written
     });
 
     it('setExitDestinationId keeps string payloads of other parameters intact', () => {

@@ -84,6 +84,12 @@ export interface CampaignExit {
      * seconds (the length of the level's scenes). Unset for levels the player plays.
      */
     autoSeconds?: number;
+    /**
+     * PC "Maintain Player Position" of the exit (1: the player arrives at the same offset from the destination's marker as
+     * she had from the exit object when the level changed; 0: on the marker). The exit is fired from a detector box that
+     * can lie far from the exit object (Volcanic: 75000 units), so the PS2 class default (1) must not replace a PC 0.
+     */
+    maintainPosition?: number;
 }
 
 /** Longest level title the converter writes (the pipeline cuts other titles there too); the runtime takes 80. */
@@ -170,7 +176,11 @@ interface PcExit {
     obj: LvlObject;
     className: string;
     text: string;
+    /** "Maintain Player Position" (object parameter, else class default), or undefined when the class has no such field. */
+    maintainPosition?: number;
 }
+
+const MAINTAIN_FIELD = /^maintain player position$/i;
 
 /** Exits of a PC level: objects whose class has a "Transition To..." string field; an object override wins over the class default. */
 export function pcExits(pc: PcLevel): PcExit[] {
@@ -184,8 +194,20 @@ export function pcExits(pc: PcLevel): PcExit[] {
         if (dword !== undefined) text = String(decodeFieldValue(cls.fields![fi]!.type, dword, cls.data!));
         const pi = o.params.findIndex((p) => TRANSITION_FIELD.test(p.name.trim()));
         if (pi >= 0) text = String(decodeFieldValue(o.params[pi]!.type, o.data[pi]!, o.data));
+        const mi = cls.fields!.findIndex((f) => MAINTAIN_FIELD.test(f.name.trim()));
+        let maintain: number | undefined;
+        if (mi >= 0) {
+            const mp = o.params.findIndex((p) => p.fieldIndex === mi);
+            maintain = mp >= 0 ? o.data[mp]! : cls.data?.[mi];
+        }
         // A class with the field but no destination (a scripted "Exit" object) is not a level exit.
-        if (text.trim()) out.push({ obj: o, className: cls.name, text });
+        if (text.trim())
+            out.push({
+                obj: o,
+                className: cls.name,
+                text,
+                ...(maintain === undefined ? {} : { maintainPosition: maintain }),
+            });
     }
     return out;
 }
@@ -365,6 +387,7 @@ export function planCampaign(levels: readonly PcLevel[], opt: CampaignOptions = 
                 destPath: dest?.path ?? null,
                 destTitle: dest?.title ?? null,
                 synthetic: false,
+                ...(e.maintainPosition === undefined ? {} : { maintainPosition: e.maintainPosition }),
             });
         }
     }
@@ -546,7 +569,13 @@ export interface ApplyExitsContext {
     /** For an object of the converted list: its exit field when its class is an exit class, else null. */
     exitFieldOf(o: LvlObject): ExitField | null;
     /** Exit class used for added exits (`ps2ClassTables` entry whose engine class is 55; a "Level Transition from 1 to 2" class). */
-    exitClass: { dbIndex: number; classId: number; field: ExitField };
+    exitClass: {
+        dbIndex: number;
+        classId: number;
+        field: ExitField;
+        /** Its "Maintain Player Position" field and class default: PC values that differ are written on the exit. */
+        maintain?: ExitField & { default: number };
+    };
     /**
      * "Trigger Detector" class of the template (engine class 0x1003d). On PS2 nothing fires an exit by the player standing on it:
      * every exit of the disc is the link target of a detector box (docs/journal/2026-11-01/level-exit-walk-in.md), while a PC exit
@@ -567,22 +596,92 @@ export interface ApplyExitsContext {
     timerClass?: { dbIndex: number; classId: number; fields: readonly Pick<ClassFieldDef, 'name' | 'type'>[] };
     /** Terrain of the PC level: lets exits that hang far from the walkable surface get boxes down to the real floor (see `exitBoxes`). */
     terrain?: readonly TerrainLayer[];
+    /**
+     * Fields (with class defaults) of a converted object's class when it is a trigger detector (engine class 61), else null.
+     * With it an exit that the PC level fires from its own detector box gets its walk-in detectors on that box instead of on
+     * the exit object (see `levelExitTriggers`).
+     */
+    detectorFieldsOf?(
+        o: LvlObject,
+    ): { fields: readonly Pick<ClassFieldDef, 'name' | 'type'>[]; defaults: (i: number) => number } | null;
 }
 
-/** Exit detectors must send the exit's touch message, regardless of which template database supplied the class. */
+/**
+ * Message an exit detector sends: ON (1), what every exit detector on the disc sends (Surdana's 9 Trigger Detectors,
+ * Shadowmire, Inquisitor's Lair ...) and what the PC level's own exit detectors send (their class default). The exit's
+ * touch handler (`0x361440`) queues the level change on ON only; message 5 arrives as another event that only sets a
+ * state bit, so a detector sending 5 never opens the save prompt (docs/journal/2026-11-06/ootf-progression.md).
+ */
+export const EXIT_DETECTOR_MESSAGE = 1;
+
+/** Exit detectors must send ON explicitly, regardless of which template database supplied the class (defaults differ). */
 export function exitDetectorParams(
     fields: readonly Pick<ClassFieldDef, 'name' | 'type'>[],
     which = 0,
 ): { fieldIndex: number; type: number; name: string; value: number }[] {
     const values = new Map([
         ['task', 6],
-        ['trigger message', 5],
+        ['trigger message', EXIT_DETECTOR_MESSAGE],
         ['detect which?', which],
     ]);
     return fields.flatMap((field, fieldIndex) => {
         const value = values.get(field.name.trim().toLowerCase());
         return value === undefined ? [] : [{ fieldIndex, type: field.type, name: field.name, value }];
     });
+}
+
+/**
+ * Every PC exit is fired by a detector box of its own level (Wartok's "Creature Detector" at the mine mouth, the Islands detector
+ * over the rift 77000 above the exit object, Volcanic's mount-only detector that the Runeblade's timer enables), not by touching
+ * the exit object. The converted PC detector keeps working for Rynn on foot (it sends ON, its class default), but its "Both" does
+ * not take the exit for Rynn on Arokh on PS2 (only "Rynn On Mount" does, see ootf-campaign-walkthrough.md). So each such
+ * detector (`converted` id, linking to `exit`) gets copies on the same box (position, rotation, scale, every parameter, so
+ * Initial State and Detect Only Once stay) that send ON to the exit only: one for Rynn on foot and one for Rynn on a mount, or
+ * just the one its PC "Detect Which?" names. Whatever enables or disables the PC detector links to the copies too. Returns the
+ * number of copies (0: the exit has no PC detector; the caller then boxes the exit object itself).
+ */
+export function levelExitTriggers(
+    list: LvlObjectList,
+    converted: ReadonlySet<number>,
+    exit: LvlObject,
+    fieldsOf: NonNullable<ApplyExitsContext['detectorFieldsOf']>,
+): number {
+    let n = 0;
+    const pcDetectors = list.objects.filter(
+        (o) => converted.has(o.id) && o.id !== exit.id && o.links.includes(exit.id) && fieldsOf(o),
+    );
+    for (const d of pcDetectors) {
+        const info = fieldsOf(d)!;
+        const fi = (name: string) => info.fields.findIndex((f) => f.name.trim().toLowerCase() === name);
+        const iWhich = fi('detect which?');
+        const iMsg = fi('trigger message');
+        if (iMsg < 0) continue;
+        const value = (i: number) => {
+            const pi = d.params.findIndex((p) => p.fieldIndex === i);
+            return pi >= 0 ? d.data[pi]! : info.defaults(i);
+        };
+        const which = iWhich >= 0 ? value(iWhich) : 2;
+        const field = (i: number): ExitField => ({
+            fieldIndex: i,
+            type: info.fields[i]!.type,
+            name: info.fields[i]!.name,
+        });
+        for (const w of which === 0 || which === 1 ? [which] : [0, 1]) {
+            const { object: copy } = addObject(list, {
+                classId: d.classId,
+                dbIndex: d.dbIndex,
+                pos: d.pos,
+                rot: d.rot,
+                templateId: d.id,
+            });
+            setPlainParam(copy, field(iMsg), EXIT_DETECTOR_MESSAGE);
+            if (iWhich >= 0) setPlainParam(copy, field(iWhich), w);
+            copy.links = [exit.id];
+            for (const s of list.objects) if (s !== copy && s.links.includes(d.id)) s.links.push(copy.id);
+            n++;
+        }
+    }
+    return n;
 }
 
 /** One detector box for an exit: centre height and height in cells of 2048 units (the x / z size stays the configured one). */
@@ -653,6 +752,11 @@ export interface ApplyExitsResult {
  * the form of the 12 overrides on the disc. Other parameters, including strings and arrays, are kept.
  */
 export function setExitDestinationId(o: LvlObject, field: ExitField, id: number): void {
+    setPlainParam(o, field, id);
+}
+
+/** Set (or add) parameter `field` of `o` to the plain dword `value`; other parameters, strings and arrays included, are kept. */
+export function setPlainParam(o: LvlObject, field: ExitField, value: number): void {
     const old = o.params
         .map((p, i) => ({ p, dword: o.data[i]!, i }))
         .filter((x) => x.p.fieldIndex !== field.fieldIndex);
@@ -666,7 +770,7 @@ export function setExitDestinationId(o: LvlObject, field: ExitField, id: number)
     for (let i = 0; i < field.name.length; i++) nameRaw[i] = field.name.charCodeAt(i) & 0xff;
     items.push({
         p: { fieldIndex: field.fieldIndex, type: field.type, name: field.name, nameRaw },
-        dword: id >>> 0,
+        dword: value >>> 0,
         words: null,
     });
     items.sort((a, b) => a.p.fieldIndex - b.p.fieldIndex);
@@ -759,7 +863,15 @@ export function applyCampaignExits(
                 exitObj = object;
             }
         }
-        if (ctx.detectorClass && exitObj && (e.reason === 'pc' || e.reason === 'intro-next')) {
+        const mf = ctx.exitClass.maintain;
+        if (exitObj && mf && e.maintainPosition !== undefined && e.maintainPosition !== mf.default)
+            setPlainParam(exitObj, mf, e.maintainPosition);
+        const levelTriggers =
+            exitObj && e.reason === 'pc' && ctx.detectorFieldsOf
+                ? levelExitTriggers(list, converted, exitObj, ctx.detectorFieldsOf)
+                : 0;
+        res.detectors += levelTriggers;
+        if (ctx.detectorClass && exitObj && !levelTriggers && (e.reason === 'pc' || e.reason === 'intro-next')) {
             // Centred on the exit's own height: the terrain function picks other layers under many exits (the real floor is the exit
             // height, 6000 to 10000 above the layer it finds); a box stretched down to that layer was not touched by a walker standing in it.
             const size: Vec3 = [...(ctx.detectorSize ?? [2, 2, 2])] as Vec3;
