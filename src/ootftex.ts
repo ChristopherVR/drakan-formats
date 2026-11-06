@@ -542,6 +542,16 @@ export function encodePs2Texture(src: RgbaImage, opt: Ps2TextureOptions = {}): P
         colors.set(k, (colors.get(k) ?? 0) + 1);
     }
     const hasAlpha = transparent + translucent > 0;
+    // A wholly transparent texture (the PC's "invisiblewall" and other collision-only models) is written the way the disc writes
+    // its own: 16 bpp 1:5:5:5, flags word 1, every alpha bit clear (WORLDCON 401 of the disc's "invisiblewall", which shootable
+    // rfl 17 targets such as "Rope Target" use; RESOURES 6028 of the null models). An 8 bpp texture with flags word 0 (opaque
+    // or colour key on the disc, where no 8 bpp texture with holes carries it) draws as a black box in game. Forced 8 bpp
+    // (`indexed`: skinned models, fast-draw weapons) keeps the palette form with the disc's graded-alpha flags word 8.
+    if (transparent === px && opt.mode !== 'indexed') {
+        const body = new Uint8Array(0x40 + px * 2);
+        body.set(header(w, h, 16, 1, true, fps, opt.slot), 0);
+        return { body, width: w, height: h, bpp: 16, hasAlpha: true, lossy: false };
+    }
     // An enlarged texture stays truecolor too (it was 8 bpp while the guest's mip loop made 32 bpp uploads 10x slower).
     const mode = opt.mode ?? 'truecolor';
     const tooBig = mode === 'truecolor' && px > (opt.maxTruecolorPixels ?? DEFAULT_MAX_TRUECOLOR_PIXELS);
@@ -587,7 +597,7 @@ export function encodePs2Texture(src: RgbaImage, opt: Ps2TextureOptions = {}): P
             }
         }
         const body = new Uint8Array(0x40 + 16 + 1024 + px);
-        body.set(header(w, h, 8, translucent > 0 ? 8 : 0, hasAlpha, fps, opt.slot), 0);
+        body.set(header(w, h, 8, translucent > 0 || transparent === px ? 8 : 0, hasAlpha, fps, opt.slot), 0);
         const dv = view(body);
         dv.setUint32(0x40, 1, true);
         dv.setUint32(0x44, 256, true);

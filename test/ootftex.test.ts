@@ -169,6 +169,23 @@ describe('PS2 texture encode', () => {
         expect(t.body[37]).toBe(2); // alpha flag byte
     });
 
+    it('writes a wholly transparent texture like the disc invisiblewall (16 bpp, flags word 1), 8 bpp flags 8 when forced', () => {
+        const clear = img(16, 16, () => [0, 0, 0, 0]);
+        const t = encodePs2Texture(clear);
+        expect(t).toMatchObject({ width: 16, height: 16, bpp: 16, hasAlpha: true, lossy: false });
+        const d = decodeTxd(t.body, { upright: false });
+        expect(d).toMatchObject({ bpp: 16, flags: 1 });
+        expect([t.body[37], t.body[38]]).toEqual([2, 0x80]);
+        for (let i = 3; i < d.rgba.length; i += 4) expect(d.rgba[i]).toBe(0);
+        const forced = encodePs2Texture(clear, { mode: 'indexed', square: true });
+        expect(forced).toMatchObject({ bpp: 8, hasAlpha: true });
+        const fd = decodeTxd(forced.body, { upright: false });
+        expect(fd.flags).toBe(8);
+        for (let i = 3; i < fd.rgba.length; i += 4) expect(fd.rgba[i]).toBe(0);
+        // a cut-out with opaque pixels keeps the 8 bpp palette form
+        expect(encodePs2Texture(img(8, 8, (x) => (x === 0 ? [0, 0, 0, 0] : [1, 2, 3, 255]))).bpp).toBe(8);
+    });
+
     it('uses 16 bpp for photo-like images and 8 bpp with graded alpha otherwise', () => {
         const photo = img(32, 32, (x, y) => [x * 8, y * 8, (x * y) & 255, 255]);
         const t = encodePs2Texture(photo, { mode: 'auto' });
@@ -467,6 +484,49 @@ describe('containers and the asset builder', () => {
             Uint8Array.from([200, 100, 50]),
         );
         expect(b.report.textures.converted).toBe(1);
+    });
+
+    it('keeps the polygons, draw list and collision of an invisible wall and writes its texture wholly transparent', async () => {
+        // The PC "invisiblewall" (Volcanic's Arrow Detect Object 2366) is a box whose only texture is fully transparent; the
+        // arrow must still hit it, so only the texture form changes (black box in game with an 8 bpp flags-word-0 texture).
+        const bounds = new Uint8Array(72);
+        [0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 2].forEach((v, i) =>
+            new DataView(bounds.buffer).setFloat32(i * 4, v, true),
+        );
+        const clearTxd = writePs2Srsc([
+            { type: 0x30, id: 0, sub: 0, data: palette([[0, 0, 0]]) },
+            { type: 0x40, id: 3, sub: 0, data: pcTex({ w: 4, h: 4, bpp: 8, key: 0, data: new Array(16).fill(0) }) },
+        ]);
+        const local: PcFileSource = {
+            ...src,
+            read: async (p) =>
+                p.toLowerCase() === 'lvl/lvl.mod'
+                    ? model(
+                          5,
+                          [
+                              [4, 0],
+                              [3, 0],
+                          ],
+                          false,
+                          0,
+                          bounds,
+                      )
+                    : p.toLowerCase() === 'lvl/lvl.txd'
+                      ? clearTxd
+                      : src.read(p),
+        };
+        const b = new OotfAssetBuilder(local);
+        expect(await b.addModelRef('Lvl/Lvl', 0, 5, true)).toBe(2);
+        const out = b.build('out', 'test').files;
+        const mod = await SrscReader.fromBytes(out['out/TEST.MOD']!);
+        expect(mod.find(0x211, 2)).toBeDefined();
+        expect(mod.find(0x207, 2)).toBeDefined();
+        const m = (await parseModel(mod, 2))!;
+        expect(m.indices.length).toBe(3);
+        const tx = await SrscReader.fromBytes(out['out/TEST.TXD']!);
+        const d = decodeTxd(await tx.readRaw(tx.find(0x40, m.textures[0]!.id)!));
+        expect([d.bpp, d.flags]).toEqual([16, 1]);
+        for (let i = 3; i < d.rgba.length; i += 4) expect(d.rgba[i]).toBe(0);
     });
 
     it('gives a Morph Plug frame one collision shape that lists every polygon, keeping pad vertices out of the box', async () => {
