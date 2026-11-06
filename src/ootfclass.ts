@@ -18,6 +18,7 @@ import {
     FIELD_FLOAT,
     FIELD_INT,
     FIELD_LAYER,
+    FIELD_MODEL,
     FIELD_STRING,
     decodeFieldValue,
     fieldBase,
@@ -366,6 +367,12 @@ export interface PlanOptions {
      */
     mapAnimFor?: (cls: OdbClass) => ReadonlyMap<number, number> | undefined;
     /**
+     * Model-typed defaults (type 4, scalar or array, e.g. a Morph Plug's "Morphing Models") of a PC class cloned into `odbFile`:
+     * PC model ref -> the converted model's ref in that ODB's frame, or null when that model was not converted. Returns undefined
+     * when no model of the class can be named there; the field then keeps the template's models.
+     */
+    mapModelFor?: (cls: OdbClass, odbFile: string) => ((ref: number) => number | null) | undefined;
+    /**
      * Skinned models need a skinned template: a class whose model has no skeleton fails the level load (-6, ootf-skinned-creatures.md).
      * `modelSkinned(pcClass)` says the PC class's converted model is skinned, `templateSkinned(ps2Class)` that a PS2 class's model is.
      * With both, a skinned class is cloned from the skinned templates when there are any.
@@ -518,6 +525,7 @@ export function mergeDefaults(
     animMap?: ReadonlyMap<number, number>,
     copyChannels = false,
     rigJoints?: number,
+    mapModel?: (ref: number) => number | null,
 ): Merge {
     const pf = pc.fields ?? [];
     const tf = tpl.fields ?? [];
@@ -566,6 +574,25 @@ export function mergeDefaults(
                 return;
             }
             out[j] = mapped >>> 0;
+            copied.push(f.name);
+            return;
+        }
+        if (mapModel && fieldBase(f.type) === FIELD_MODEL) {
+            // Model fields name PC models; the converted copies have new ids. Only a field whose every model converted is
+            // carried: a Volcanic "ice cover" otherwise morphed through the template's Crown of Thorns spikes (issue 5).
+            const refs = fieldIsIndirect(f.type)
+                ? (decodeFieldValue(f.type, dword, pc.data ?? []) as number[])
+                : [dword];
+            const mapped = refs.map((r) => (r ? mapModel(r) : 0));
+            if (mapped.some((r) => r === null)) {
+                skipped.push(f.name);
+                return;
+            }
+            const words = mapped as number[];
+            if (fieldIsIndirect(f.type)) {
+                out[j] = words.length ? ((words.length << 16) | out.length) >>> 0 : 0;
+                out.push(...words.map((w) => w >>> 0));
+            } else out[j] = words[0]! >>> 0;
             copied.push(f.name);
             return;
         }
@@ -1077,6 +1104,7 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
                 opt.mapAnimFor?.(cls),
                 wantsModel,
                 opt.modelJoints?.(cls),
+                opt.mapModelFor?.(cls, c.odb.file),
             );
             if (!best || m.coverage > best.m.coverage || (m.coverage === best.m.coverage && m.same > best.m.same))
                 best = { c, m };

@@ -33,7 +33,7 @@ import {
     type OdbClass,
 } from './odb.ts';
 import { resourceKind, type ResourceContext, type ResourceKind } from './convert.ts';
-import { FIELD_SOUND } from './fields.ts';
+import { FIELD_MODEL, FIELD_SOUND, decodeFieldValue, fieldBase, fieldIsIndirect } from './fields.ts';
 import {
     convertPcSounds,
     soundIdAllocator,
@@ -533,6 +533,13 @@ export async function convertOotfLevels(
                 ownerOf.set(u.cls, ow);
                 // Native generic props need the strip draw representation even when their model is rigid.
                 await builder.addModelRef(ow, m.db, m.id, u.cls.rflClass === 17);
+                // A Morph Plug (99) shows the models of its "Morphing Models" in turn: convert all of them (`mapModelFor`),
+                // drawn like the disc's morph frames (display list) and with one collision shape each (`singleShapeBounds`).
+                if (u.cls.rflClass === 99)
+                    for (const r of morphModelRefs(u.cls)) {
+                        const id = await builder.addModelRef(ow, r >>> 16, r & 0xffff, true);
+                        if (id !== null) builder.singleShapeBounds(id);
+                    }
             }
         });
     }
@@ -645,6 +652,20 @@ export async function convertOotfLevels(
                     const destination = stem !== hostStem && db === 0 ? crossBuilders.get(stem) : builder;
                     return dbgEnv0['OOTF_NO_BOUNDS'] ? destination?.skeletonBounds(id) : destination?.modelBounds(id);
                 },
+                mapModelFor: hostOk
+                    ? (cls, file) => {
+                          const ow = ownerOf.get(cls);
+                          const fStem = file.replace(/\.ODB$/i, '');
+                          // Only the host's own models can be named from here (cross-ODB models live in that ODB's MOD).
+                          if (!ow || cls.rflClass !== 99 || fStem !== hostStem) return undefined;
+                          const db = hostDbForStem(fStem);
+                          if (db === null) return undefined;
+                          return (ref) => {
+                              const id = builder.mapModelRef(ref >>> 16, ref & 0xffff, ow);
+                              return id === null ? null : ((db << 16) | id) >>> 0;
+                          };
+                      }
+                    : undefined,
                 mapAnimFor: (cls) => {
                     const ow = ownerOf.get(cls);
                     return ow && cls.model
@@ -1951,4 +1972,16 @@ async function loadRrcStrings(
     } catch {
         return { path, others, strings: new Map() };
     }
+}
+
+/** Model refs (`db << 16 | id`) named by the model-typed fields of a PC class (a Morph Plug's "Morphing Models"). */
+export function morphModelRefs(cls: OdbClass): number[] {
+    const out: number[] = [];
+    (cls.fields ?? []).forEach((f, i) => {
+        const dword = cls.data?.[i];
+        if (fieldBase(f.type) !== FIELD_MODEL || dword === undefined) return;
+        const refs = fieldIsIndirect(f.type) ? (decodeFieldValue(f.type, dword, cls.data ?? []) as number[]) : [dword];
+        for (const r of refs) if (r && !out.includes(r)) out.push(r);
+    });
+    return out;
 }

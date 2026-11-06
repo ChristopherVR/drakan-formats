@@ -469,6 +469,52 @@ describe('containers and the asset builder', () => {
         expect(b.report.textures.converted).toBe(1);
     });
 
+    it('gives a Morph Plug frame one collision shape that lists every polygon, keeping pad vertices out of the box', async () => {
+        // A PC hierarchy of a root and a leaf box (Volcanic's IceCover01 has nine boxes, its other frames one): the plug copies
+        // each frame's shapes into its own instance, so every frame gets the disc's layout of one shape.
+        const pcBounds = new Uint8Array(68 + 2 * 4 + 50 + 52);
+        const dv = new DataView(pcBounds.buffer);
+        dv.setUint16(64, 2, true);
+        dv.setUint16(66, 1, true);
+        dv.setUint16(68, 1, true); // shape 0: first child 1
+        dv.setUint16(76 + 50 + 48, 1, true); // shape 1, a leaf: polygon 0
+        const local: PcFileSource = {
+            ...src,
+            read: async (p) =>
+                p.toLowerCase() === 'lvl/lvl.mod'
+                    ? model(
+                          5,
+                          [
+                              [3, 0],
+                              [8, 1],
+                          ],
+                          false,
+                          5,
+                          pcBounds,
+                      )
+                    : src.read(p),
+        };
+        const b = new OotfAssetBuilder(local);
+        expect(await b.addModelRef('Lvl/Lvl', 0, 5, true)).toBe(2);
+        const kept = await (
+            await SrscReader.fromBytes(b.build('out', 'test').files['out/TEST.MOD']!)
+        ).readRaw((await SrscReader.fromBytes(b.build('out', 'test').files['out/TEST.MOD']!)).find(0x207, 2)!);
+        expect(new DataView(kept.buffer, kept.byteOffset).getUint16(72, true)).toBe(2); // the authored hierarchy
+        expect(b.singleShapeBounds(2)).toBe(true);
+        expect(b.singleShapeBounds(99)).toBe(false);
+        const mod = await SrscReader.fromBytes(b.build('out', 'test').files['out/TEST.MOD']!);
+        const m = (await parseModel(mod, 2))!;
+        const raw = await mod.readRaw(mod.find(0x207, 2)!);
+        const bv = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+        const polygons = m.indices.length / 3;
+        expect([bv.getUint16(72, true), bv.getUint16(74, true)]).toEqual([1, 1]);
+        expect(bv.getUint16(128, true)).toBe(polygons);
+        expect(raw.length).toBe(130 + polygons * 2);
+        // the triangle spans (5,5,5)..(6,5,6); the display list's pad vertex at the origin is not in the box
+        expect([80, 84, 88, 92, 112, 124].map((i) => bv.getFloat32(i, true))).toEqual([5, 5, 5, 1, 0, 1]);
+        expect(m.positions.slice(-3)).toEqual(new Float32Array([0, 0, 0]));
+    });
+
     it.each([
         [false, true, false],
         [true, false, false],

@@ -453,6 +453,28 @@ export class OotfAssetBuilder {
         return true;
     }
 
+    /**
+     * Give a converted model one box over its polygons that lists all of them (a Morph Plug frame). Each morph step copies the
+     * next frame's collision shapes and polygon lists into the plug's own model instance, sized for the shapes it already has, so
+     * every frame of a plug needs the same layout: the disc's morph frames have one shape each. The PC's frames differ (Volcanic's
+     * "IceCover01" has nine boxes, "IceCover02" to "04" one), and the plug corrupted the guest heap on its first step (journal
+     * 2026-11-06/ootf-volcanic-route.md). Polygon counts and order stay as converted; frames of one plug share their topology.
+     */
+    singleShapeBounds(id: number): boolean {
+        const m = this.models.find((x) => x.id === id);
+        if (!m || m.records?.some((r) => r.type === MOD_CHARACTER)) return false;
+        // Display-list pad vertices are not referenced by any polygon; keep them out of the box.
+        const used = new Set(m.model.polygons.flatMap((p) => p.indices));
+        const positions = Float32Array.from(
+            [...used].flatMap((v) => [0, 1, 2].map((k) => m.model.positions[v * 3 + k]!)),
+        );
+        const bounds = synthesizeBounds(positions, m.model.polygons.length);
+        m.model = { ...m.model, bounds };
+        if (m.records)
+            m.records = m.records.map((r) => (r.type === MOD_BOUNDS ? { type: MOD_BOUNDS, data: bounds } : r));
+        return true;
+    }
+
     /** Guard rigid weapon draw upgrades with a nonempty authored sphere hierarchy; never approximate it with boxes. */
     requireRigidWeaponDisplayList(id: number): boolean {
         const existing = this.models.find((m) => m.id === id);
