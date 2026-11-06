@@ -207,6 +207,18 @@ export function allocateId(used: Set<number>, lo = 1): number {
 }
 const reserve = (used: Set<number>, id: number): number => (used.add(id), id);
 
+/**
+ * SSD that receives the converted sequences a class of the database `stem` names: its own when the disc has one, else the
+ * SSD of the Stomp Player database `playerStem` (a player there runs them for the class, relayDetectorSequences), else null.
+ */
+export function sequenceSsdStem(
+    stem: string,
+    ssdStems: ReadonlySet<string> | ReadonlyMap<string, unknown>,
+    playerStem: string | null,
+): string | null {
+    return ssdStems.has(stem) ? stem : playerStem !== null && ssdStems.has(playerStem) ? playerStem : null;
+}
+
 /** Ids of every entry of a PS2 SSD (record ids are unique across entry types: sequences and groups share the space). */
 export function usedIdsOf(ssd: SrscReader): Set<number> {
     return new Set(ssd.entries.map((e) => e.id));

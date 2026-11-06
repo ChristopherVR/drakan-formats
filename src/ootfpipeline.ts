@@ -43,7 +43,7 @@ import {
     writePs2Sdb,
     type PcSoundBank,
 } from './ootfsound.ts';
-import { convertPcSequences, sequenceSoundRefs, ssdPackFiles, usedIdsOf } from './ootfseq.ts';
+import { convertPcSequences, sequenceSoundRefs, sequenceSsdStem, ssdPackFiles, usedIdsOf } from './ootfseq.ts';
 import { SrscReader } from './srsc.ts';
 import {
     TERRAIN_TXD_PATH,
@@ -66,7 +66,7 @@ import {
     type CampaignPlan,
 } from './ootfcampaign.ts';
 import { applyMusicTriggers, findMusicTriggers, musicTriggerClassNames } from './ootfmusic.ts';
-import { applyPuzzleLogic } from './ootfpuzzle.ts';
+import { applyPuzzleLogic, relayDetectorSequences } from './ootfpuzzle.ts';
 import type { Ps2TextureOptions, TextureMode } from './ootftex.ts';
 import { TextPlan, isTextField, parseRrcStrings, rewriteClassTextDefaults, rewriteObjectTexts } from './ootftext.ts';
 import {
@@ -982,6 +982,32 @@ export async function convertOotfLevels(
         return null;
     };
     const stemOfTarget = (t: Parameters<typeof fileOfTarget>[0]): string => fileOfTarget(t).replace(/\.ODB$/i, '');
+    /** Index the `.DB` of database `from` gives database `to` (0: the same one; null: not listed). */
+    const dbIndexIn = (from: string, to: string): number | null => {
+        if (from === to) return 0;
+        const text = ps2.dbFiles?.get(from)?.text;
+        if (!text) return null;
+        for (const m of text.matchAll(/^(\d+)\s+(.+?)\s*$/gm))
+            if (odbStemForDependency(m[2]!) === to) return Number(m[1]);
+        return null;
+    };
+    // A sequence ref is read from the SSD of the class's own database. Converted detectors live in FX / SYSTEM, which have no
+    // SSD on the disc: their scenes go to the SSD of the template's Stomp Player database instead, and a player there runs
+    // them (relayDetectorSequences).
+    const hasSsd = (stem: string): boolean => !!ps2.ssds?.has(stem);
+    const sequencePlayer = ((): { t: ClassTarget; stem: string } | null => {
+        for (const [dbIndex, table] of classes) {
+            for (const [classId, cls] of table) {
+                if (cls.rflClass !== 51 || !cls.fields || !/^stomp player$/i.test(cls.name.trim())) continue;
+                const t: ClassTarget = { dbIndex, classId, cls };
+                if (hasSsd(stemOfTarget(t))) return { t, stem: stemOfTarget(t) };
+            }
+        }
+        return null;
+    })();
+    /** SSD stem that receives the sequences of a class in `stem` (null: none can). */
+    const sequenceStem = (stem: string): string | null =>
+        sequenceSsdStem(stem, ps2.ssds ?? new Map(), sequencePlayer?.stem ?? null);
     // ---- sounds: the sounds that object parameters name, in one new SDB of the shared container
     let soundLookup: ((ownerPath: string, ref: number) => number | null) | null = null;
     if (opt.sounds === true) {
@@ -1079,7 +1105,11 @@ export async function convertOotfLevels(
         if (!ow) return null;
         try {
             // Sequences live in the SSD of the owner's stem (db 0), whatever the ODB.
-            if (kind === 'sequence') return seqIds.get(`${ctx.pc.path}|${ow}|${ref}`) ?? null;
+            // A class in a database without an SSD cannot name one: relayDetectorSequences gives it a Stomp Player instead.
+            if (kind === 'sequence')
+                return ctx.target && !hasSsd(stemOfTarget(ctx.target))
+                    ? null
+                    : (seqIds.get(`${ctx.pc.path}|${ow}|${ref}`) ?? null);
             if (kind === 'sound') {
                 const db = soundLookup ? hostDbOf(stemOfTarget(ctx.target)) : null;
                 const id = db === null ? null : soundLookup!(ow, ref);
@@ -1164,13 +1194,15 @@ export async function convertOotfLevels(
                 const groups = new Map<string, { stem: string; ow: string; db: number; ids: Set<number> }>();
                 for (const n of needs) {
                     if (!n.target) continue;
-                    const stem = fileOfTarget(n.target).replace(/\.ODB$/, '');
+                    const own = fileOfTarget(n.target).replace(/\.ODB$/, '');
+                    const stem = sequenceStem(own) ?? own;
                     const k = `${stem}|${n.owner}|${n.ref >>> 16}`;
                     (
                         groups.get(k) ?? groups.set(k, { stem, ow: n.owner, db: n.ref >>> 16, ids: new Set() }).get(k)!
                     ).ids.add(n.ref & 0xffff);
                 }
                 let any = false;
+                let converted = 0;
                 for (const g of groups.values()) {
                     const ssd = ps2.ssds?.get(g.stem);
                     const c = builder.resolveContainer(g.ow, g.db);
@@ -1239,7 +1271,10 @@ export async function convertOotfLevels(
                         res.warnings.push(`sequences ${pc.path} (${c}): ${warning}`);
                     for (const [k, v] of conv.idMap) seqIds.set(`${pc.path}|${g.ow}|${k}`, v);
                     any = any || conv.idMap.size > 0;
+                    converted += conv.idMap.size;
                 }
+                const referenced = [...groups.values()].reduce((n, g) => n + g.ids.size, 0);
+                console.warn(`sequences ${title}: ${referenced} referenced, ${converted} converted`);
                 return any ? convertOnce() : first;
             });
             parts = again ?? first;
@@ -1288,12 +1323,51 @@ export async function convertOotfLevels(
                         const s = plan?.synthesized.find((x) => x.dbIndex === o.dbIndex && x.classId === o.classId);
                         if (s) res.warnings.push(...setSynthesizedDefaults(s, values));
                     },
+                    classRef: (pcDb, pcClassId, holder) => {
+                        const t = resolverFor(pc)?.(pcDb, pcClassId);
+                        if (!t) return null;
+                        // An object's class-ref parameter is read in the frame of its own class's database (the disc's
+                        // carry-gated detectors name Resources with the index their database's .DB gives it).
+                        const db = dbIndexIn(stemOfTarget({ dbIndex: holder.dbIndex } as ClassTarget), stemOfTarget(t));
+                        return db === null ? null : ((db << 16) | t.classId) >>> 0;
+                    },
                     warnings: res.warnings,
                 });
-                if (rep.plates || rep.bossHeads || rep.markers || rep.messengers)
+                if (rep.plates || rep.bossHeads || rep.markers || rep.messengers || rep.questLocks)
                     console.warn(
-                        `puzzles ${title}: ${rep.plates} plates -> ${rep.detectors} detectors, ${rep.bossHeads} boss heads (${rep.deathCounters} counters), ${rep.messengers} messengers, ${rep.markers} markers (${rep.markersSkipped} skipped), ${rep.quieted} cloud ring links removed`,
+                        `puzzles ${title}: ${rep.plates} plates -> ${rep.detectors} detectors, ${rep.bossHeads} boss heads (${rep.deathCounters} counters), ${rep.messengers} messengers, ${rep.markers} markers (${rep.markersSkipped} skipped), ${rep.quieted} cloud ring links removed, ${rep.questLocks} quest item locks`,
                     );
+            });
+        }
+        if (sequencePlayer && opt.sequences !== false) {
+            await stage(`sequence players ${pc.path}`, async () => {
+                const resolve = resolverFor(pc);
+                const n = relayDetectorSequences({
+                    pc,
+                    list: lvl.objects,
+                    title,
+                    classOf: (o) =>
+                        classes.get(o.dbIndex)?.get(o.classId) ??
+                        plan?.synthesized.find((x) => x.dbIndex === o.dbIndex && x.classId === o.classId)?.cls,
+                    player: { dbIndex: sequencePlayer.t.dbIndex, classId: sequencePlayer.t.classId },
+                    relayed: (o) => {
+                        const t = resolve?.(o.dbIndex, o.classId);
+                        const ow = owner(pc, o.dbIndex);
+                        if (!t || !ow || hasSsd(stemOfTarget(t))) return [];
+                        const refs: number[] = [];
+                        for (const sp of objectParamSpecs(o)) {
+                            if (resourceKind(sp.type) !== 'sequence') continue;
+                            for (const v of Array.isArray(sp.value) ? sp.value : [sp.value]) {
+                                const m =
+                                    typeof v === 'number' && v ? seqIds.get(`${pc.path}|${ow}|${v >>> 0}`) : undefined;
+                                if (m !== undefined) refs.push(m);
+                            }
+                        }
+                        return refs;
+                    },
+                    warnings: res.warnings,
+                });
+                if (n) console.warn(`sequences ${title}: ${n} detector scene(s) given a Stomp Player`);
             });
         }
         const cl = plan0?.byPath.get(normalizeLevelRef(pc.path));

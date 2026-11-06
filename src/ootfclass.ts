@@ -185,17 +185,20 @@ export const PS2_SUBSTITUTES: ReadonlyMap<number, number> = new Map([
     // Dr. Evil (the four heads of the Rift World boss): the Giant is the largest humanoid creature; the clone keeps the PS2 model
     // and gets the PC class's stats by field name (Initial Health 250 ...). `BOSS_STANDINS` scales and places the objects.
     [92, 59],
+    // Quest Item (the Bell Hammer): on the PS2 only a Key (33) is matched against a lock's code (the Use handler and a
+    // detector's "Trigger Only If Carrying Item..." look for that class); the PS2 117 class (an egg) has no lock behaviour.
+    [117, 33],
 ]);
 
-/** PC engine ids whose PS2 class is cloned even though the PS2 has another class under the same number (144 = shields on PS2, 92 = a creature without the Dr. Evil fields). */
-export const FORCED_SUBSTITUTES: ReadonlySet<number> = new Set([144, 92]);
+/** PC engine ids whose PS2 class is cloned even though the PS2 has another class under the same number (144 = shields on PS2, 92 = a creature without the Dr. Evil fields, 117 = an egg without a lock). */
+export const FORCED_SUBSTITUTES: ReadonlySet<number> = new Set([144, 92, 117]);
 
 /**
  * Substituted PC engine ids whose clone gets the converted PC model instead of the template's: the Pirate Ship (a spline
- * vehicle on the PC) becomes a static Ground Object showing the ship, and a Pressure Plate (29, no PS2 class reachable) a static
- * plate that cannot be pressed.
+ * vehicle on the PC) becomes a static Ground Object showing the ship, a Pressure Plate (29, no PS2 class reachable) a static
+ * plate that cannot be pressed, and the Bell Hammer (117) a Key that shows the hammer.
  */
-export const MODEL_STANDINS: ReadonlySet<number> = new Set([130, 88, 100, 101, 29]);
+export const MODEL_STANDINS: ReadonlySet<number> = new Set([130, 88, 100, 101, 29, 117]);
 
 /** The IEEE-754 single bit pattern of a value (PS2 float fields are stored as raw dwords). */
 function floatBits(v: number): number {

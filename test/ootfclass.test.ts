@@ -495,6 +495,36 @@ describe('ootfclass', () => {
         expect(PS2_SUBSTITUTES.get(92)).toBe(59);
     });
 
+    it('turns the Bell Hammer (Quest Item 117) into a Key with its lock code although the PS2 has a class 117', () => {
+        const keyFields: [number, string][] = [
+            [T_INT, 'Quantity'],
+            [T_INT, 'Lock Code'],
+        ];
+        const o = odb();
+        const key = cls(40, 'Hermit Key.', 33, keyFields, [1, 0]);
+        const egg = cls(41, 'Blade Dragon Egg', 117, [...keyFields, [T_FLOAT, 'Activation Radius (lu)']], [1, 0, f32(2)]);
+        o.classes.set(40, key);
+        o.classes.set(41, egg);
+        const raw = o.raw;
+        const recs = new Map([
+            [40, buildPlainClassRecord({ name: key.name, group: 5, rfl: 33, icon: 1, fieldCount: 2, data: key.data! })],
+            [41, buildPlainClassRecord({ name: egg.name, group: 5, rfl: 117, icon: 1, fieldCount: 3, data: egg.data! })],
+        ]);
+        o.raw = (id) => recs.get(id) ?? raw?.(id);
+        const hammerFields: [number, string][] = [
+            [T_INT, 'Quantity'],
+            [T_FLOAT, 'Activation Radius (lu)'],
+            [T_INT, 'Lock Code'],
+        ];
+        const pc = [{ db: 5, id: 3172, cls: cls(3172, 'Bell Hammer of Alwarren', 117, hammerFields, [1, f32(0.76), 20]) }];
+        const plan = planClassMapping(pc, [o], { substituteEngineId: PS2_SUBSTITUTES });
+        expect(plan.unsupported.size).toBe(0);
+        const s = plan.synthesized[0]!;
+        expect(s.template.name).toBe('Hermit Key.');
+        expect(s.cls.rflClass).toBe(33);
+        expect(s.cls.data).toEqual([1, 20]);
+    });
+
     it('maps an aliased PC creature name to the differently named PS2 class', () => {
         expect(aliasSquash('Troll Leather')).toBe('leatherwartockcenter');
         expect(aliasSquash('Timer')).toBe('timer');

@@ -7,10 +7,21 @@
 //   Dr. Evil (92)                    four Giants on the altar floor, scaled, waiting for the level's trigger; the death counter
 //                                    they are linked to counts the PS2 death message.
 //   Map Object / Map Trigger (104)   a PS2 map marker with the PC object's name as journal entry and map label.
+//   Key Lock (34) of a Quest Item    a Trigger Detector column under the lock, fired by Rynn carrying the item (the Bell Hammer).
+//   Play Sequence detector (61)      a Stomp Player of the template level's database runs the scene (relayDetectorSequences).
 
-import { FLAG_SCALED, FLAG_VISIBLE, addObject, type LvlObject, type LvlObjectList, type Vec3 } from './lvl.ts';
+import {
+    FLAG_SCALED,
+    FLAG_VISIBLE,
+    addObject,
+    setObjectParams,
+    type LvlObject,
+    type LvlObjectList,
+    type ParamSpec,
+    type Vec3,
+} from './lvl.ts';
 import type { PcLevel } from './pc.ts';
-import { terrainGroundBelow } from './terrain.ts';
+import { layerHeightAt, terrainGroundBelow } from './terrain.ts';
 import type { OdbClass } from './odb.ts';
 import { encodeScalar, fieldIsIndirect, type ClassFieldDef } from './fields.ts';
 import { setExitDestinationId, setPlainParam } from './ootfcampaign.ts';
@@ -40,6 +51,11 @@ export interface PuzzleEnv {
      * a quest's journal entry, map text and type from its class, not from the placed map marker.
      */
     setClassDefaults?(o: LvlObject, values: readonly [string, number][]): void;
+    /**
+     * Class-reference value of the converted class of PC class (`pcDb`, `pcClassId`) as an object parameter of a `holder`
+     * class: `(db << 16) | id`, db in the frame of the holder class's own database (0 = that database), null when unreachable.
+     */
+    classRef?(pcDb: number, pcClassId: number, holder: PuzzleClassRef): number | null;
     warnings: string[];
 }
 
@@ -53,6 +69,8 @@ export interface PuzzleReport {
     markersSkipped: number;
     /** Links to rift cloud rings that were removed (see `quietCloudRings`). */
     quieted: number;
+    /** Key locks opened by a quest item that became a gated detector (see `questItemLocks`). */
+    questLocks: number;
 }
 
 const norm = (s: string): string => s.trim().toLowerCase();
@@ -296,7 +314,141 @@ function testWake(env: PuzzleEnv): void {
     setNamedParam(env.list, object, f, 'Trigger Message', 1);
 }
 
-/** Apply every converter step of this module to one converted level. */
+const CELL = 2048;
+
+/**
+ * Key locks (PC engine 34) of a Quest Item (117, the Bell Hammer). On the PC the item is used from the inventory and finds the
+ * lock by its Activation Radius; the Islands bell lock hangs about 23,000 units above the bell tower floor, out of reach. The
+ * PS2 Use handler only opens a lock the player stands at (it compares the code of a Key, 0x10021, in the inventory), so the lock
+ * becomes a Trigger Detector column from the lowest floor under it to its top, centred on it and at least two cells wide, that
+ * fires once when Rynn on foot enters it carrying the item (the item converts to a Key class). It sends the lock's "Trigger
+ * To Send" to the lock's links, which move from the lock to it; objects that link to the lock reach it too.
+ */
+function questItemLocks(env: PuzzleEnv, rep: PuzzleReport): void {
+    const { pc, list } = env;
+    if (!env.detector || !env.classRef) return;
+    const items = new Map<number, { db: number; id: number }>();
+    for (const [db, table] of pc.classes) {
+        for (const [id, c] of table) {
+            if (c.rflClass !== 117) continue;
+            const i = fieldIndexByName(c.fields, 'Lock Code');
+            const code = i >= 0 ? (c.data?.[i] ?? 0) | 0 : 0;
+            if (code && !items.has(code)) items.set(code, { db, id });
+        }
+    }
+    // A Key (33) placed in the level with the same code opens its lock the native way (Succubus Lair: the Jail Key shares the
+    // Bell Hammer's code 20).
+    for (const o of pc.list.objects) if (rflOf(pc, o) === 33) items.delete(pcFieldNumber(pc, o, 'Lock Code') ?? 0);
+    if (!items.size) return;
+    for (const lock of pc.list.objects.filter((o) => rflOf(pc, o) === 34)) {
+        const item = items.get(pcFieldNumber(pc, lock, 'Lock Code') ?? 0);
+        const dst = list.objects.find((x) => x.id === lock.id);
+        if (!item || !dst) continue;
+        const ref = env.classRef(item.db, item.id, env.detector);
+        if (!ref) {
+            env.warnings.push(`${env.title}: lock ${lock.id} (${nameOf(pc, lock)}): its quest item class is not reachable from the detector class`);
+            continue;
+        }
+        const sc = lock.flags & FLAG_SCALED && lock.scale ? lock.scale : ([1, 1, 1] as Vec3);
+        const [x, y, z] = lock.pos;
+        const top = y + Math.max(sc[1], 0.5) * CELL;
+        let floor = Infinity;
+        for (const L of pc.terrain) {
+            if (L.type !== 0) continue;
+            const h = layerHeightAt(L, x, z);
+            if (!Number.isNaN(h) && h <= y && h < floor) floor = h;
+        }
+        const bottom = Number.isFinite(floor) ? floor : y - CELL;
+        const size: Vec3 = [Math.max(2, 2 * sc[0]), (top - bottom) / CELL, Math.max(2, 2 * sc[2])];
+        const d = newDetector(env, [x, (top + bottom) / 2, z], size, [
+            ['Task', DETECTOR_TASK_TRIGGER_ONLY],
+            ['Detect Which?', 0],
+            ['Initial State', 0],
+            ['Trigger Message', pcFieldNumber(pc, lock, 'Trigger To Send') ?? 1],
+            ['Detect Only Once?', 1],
+            ['Trigger Only If Carrying Item...', ref],
+        ]);
+        if (!d) continue;
+        d.links = [...dst.links];
+        dst.links = [];
+        for (const o of list.objects) if (o !== d && o.links.includes(dst.id)) o.links = [...new Set([...o.links, d.id])];
+        rep.questLocks++;
+    }
+}
+
+/** PC Trigger Detector "Task" values (the enum order of both platforms). */
+export const DETECTOR_TASK_PLAY_SEQUENCE = 4;
+export const DETECTOR_TASK_TRIGGER_ONLY = 6;
+
+export interface SequenceRelayEnv {
+    pc: PcLevel;
+    /** The converted PS2 object list (object ids = PC object ids). */
+    list: LvlObjectList;
+    title: string;
+    classOf(o: LvlObject): OdbClass | undefined;
+    /** Stomp Player class whose database has an SSD (the converted sequences live in that SSD). */
+    player: PuzzleClassRef;
+    /**
+     * Converted sequence refs (in the player's SSD frame) of a PC object whose converted class lives in a database without an
+     * SSD; [] for every other object.
+     */
+    relayed(o: LvlObject): readonly number[];
+    warnings: string[];
+}
+
+/**
+ * Detectors that play a cut scene ("Task" Play Sequence, "Sequence To Play"). A sequence ref of a class is read from the SSD
+ * of the class's own database, and the converted detector classes live in FX / SYSTEM, which have no SSD on the disc: the
+ * scene was dropped (Islands bell tower, Wartok farmer, Volcanic, ...). Each such detector keeps its box and links, becomes
+ * "Trigger Only" and gets a Stomp Player of the template's level database (whose SSD holds the converted scene) as an extra
+ * link, started by the detector's own Trigger Message. The PC detector sends that message to its links as well, so the
+ * other links behave as before. Returns the number of players added.
+ */
+export function relayDetectorSequences(env: SequenceRelayEnv): number {
+    const { pc, list } = env;
+    let added = 0;
+    for (const o of pc.list.objects) {
+        const refs = env.relayed(o);
+        if (!refs.length) continue;
+        const dst = list.objects.find((x) => x.id === o.id);
+        if (!dst) continue;
+        if (rflOf(pc, o) !== 61) {
+            env.warnings.push(`${env.title}: object ${o.id} (${nameOf(pc, o)}) names a sequence its PS2 class cannot reach; dropped`);
+            continue;
+        }
+        const fields = env.classOf(dst)?.fields;
+        const message = pcFieldNumber(pc, o, 'Trigger Message') ?? 1;
+        if ((pcFieldNumber(pc, o, 'Task') ?? DETECTOR_TASK_TRIGGER_ONLY) === DETECTOR_TASK_PLAY_SEQUENCE)
+            setNamedParam(list, dst, fields, 'Task', DETECTOR_TASK_TRIGGER_ONLY);
+        // The PS2 detector defaults differ per database (FX sends 5): write the PC message.
+        setNamedParam(list, dst, fields, 'Trigger Message', message);
+        const { object } = addObject(list, {
+            classId: env.player.classId,
+            dbIndex: env.player.dbIndex,
+            pos: dst.pos,
+            rot: [0, 0, 0],
+        });
+        object.flags = FLAG_VISIBLE;
+        object.scale = null;
+        object.links = [];
+        const pf = env.classOf(object)?.fields;
+        const specs: ParamSpec[] = [];
+        const field = (name: string, value: number | number[]): void => {
+            const i = fieldIndexByName(pf, name);
+            if (i >= 0) specs.push({ fieldIndex: i, type: pf![i]!.type, name: pf![i]!.name, value });
+            else env.warnings.push(`${env.title}: Stomp Player class has no field "${name}"`);
+        };
+        field('Sequence List', [...refs]);
+        field('List Play Order', 0);
+        field('Initial State', 0);
+        field('Message To Play Next', message);
+        setObjectParams(list, object.id, specs);
+        dst.links = [...new Set([...dst.links, object.id])];
+        added++;
+    }
+    return added;
+}
+
 /** The rift's cloud rings (Volcanic, Rift World): large spinning movers that the PC engine culls but the PS2 engine animates everywhere. */
 const CLOUD_RING = /^(cloud\s*ring|clowd\s*ring)\s*\d*$/i;
 
@@ -320,9 +472,36 @@ function quietCloudRings(env: PuzzleEnv, rep: PuzzleReport): void {
     }
 }
 
+/**
+ * Test aid (`OOTF_TEST_MOVE=<title part>|<object id>|x,y,z;...`): move converted objects of a level, so a run can reach an
+ * item without its level's puzzle (the Islands Bell Hammer 6135 floats over a hole west of the bell tower).
+ */
+function testMove(env: PuzzleEnv): void {
+    const spec = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_TEST_MOVE'] ?? '';
+    for (const part of spec.split(';')) {
+        const [title, id, at] = part.split('|');
+        const pos = (at ?? '').split(',').map(Number);
+        if (!title || !env.title.includes(title) || pos.length !== 3 || !pos.every(Number.isFinite)) continue;
+        const o = env.list.objects.find((x) => x.id === Number(id));
+        if (o) o.pos = [pos[0]!, pos[1]!, pos[2]!];
+    }
+}
+
+/** Apply every converter step of this module to one converted level. */
 export function applyPuzzleLogic(env: PuzzleEnv): PuzzleReport {
-    const rep: PuzzleReport = { plates: 0, detectors: 0, bossHeads: 0, deathCounters: 0, messengers: 0, markers: 0, markersSkipped: 0, quieted: 0 };
+    const rep: PuzzleReport = {
+        plates: 0,
+        detectors: 0,
+        bossHeads: 0,
+        deathCounters: 0,
+        messengers: 0,
+        markers: 0,
+        markersSkipped: 0,
+        quieted: 0,
+        questLocks: 0,
+    };
     platesToDetectors(env, rep);
+    questItemLocks(env, rep);
     messengers(env, rep);
     bossHeads(env, rep);
     markers(env, rep);
@@ -331,6 +510,7 @@ export function applyPuzzleLogic(env: PuzzleEnv): PuzzleReport {
     for (const o of env.pc.list.objects) if (rflOf(env.pc, o) === 92) for (const l of env.list.objects.find((x) => x.id === o.id)?.links ?? []) counters.add(l);
     testEnding(env, counters);
     testWake(env);
+    testMove(env);
     // Links to markers that were left out would dangle.
     const ids = new Set(env.list.objects.map((o) => o.id));
     for (const o of env.list.objects) if (o.links.some((l) => !ids.has(l))) o.links = o.links.filter((l) => ids.has(l));
