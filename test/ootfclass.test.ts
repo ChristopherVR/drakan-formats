@@ -596,6 +596,51 @@ describe('ootfclass', () => {
         expect([...splitClassRecord(patched).body.subarray(16, 80)]).toEqual([...bounds]);
     });
 
+    it('clones a model-less generator from a model-less generator template, even when a modelled one matches better', () => {
+        const genFields: [number, string][] = [
+            [T_FLOAT, 'Release Period (s)'],
+            [T_ENUM, 'On Trigger'],
+        ];
+        // "Bridge Generator" carries a plank model and has exactly the PC defaults; the model-less one differs in both.
+        const bridgeBody = new Uint8Array(94 + 8);
+        const bv = new DataView(bridgeBody.buffer);
+        bv.setUint16(2, 4676, true);
+        bv.setUint16(80, 63, true);
+        bv.setUint32(86, 2, true);
+        bv.setUint32(90, 2, true);
+        bv.setUint32(94, f32(1), true);
+        bv.setUint32(98, 2, true);
+        const bridge: OdbClass = {
+            ...cls(10085, 'Bridge Generator', 63, genFields, [f32(1), 2]),
+            model: { id: 4676, db: 0 },
+        };
+        const plain = cls(2000, 'Spark Gen', 63, genFields, [f32(3), 0]);
+        const fx = odb();
+        fx.classes.set(10085, bridge);
+        fx.classes.set(2000, plain);
+        const fxRaw = fx.raw!;
+        fx.raw = (id) =>
+            id === 10085
+                ? joinClassRecord('Bridge Generator', bridgeBody)
+                : id === 2000
+                  ? buildPlainClassRecord({
+                        name: 'Spark Gen',
+                        group: 5,
+                        rfl: 63,
+                        icon: 1,
+                        fieldCount: 2,
+                        data: plain.data!,
+                    })
+                  : fxRaw(id);
+        const launcher = cls(1, 'Arrow launcher', 63, genFields, [f32(1), 2]);
+        const plan = planClassMapping([{ db: 1, id: 1, cls: launcher }], [fx]);
+        expect(plan.unsupported.size).toBe(0);
+        expect(plan.synthesized).toHaveLength(1);
+        expect(plan.synthesized[0]!.template.name).toBe('Spark Gen');
+        expect(plan.synthesized[0]!.cls.model ?? null).toBeNull();
+        expect(parseClassBody(splitClassRecord(plan.synthesized[0]!.record).body)?.data).toEqual([f32(1), 2]);
+    });
+
     it('does not retarget kinds that need a model', () => {
         const pc = [{ db: 1, id: 1, cls: cls(1, 'Lever', 13, [], []) }];
         const ps2 = odb();

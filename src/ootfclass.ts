@@ -933,12 +933,13 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
             !!cls.model &&
             (!RETARGET_KINDS.has(kind) || rfl === 111) &&
             !noModel; // test aid: keep the template's own model
-        // A model-less PC class of a mechanism / scenery / fx engine class (Break Brick floor, Fire Fly Axis ...) is cloned from a
-        // model-less PS2 class of the same engine id: the clone shows nothing it should not.
+        // A model-less PC class of a mechanism / scenery / fx / generator engine class (Break Brick floor, Fire Fly Axis, Volcanic's
+        // "Arrow launcher" ...) is cloned from a model-less PS2 class of the same engine id: the clone shows nothing it should not.
+        // Volcanic's launcher cloned from "Bridge Generator" kept that model and its arrow ended on its first step (issue 5).
         const modelless =
             !substituted &&
             !cls.model &&
-            (kind === 'mechanism' || kind === 'scenery' || kind === 'fx') &&
+            (kind === 'mechanism' || kind === 'scenery' || kind === 'fx' || kind === 'spawn') &&
             cands.some((c) => !c.cls.model && !!c.odb.raw?.(c.id));
         if (
             !kind ||
