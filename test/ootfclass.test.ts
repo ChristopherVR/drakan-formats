@@ -261,6 +261,43 @@ describe('ootfclass', () => {
         expect(parseClassBody(splitClassRecord(plan.synthesized[0]!.record).body)?.data).toEqual([1, 0]);
     });
 
+    it('clones every detector from a template with the box model, never from a model-less trigger', () => {
+        const detFields: [number, string][] = [
+            [T_ENUM, 'Task'],
+            [T_ENUM, 'Detect Which?'],
+            [T_ENUM, 'Trigger Message'],
+        ];
+        // A model-less "trigger" (PS2MUSIC.ODB) whose defaults match the PC classes best, and one boxed detector (FX.ODB).
+        const music: Ps2OdbIn & { classes: Map<number, OdbClass> } = { ...odb(), dbIndex: 3, file: 'PS2MUSIC.ODB' };
+        const bare = cls(19, 'trigger', 61, detFields, [6, 2, 1]);
+        music.classes = new Map([[19, bare]]);
+        music.raw = (id) =>
+            id === 19
+                ? buildPlainClassRecord({ name: 'trigger', group: 5, rfl: 61, icon: 1, fieldCount: 3, data: bare.data! })
+                : undefined;
+        const fx = odb();
+        const boxed = { ...cls(8409, 'detector', 61, detFields, [7, 0, 0]), model: { id: 3727, db: 2 } };
+        fx.classes.set(8409, boxed);
+        const body = new Uint8Array(94 + 12);
+        const dv = new DataView(body.buffer);
+        dv.setUint16(2, 3727, true);
+        dv.setUint16(4, 2, true);
+        dv.setUint16(80, 61, true);
+        dv.setUint32(86, 3, true);
+        dv.setUint32(90, 3, true);
+        [7, 0, 0].forEach((v, i) => dv.setUint32(94 + i * 4, v, true));
+        const fxRaw = fx.raw!;
+        fx.raw = (id) => (id === 8409 ? joinClassRecord('detector', body) : fxRaw(id));
+        const pc = [
+            { db: 1, id: 1, cls: { ...cls(1, 'Creature', 61, detFields, [6, 2, 1]), model: { id: 3727, db: 1 } } },
+            { db: 1, id: 2, cls: { ...cls(2, 'Creature Detector', 61, detFields, [6, 1, 1]), model: { id: 3727, db: 1 } } },
+        ];
+        const plan = planClassMapping(pc, [music, fx]);
+        expect(plan.unsupported.size).toBe(0);
+        expect(plan.synthesized.map((s) => s.file)).toEqual(['FX.ODB', 'FX.ODB']);
+        expect(plan.synthesized.map((s) => s.cls.model)).toEqual([boxed.model, boxed.model]);
+    });
+
     it('clones a same-name restricted weapon rather than reusing or editing the native record', async () => {
         const o = odb();
         const native = cls(
