@@ -1095,6 +1095,23 @@ export async function convertOotfLevels(
     };
     const ssdUsed = new Map<string, Set<number>>();
     const ssdFiles: Record<string, Uint8Array> = {};
+    // Class refs in object parameters (an item a detector asks for, a creature's weapon or drops) number `db` in the .db of
+    // the object's class ODB on both games, like class defaults; the level's dependency numbers only match by chance (Volcanic
+    // Detector 1994's Rune Cage Key: PC db 2 is Resources in Volcano.db but the level itself in the LVL header).
+    const mapObjectClassRef = (ref: number, ctx: ResourceContext): number | null => {
+        const ow = owner(ctx.pc, ctx.ownerDb);
+        const container = ow ? builder.resolveContainer(ow, ref >>> 16) : null;
+        const cls = container ? ownedClasses.get(ownedClassKey(container, ref & 0xffff)) : undefined;
+        const k = cls ? planKey.get(sig(cls)) : undefined;
+        const target = k && plan ? plan.resolve(k.db, k.id) : null;
+        if (!target) return null;
+        const from = stemOfTarget(ctx.target);
+        const to = stemOfTarget(target);
+        if (from === to) return target.classId;
+        for (const m of ps2.dbFiles?.get(from)?.text.matchAll(/^(\d+)\s+(.+?)\s*$/gm) ?? [])
+            if (odbStemForDependency(m[2]!) === to) return ((Number(m[1]) << 16) | target.classId) >>> 0;
+        return null;
+    };
 
     const procDb = findTerrainDbIndex(tplHeader);
     const terrBuilder =
@@ -1104,6 +1121,10 @@ export async function convertOotfLevels(
 
     // ---- levels
     for (const pc of pcs) {
+        for (const db of pc.odbPaths.keys()) {
+            const ow = owner(pc, db);
+            if (ow) await builder.registerOwner(ow);
+        }
         const procMap = terrBuilder ? await stage(`terrain textures ${pc.path}`, () => terrBuilder.addLevel(pc)) : null;
         const tex =
             !terrBuilder && opt.textures !== false && !opt.terrainInCommon && ps2.splatTxd && splatDb !== undefined
@@ -1131,6 +1152,7 @@ export async function convertOotfLevels(
                         ? tex.mapTexture
                         : undefined,
                 mapResource,
+                mapClassRef: opt.classes !== false ? mapObjectClassRef : undefined,
                 name: title,
             });
         let parts = await stage(`convert ${pc.path}`, async () => convertOnce());

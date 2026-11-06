@@ -120,6 +120,13 @@ export interface ConvertOptions {
      */
     mapResource?: (kind: ResourceKind, pcRef: number, ctx: ResourceContext) => number | null;
     /**
+     * PC class reference of an object parameter (`(db << 16) | id`, e.g. a detector's "Trigger Only If Carrying Item...")
+     * -> PS2 reference word, or null to zero it. Both games number `db` like class defaults: in the dependency list (.db) of
+     * the object's class ODB (`ctx.ownerDb` on the PC side, `ctx.target` on the PS2 side), 0 being that ODB itself. Without
+     * this hook the reference is read and written in the level's dependency numbering, which only matches by chance.
+     */
+    mapClassRef?: (pcRef: number, ctx: ResourceContext) => number | null;
+    /**
      * Most distinct textures one layer may use (default 0 = unlimited; env DRAKAN_TERRAIN_LAYERTEX). The engine limit is
      * per chunk (10 refs, see `MAX_CHUNK_TEXTURES`): the blob builder cuts crowded chunks, so a layer may use any number.
      * With a limit, cells of the surplus textures take the texture of the nearest cell of a kept one.
@@ -350,7 +357,10 @@ export function convertPcLevel(pc: PcLevel, opt: ConvertOptions): Ps2LevelParts 
             }
             let value = s.value;
             if (fieldBase(f.type) === FIELD_CLASS) {
-                value = Array.isArray(value) ? value.map(mapClassRef) : mapClassRef(value as number);
+                const hook = opt.mapClassRef;
+                const ctx: ResourceContext = { pc, ownerDb: src.dbIndex, classId: src.classId, field: f.name, target: t };
+                const one = hook ? (v: number): number => (v ? (hook(v, ctx) ?? 0) : 0) : mapClassRef;
+                value = Array.isArray(value) ? value.map(one) : one(value as number);
             } else if (isResourceField(f.type)) {
                 const kind = resourceKind(f.type)!;
                 const ctx: ResourceContext = { pc, ownerDb: src.dbIndex, classId: src.classId, field: f.name, target: t };
