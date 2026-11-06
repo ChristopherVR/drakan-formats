@@ -263,6 +263,143 @@ export function quantizeRgba(colors: Map<number, number>, n: number): { palette:
     return { palette, map };
 }
 
+/** Alpha weight of the palette refinement's distance (alpha errors show as holes or halos, colour errors much less). */
+const ALPHA_WEIGHT = 4;
+
+/**
+ * 256-colour palette for an image: median cut (`quantizeRgba`), then a few k-means rounds that move every entry to the
+ * mean of the colours nearest to it and map each colour to its nearest entry (median cut alone maps by box, which
+ * leaves visible steps on smooth gradients: 3 dB PSNR less in the median over the converted RGBA textures). Fully
+ * transparent pixels (key 0) keep an entry of their own with alpha 0, so cut-out edges never gain or lose coverage.
+ */
+export function quantizeRefined(
+    colors: Map<number, number>,
+    n = 256,
+    rounds = 4,
+): { palette: number[]; map: Map<number, number> } {
+    const hole = colors.has(0);
+    const solid = new Map(colors);
+    solid.delete(0);
+    const slots = Math.max(1, n - (hole ? 1 : 0));
+    const keys = [...solid.keys()];
+    const out = new Map<number, number>();
+    if (keys.length <= slots) {
+        const palette: number[] = [];
+        keys.forEach((k, i) => {
+            palette.push(k & 255, (k >>> 8) & 255, (k >>> 16) & 255, k >>> 24);
+            out.set(k, i);
+        });
+        if (hole) {
+            out.set(0, palette.length / 4);
+            palette.push(0, 0, 0, 0);
+        }
+        return { palette, map: out };
+    }
+    const pal = Float64Array.from(quantizeRgba(solid, slots).palette);
+    const m = pal.length / 4;
+    const assign = new Uint16Array(keys.length);
+    const sum = new Float64Array(m * 5);
+    for (let round = 0; round <= rounds; round++) {
+        sum.fill(0);
+        for (let ki = 0; ki < keys.length; ki++) {
+            const k = keys[ki]!;
+            const r = k & 255;
+            const g = (k >>> 8) & 255;
+            const b = (k >>> 16) & 255;
+            const a = k >>> 24;
+            let best = 0;
+            let bd = Infinity;
+            for (let p = 0; p < m; p++) {
+                const dr = r - pal[p * 4]!;
+                const dg = g - pal[p * 4 + 1]!;
+                const db = b - pal[p * 4 + 2]!;
+                const da = a - pal[p * 4 + 3]!;
+                const d = dr * dr + dg * dg + db * db + ALPHA_WEIGHT * da * da;
+                if (d < bd) {
+                    bd = d;
+                    best = p;
+                }
+            }
+            assign[ki] = best;
+            const c = solid.get(k)!;
+            sum[best * 5]! += r * c;
+            sum[best * 5 + 1]! += g * c;
+            sum[best * 5 + 2]! += b * c;
+            sum[best * 5 + 3]! += a * c;
+            sum[best * 5 + 4]! += c;
+        }
+        if (round === rounds) break;
+        for (let p = 0; p < m; p++)
+            if (sum[p * 5 + 4]! > 0) for (let q = 0; q < 4; q++) pal[p * 4 + q] = sum[p * 5 + q]! / sum[p * 5 + 4]!;
+    }
+    const palette = Array.from(pal, (v) => Math.round(v));
+    keys.forEach((k, ki) => out.set(k, assign[ki]!));
+    if (hole) {
+        out.set(0, m);
+        palette.push(0, 0, 0, 0);
+    }
+    return { palette, map: out };
+}
+
+/** How far an indexed version is from the source: colour PSNR (dB, weighted by coverage) and the largest alpha error. */
+export function quantizeError(
+    img: RgbaImage,
+    palette: readonly number[],
+    indexOf: (i: number) => number,
+): { psnr: number; maxAlphaError: number } {
+    let se = 0;
+    let weight = 0;
+    let maxAlphaError = 0;
+    for (let i = 0; i < img.width * img.height; i++) {
+        const a = img.rgba[i * 4 + 3]!;
+        const p = indexOf(i) * 4;
+        maxAlphaError = Math.max(maxAlphaError, Math.abs(a - palette[p + 3]!));
+        if (a === 0) continue;
+        const w = a / 255;
+        for (let c = 0; c < 3; c++) {
+            const d = img.rgba[i * 4 + c]! - palette[p + c]!;
+            se += d * d * w;
+        }
+        weight += 3 * w;
+    }
+    const mse = weight > 0 ? se / weight : 0;
+    return { psnr: mse === 0 ? Infinity : 10 * Math.log10((255 * 255) / mse), maxAlphaError };
+}
+
+/** Mean colour of the visible pixels next to a fully transparent one (4-neighbourhood, wrapping); black when none. */
+export function holeEdgeColor(img: RgbaImage): [number, number, number] {
+    const { width: w, height: h, rgba } = img;
+    const sum = [0, 0, 0];
+    let n = 0;
+    for (let y = 0; y < h; y++)
+        for (let x = 0; x < w; x++) {
+            const i = (y * w + x) * 4;
+            if (rgba[i + 3] === 0) continue;
+            const near = [
+                ((y * w + ((x + 1) % w)) * 4) | 0,
+                ((y * w + ((x + w - 1) % w)) * 4) | 0,
+                ((((y + 1) % h) * w + x) * 4) | 0,
+                ((((y + h - 1) % h) * w + x) * 4) | 0,
+            ];
+            if (!near.some((j) => rgba[j + 3] === 0)) continue;
+            for (let c = 0; c < 3; c++) sum[c]! += rgba[i + c]!;
+            n++;
+        }
+    return n ? [Math.round(sum[0]! / n), Math.round(sum[1]! / n), Math.round(sum[2]! / n)] : [0, 0, 0];
+}
+
+/**
+ * `truecolor` mode: textures of at least this many pixels (128 x 128) with more than 256 colours are written 8 bpp when the
+ * refined palette keeps them within `DEFAULT_INDEXED_MIN_PSNR` and `DEFAULT_INDEXED_MAX_ALPHA_ERROR`. A 256 x 256 RGBA
+ * texture takes 256 KiB of the guest's texture cache, its 8 bpp version 65 KiB: Ruined Village's opening scene waited on
+ * a full cache (journal 2026-11-06/issue-5-village-scene-timing.md). Smaller textures cost little and stay exact.
+ */
+export const DEFAULT_INDEXED_FROM_PIXELS = 128 * 128;
+/** Colour PSNR an 8 bpp version must reach (dB); journal 2026-11-06/issue-5-indexed-textures.md. */
+export const DEFAULT_INDEXED_MIN_PSNR = 38;
+/** Largest alpha change (of 255) an 8 bpp version may make to any pixel. */
+export const DEFAULT_INDEXED_MAX_ALPHA_ERROR = 8;
+
 // -------------------------------------------------------------------------------------------- PS2 TXD writer
 
 export type TextureMode = 'auto' | 'indexed' | 'truecolor';
@@ -281,6 +418,15 @@ export interface Ps2TextureOptions {
      * 2026-11-01/ootf-book-slow-load.md). Terrain passes Infinity: its 256 px 32 bpp textures load in time and carry the visible detail.
      */
     maxTruecolorPixels?: number;
+    /**
+     * `truecolor` only: textures of at least this many pixels with more than 256 colours are tried as 8 bpp and kept so
+     * when they pass `indexedMinPsnr` and `indexedMaxAlphaError` (default `DEFAULT_INDEXED_FROM_PIXELS`; Infinity = never).
+     */
+    indexedFromPixels?: number;
+    /** Colour PSNR (dB) an 8 bpp version must reach to replace a 32 bpp texture (default `DEFAULT_INDEXED_MIN_PSNR`). */
+    indexedMinPsnr?: number;
+    /** Largest alpha error (of 255) an 8 bpp version may have (default `DEFAULT_INDEXED_MAX_ALPHA_ERROR`). */
+    indexedMaxAlphaError?: number;
     /** Largest edge written (default 256, the largest size on the disc). */
     maxSize?: number;
     /**
@@ -399,7 +545,25 @@ export function encodePs2Texture(src: RgbaImage, opt: Ps2TextureOptions = {}): P
     // An enlarged texture stays truecolor too (it was 8 bpp while the guest's mip loop made 32 bpp uploads 10x slower).
     const mode = opt.mode ?? 'truecolor';
     const tooBig = mode === 'truecolor' && px > (opt.maxTruecolorPixels ?? DEFAULT_MAX_TRUECOLOR_PIXELS);
-    const indexed = colors.size <= 256 || mode === 'indexed' || tooBig || (translucent > 0 && mode !== 'truecolor');
+    const pixelKey = (i: number): number => (img.rgba[i * 4 + 3] === 0 ? 0 : keyOf(i));
+    // Large truecolor textures go 8 bpp when the refined palette is close enough (`indexedFromPixels`).
+    let refined: { palette: number[]; map: Map<number, number> } | null = null;
+    if (
+        mode === 'truecolor' &&
+        !tooBig &&
+        colors.size > 256 &&
+        px >= (opt.indexedFromPixels ?? DEFAULT_INDEXED_FROM_PIXELS)
+    ) {
+        const q = quantizeRefined(colors, 256);
+        const e = quantizeError(img, q.palette, (i) => q.map.get(pixelKey(i))!);
+        if (
+            e.psnr >= (opt.indexedMinPsnr ?? DEFAULT_INDEXED_MIN_PSNR) &&
+            e.maxAlphaError <= (opt.indexedMaxAlphaError ?? DEFAULT_INDEXED_MAX_ALPHA_ERROR)
+        )
+            refined = q;
+    }
+    const indexed =
+        colors.size <= 256 || mode === 'indexed' || tooBig || !!refined || (translucent > 0 && mode !== 'truecolor');
     if (indexed) {
         let lossy = false;
         let palette: number[];
@@ -408,12 +572,19 @@ export function encodePs2Texture(src: RgbaImage, opt: Ps2TextureOptions = {}): P
             const order = [...colors.keys()];
             const idx = new Map(order.map((k, i) => [k, i] as const));
             palette = order.flatMap((k) => [k & 255, (k >>> 8) & 255, (k >>> 16) & 255, k >>> 24]);
-            lookup = (i) => idx.get(img.rgba[i * 4 + 3] === 0 ? 0 : keyOf(i))!;
+            lookup = (i) => idx.get(pixelKey(i))!;
         } else {
             lossy = true;
-            const q = quantizeRgba(colors, 256);
+            const q = refined ?? quantizeRefined(colors, 256);
             palette = q.palette;
-            lookup = (i) => q.map.get(img.rgba[i * 4 + 3] === 0 ? 0 : keyOf(i))!;
+            lookup = (i) => q.map.get(pixelKey(i))!;
+            // The transparent entry takes the mean colour along the holes' edges, so filtering at a cut-out edge
+            // blends toward the edge's own colour instead of black.
+            const hole = q.map.get(0);
+            if (hole !== undefined) {
+                const edge = holeEdgeColor(img);
+                for (let c = 0; c < 3; c++) palette[hole * 4 + c] = edge[c]!;
+            }
         }
         const body = new Uint8Array(0x40 + 16 + 1024 + px);
         body.set(header(w, h, 8, translucent > 0 ? 8 : 0, hasAlpha, fps, opt.slot), 0);

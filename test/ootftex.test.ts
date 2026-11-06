@@ -210,6 +210,57 @@ describe('PS2 texture encode', () => {
         expect(encodePs2Texture(small, { mode: 'truecolor', minSize: 128 })).toMatchObject({ width: 128, bpp: 32 });
     });
 
+    it('writes a large truecolor texture 8 bpp only when the palette keeps it close (issue 5 cache budget)', () => {
+        // Gentle shading with ~1,500 colours: the refined palette is visually exact.
+        const shade = (x: number, y: number): number[] => [90 + (x >> 2), 70 + (y >> 2), 50 + ((x + y) >> 5), 255];
+        for (const size of [128, 256]) {
+            const src = img(size, size, shade);
+            const t = encodePs2Texture(src, { mode: 'truecolor' });
+            expect(t).toMatchObject({ width: size, height: size, bpp: 8, lossy: true, hasAlpha: false });
+            const d = decodeTxd(t.body, { upright: false });
+            let worst = 0;
+            for (let i = 0; i < size * size * 4; i++)
+                if (i % 4 !== 3) worst = Math.max(worst, Math.abs(d.rgba[i]! - src.rgba[i]!));
+            expect(worst).toBeLessThanOrEqual(4);
+            expect(t.body.length).toBe(0x40 + 16 + 1024 + size * size);
+        }
+        // Below 128 x 128 the texture stays exact; `indexedFromPixels: Infinity` turns the rule off.
+        expect(
+            encodePs2Texture(
+                img(64, 64, (x, y) => [x * 2, y * 2, 50, 255]),
+                { mode: 'truecolor' },
+            ).bpp,
+        ).toBe(32);
+        expect(encodePs2Texture(img(128, 128, shade), { mode: 'truecolor', indexedFromPixels: Infinity }).bpp).toBe(32);
+        // Noise has too many distinct colours for 256 entries: it stays 32 bpp.
+        let seed = 7;
+        const rnd = (): number => (seed = (seed * 1103515245 + 12345) >>> 0) >>> 24;
+        expect(
+            encodePs2Texture(
+                img(128, 128, () => [rnd(), rnd(), rnd(), 255]),
+                { mode: 'truecolor' },
+            ).bpp,
+        ).toBe(32);
+    });
+
+    it('respects alpha when it writes a large texture 8 bpp', () => {
+        const shade = (x: number, y: number): number[] => [90 + (x >> 1), 70 + (y >> 1), 50, 255];
+        // A cut-out: transparent holes stay exactly transparent, opaque pixels stay opaque.
+        const cut = img(128, 128, (x, y) => ((x >> 4) % 2 === 0 && (y >> 4) % 2 === 0 ? [0, 0, 0, 0] : shade(x, y)));
+        const t = encodePs2Texture(cut, { mode: 'truecolor' });
+        expect(t).toMatchObject({ bpp: 8, hasAlpha: true, lossy: true });
+        const d = decodeTxd(t.body, { upright: false });
+        for (let i = 0; i < 128 * 128; i++) expect(d.rgba[i * 4 + 3]! === 0).toBe(cut.rgba[i * 4 + 3]! === 0);
+        // The holes carry the edge colour (filtering at the edge does not darken), not black.
+        expect(d.rgba[0]).toBeGreaterThan(80);
+        expect(d.rgba[1]).toBeGreaterThan(60);
+        // Many alpha levels mixed with many colours: the palette cannot keep both, so it stays 32 bpp.
+        let seed = 3;
+        const rnd = (): number => (seed = (seed * 1103515245 + 12345) >>> 0) >>> 24;
+        const soft = img(128, 128, (x, y) => [90 + (x >> 2), 70 + (y >> 2), rnd() >> 2, rnd()]);
+        expect(encodePs2Texture(soft, { mode: 'truecolor' }).bpp).toBe(32);
+    });
+
     it('rounds odd sizes to powers of two and clamps to the maximum', () => {
         expect(encodePs2Texture(img(40, 20, () => [1, 2, 3, 255]))).toMatchObject({ width: 64, height: 32 });
         expect(
