@@ -233,6 +233,10 @@ export const CLONE_ADJUST: ReadonlyMap<
             ],
         },
     ],
+    // Key: the PS2 Use handler puts the matching key in Rynn's hand before it sends it to the Key Lock, and only an
+    // "Equippable?" key gets there (every native key that opens a lock has it; the PC class has no such field). With the
+    // template's 0 Rynn stood at Alwarren's crystal locks with the right crystal and nothing happened (issue 5).
+    [33, { set: [['Equippable?', 1]] }],
     // Combination Lock: forwards the switches' ON to the counters it is linked to.
     [
         123,
@@ -296,6 +300,19 @@ const FX_OWN_MODEL_RFL: ReadonlySet<number> = new Set(
 );
 
 export const RETARGET_KINDS: ReadonlySet<ClassKind> = new Set(['logic', 'light', 'sound', 'waypoint', 'spawn']);
+
+/**
+ * Engine classes whose objects keep their PC class defaults when the class is mapped onto a same-named PS2 class
+ * (`ConvertOptions.keepPcDefaults`): the logic classes (counters, timers, togglers ...), whose defaults decide which message
+ * does what. Alwarren's "count down to zero" counts Off down on the PC and the PS2 "Count down to Zero" counts it up, so the
+ * six crystal pillars never moved (issue 5). Stomp Players (51) have their own translation (`ootfstomp.ts`), map markers
+ * (104) one reset record per marker name. Air Currents (111) keep the PS2 speed (their flight is tuned on the PS2 defaults;
+ * the PC class defaults would slow Islands currents from 16 to 1 lu/s, untested).
+ */
+const OWN_DEFAULTS_RFL: ReadonlySet<number> = new Set([51, 104, 111]);
+export function keepsPcDefaults(rfl: number | undefined): boolean {
+    return rfl !== undefined && !OWN_DEFAULTS_RFL.has(rfl) && ENGINE_CLASSES.get(rfl)?.kind === 'logic';
+}
 
 /**
  * Engine classes whose objects only exist with the template's model: a Detector (61) is the FX box model (3727) scaled by
@@ -773,9 +790,18 @@ function freeIds(taken: ReadonlySet<number>, reserved?: ReadonlySet<number>): nu
         for (let id = max - 1; id > min; id--) if (!taken.has(id) && !reserved?.has(id)) out.push(id);
         return out;
     }
-    for (let id = max + 1; id <= 0xfffe; id++) if (!reserved?.has(id)) out.push(id);
+    for (let id = max + 1 + LANGUAGE_ID_MARGIN; id <= 0xfffe; id++) if (!reserved?.has(id)) out.push(id);
     return out;
 }
+
+/**
+ * New class ids start this far above the ODB maximum. The converter reads the English tree, but a pack is mounted on the
+ * game language's tree, and those trees carry a few dialogue classes of their own above the English maximum (Level 1 -
+ * Common: German 2356, Italian 2352 to 2356, Spanish 2352; English ends at 2351). A new record with such an id loses to the
+ * language's own one: in the German game every converted Visibility Toggler of the campaign ran as a dialogue line, so
+ * Alwarren's Bell Hammer was never hidden and never shown (issue 5).
+ */
+export const LANGUAGE_ID_MARGIN = 16;
 
 function dataSignature(c: OdbClass): string {
     return (c.data ?? []).join(',');

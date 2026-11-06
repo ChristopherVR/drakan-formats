@@ -2,12 +2,17 @@ import { zlibSync } from 'fflate';
 import { view } from './bytes.ts';
 import {
     FIELD_ANIMATION,
+    FIELD_BOOL,
     FIELD_CHANNEL,
     FIELD_CLASS,
+    FIELD_ENUM,
+    FIELD_FLOAT,
+    FIELD_INT,
     FIELD_MODEL,
     FIELD_SEQUENCE,
     FIELD_SOUND,
     FIELD_TEXTURE,
+    decodeFieldValue,
     fieldBase,
     fieldIsArray,
     fieldIsIndirect,
@@ -132,6 +137,13 @@ export interface ConvertOptions {
      * With a limit, cells of the surplus textures take the texture of the nearest cell of a kept one.
      */
     maxTexturesPerLayer?: number;
+    /**
+     * True for an object class whose PC class defaults must be kept: a scalar (int, float, bool, enum) field that the
+     * object leaves at its PC class default, and whose default differs from the default of the PS2 target field of the
+     * same name and type, is written as an object parameter with the PC value. A class mapped onto a PS2 class by name
+     * keeps the PS2 defaults otherwise (cloned classes already merge the PC defaults, so nothing changes for them).
+     */
+    keepPcDefaults?: (pcClass: OdbClass, target: ClassTarget) => boolean;
 }
 
 export type ResourceKind = 'model' | 'sound' | 'animation' | 'sequence' | 'texture' | 'channel';
@@ -159,6 +171,8 @@ export interface ConversionReport {
     droppedParams: Map<string, number>;
     /** Resource parameters (model, sound, texture, ...) zeroed because PC resource ids do not exist on PS2. */
     zeroedResourceParams: number;
+    /** `PC class.field PC default -> PS2 default` -> objects given the PC class default explicitly (`keepPcDefaults`). */
+    pcDefaultsKept?: Map<string, number>;
     cellsFallback: number;
     cellsMapped: number;
     layers: number;
@@ -175,6 +189,9 @@ export interface Ps2LevelParts {
 }
 
 const bump = <K>(m: Map<K, number>, k: K, n = 1): void => void m.set(k, (m.get(k) ?? 0) + n);
+
+/** Field types whose PC class default `keepPcDefaults` writes into the object (one dword, no payload, no reference). */
+const SCALAR_BASES: ReadonlySet<number> = new Set([FIELD_INT, FIELD_FLOAT, FIELD_BOOL, FIELD_ENUM]);
 
 function text(raw: Uint8Array): { raw: Uint8Array; text: string } {
     const z = raw.indexOf(0);
@@ -335,7 +352,9 @@ export function convertPcLevel(pc: PcLevel, opt: ConvertOptions): Ps2LevelParts 
     // ---- parameters, by field name
     const list: LvlObjectList = { objects: out, warnings: [] };
     for (const { src, dst, fields, t } of keep) {
-        if (!src.params.length) continue;
+        const pcCls = pc.classes.get(src.dbIndex)?.get(src.classId);
+        const keepDefaults = !!pcCls && !!opt.keepPcDefaults?.(pcCls, t);
+        if (!src.params.length && !keepDefaults) continue;
         const byName = new Map<string, number>();
         fields?.forEach((f, i) => {
             const k = f.name.trim().toLowerCase();
@@ -373,6 +392,28 @@ export function convertPcLevel(pc: PcLevel, opt: ConvertOptions): Ps2LevelParts 
             }
             specs.push({ fieldIndex: i, type: f.type, name: f.name, value });
         }
+        if (keepDefaults) {
+            // Fields the object leaves at its PC class default: the PS2 class of the same name may default differently
+            // (Alwarren's "count down to zero" counts Off down and On up on the PC, the PS2 "Count down to Zero" the reverse).
+            const given = new Set(pcSpecs.map((s) => s.name.trim().toLowerCase()));
+            const taken = new Set(specs.map((s) => s.fieldIndex));
+            pcCls!.fields?.forEach((pf, k) => {
+                const key = pf.name.trim().toLowerCase();
+                const base = fieldBase(pf.type);
+                if (given.has(key) || fieldIsArray(pf.type) || fieldIsIndirect(pf.type) || !SCALAR_BASES.has(base)) return;
+                const i = byName.get(key);
+                const f = i === undefined ? undefined : fields![i]!;
+                if (i === undefined || !f || fieldBase(f.type) !== base || fieldIsArray(f.type) || taken.has(i)) return;
+                const pv = pcCls!.data?.[k];
+                const tv = t.cls.data?.[i];
+                if (pv === undefined || tv === undefined || pv >>> 0 === tv >>> 0) return;
+                const value = decodeFieldValue(f.type, pv, pcCls!.data!) as number;
+                specs.push({ fieldIndex: i, type: f.type, name: f.name, value });
+                taken.add(i);
+                const was = decodeFieldValue(f.type, tv, t.cls.data!) as number;
+                bump((report.pcDefaultsKept ??= new Map()), `${pcCls!.name.trim()}.${pf.name.trim()} ${value} (PS2 ${was})`);
+            });
+        }
         if (specs.length) setObjectParams(list, dst.id, specs);
     }
     report.objectsOut = out.length;
@@ -395,6 +436,12 @@ export function convertPcLevel(pc: PcLevel, opt: ConvertOptions): Ps2LevelParts 
         maxWidth: pc.header.maxWidth,
         maxHeight: pc.header.maxHeight,
     };
+    if (report.pcDefaultsKept?.size) {
+        const n = [...report.pcDefaultsKept.values()].reduce((a, b) => a + b, 0);
+        report.warnings.push(
+            `PC class defaults kept on ${n} object field(s): ${[...report.pcDefaultsKept].map(([k, c]) => `${k} x${c}`).join('; ')}`,
+        );
+    }
     for (const [n, c] of report.unmappedClasses) {
         report.warnings.push(`no PS2 class for "${n}": ${c} object${c === 1 ? '' : 's'} dropped`);
     }

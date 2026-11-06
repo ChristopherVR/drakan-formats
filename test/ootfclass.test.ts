@@ -641,6 +641,45 @@ describe('ootfclass', () => {
         expect(parseClassBody(splitClassRecord(plan.synthesized[0]!.record).body)?.data).toEqual([f32(1), 2]);
     });
 
+    it('clones a placed Morph Plug from a world morph (model flags 0), not a weapon-attached one (flags 1)', () => {
+        const fields: [number, string][] = [
+            [T_ENUM, 'Start when created'],
+            [T_ENUM, 'Looping'],
+        ];
+        // a class record with a model block: u16 group, u16 model, u16 db, u32 model flags at 6, rfl at 80, counts at 86 / 90
+        const rec = (name: string, model: number, flags: number, data: number[]): Uint8Array => {
+            const body = new Uint8Array(94 + data.length * 4);
+            const dv = new DataView(body.buffer);
+            dv.setUint16(2, model, true);
+            dv.setUint32(6, flags, true);
+            dv.setUint16(80, 99, true);
+            dv.setUint32(86, data.length, true);
+            dv.setUint32(90, data.length, true);
+            data.forEach((v, i) => dv.setUint32(94 + i * 4, v, true));
+            return joinClassRecord(name, body);
+        };
+        const o = odb();
+        // the weapon-attached template matches the PC defaults exactly, the world one does not
+        o.classes.set(40, { ...cls(40, 'Crown Of Thorns_MorphSpikes', 99, fields, [0, 0]), model: { id: 7, db: 0 } });
+        o.classes.set(41, { ...cls(41, 'ES_FrostWisps', 99, fields, [1, 1]), model: { id: 8, db: 0 } });
+        const raw = o.raw!;
+        o.raw = (id) =>
+            id === 40
+                ? rec('Crown Of Thorns_MorphSpikes', 7, 1, [0, 0])
+                : id === 41
+                  ? rec('ES_FrostWisps', 8, 0, [1, 1])
+                  : raw(id);
+        const plug: OdbClass = { ...cls(1, 'ice cover', 99, fields, [0, 0]), model: { id: 99, db: 0 } };
+        const plan = planClassMapping([{ db: 1, id: 1, cls: plug }], [o], {
+            modelOdbFile: o.file,
+            modelFor: () => ({ id: 500, db: 0 }),
+            modelBounds: () => new Uint8Array(64),
+        });
+        expect([...plan.unsupported.values()]).toEqual([]);
+        expect(plan.synthesized[0]?.template.name).toBe('ES_FrostWisps');
+        expect(parseClassBody(splitClassRecord(plan.synthesized[0]!.record).body)?.data).toEqual([0, 0]);
+    });
+
     it('does not retarget kinds that need a model', () => {
         const pc = [{ db: 1, id: 1, cls: cls(1, 'Lever', 13, [], []) }];
         const ps2 = odb();

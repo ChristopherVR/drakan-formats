@@ -86,6 +86,7 @@ import {
     PS2_SUBSTITUTES,
     aliasSquash,
     buildClassEntries,
+    keepsPcDefaults,
     setSynthesizedDefaults,
     levelPropertiesParams,
     planClassMapping,
@@ -1178,6 +1179,9 @@ export async function convertOotfLevels(
             ? await TerrainTextureBuilder.create(src, ps2.procTxd, procDb, opt.terrain)
             : null;
 
+    // Classes mapped onto a PS2 class by name (no clone): their objects take the PC class defaults explicitly.
+    const nameMapped = new Set([...(plan?.mapped.values() ?? [])].map((t) => `${t.dbIndex}:${t.classId}`));
+
     // ---- levels
     for (const pc of pcs) {
         for (const db of pc.odbPaths.keys()) {
@@ -1212,6 +1216,7 @@ export async function convertOotfLevels(
                         : undefined,
                 mapResource,
                 mapClassRef: opt.classes !== false ? mapObjectClassRef : undefined,
+                keepPcDefaults: (c, t) => keepsPcDefaults(c.rflClass) && nameMapped.has(`${t.dbIndex}:${t.classId}`),
                 name: title,
             });
         let parts = await stage(`convert ${pc.path}`, async () => convertOnce());
