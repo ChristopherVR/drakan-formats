@@ -253,6 +253,23 @@ function bossHeads(env: PuzzleEnv, rep: PuzzleReport): void {
     }
 }
 
+/**
+ * Test aid (`OOTF_TEST_EBONHP=<hp>`): Ebon Dragons (engine class 30) with few hit points, so a scripted run can kill them with a
+ * few real breath hits and watch the death messages reach the gate counter. Not part of any release conversion.
+ */
+function testEbonHealth(env: PuzzleEnv): void {
+    const testHp = Number(
+        (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_TEST_EBONHP'] ??
+            0,
+    );
+    if (!(testHp > 0)) return;
+    for (const o of env.pc.list.objects) {
+        if (rflOf(env.pc, o) !== 30) continue;
+        const dst = env.list.objects.find((x) => x.id === o.id);
+        if (dst) setNamedParam(env.list, dst, env.classOf(dst)?.fields, 'Initial Health', testHp);
+    }
+}
+
 /** Map markers / quest entries (PC engine 104): journal entry and map label are the object's name. */
 function markers(env: PuzzleEnv, rep: PuzzleReport): void {
     const { pc, list } = env;
@@ -579,6 +596,7 @@ export function applyPuzzleLogic(env: PuzzleEnv): PuzzleReport {
     questItemLocks(env, rep);
     messengers(env, rep);
     bossHeads(env, rep);
+    testEbonHealth(env);
     markers(env, rep);
     quietCloudRings(env, rep);
     const counters = new Set<number>();
