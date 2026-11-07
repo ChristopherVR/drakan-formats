@@ -270,6 +270,23 @@ function testEbonHealth(env: PuzzleEnv): void {
     }
 }
 
+/**
+ * The PS2 Death Mage, the template Delon (PC engine class 82) is cloned from, has "Invulnerable?" 1; the PC class has no such
+ * field and Delon is killed with real blows (his death message 8 reaches counter 455 and scene 436). Without this the clone took
+ * no damage from breath, sword or bow (issue 5, `ootf-progression-3.md` section 9).
+ */
+export function isVulnerableBoss(name: string, rfl: number): boolean {
+    return rfl === 82 && /^delon$/i.test(name.trim());
+}
+
+function vulnerableBosses(env: PuzzleEnv): void {
+    for (const o of env.pc.list.objects) {
+        if (!isVulnerableBoss(nameOf(env.pc, o), rflOf(env.pc, o) ?? -1)) continue;
+        const dst = env.list.objects.find((x) => x.id === o.id);
+        if (dst) setNamedParam(env.list, dst, env.classOf(dst)?.fields, 'Invulnerable?', 0);
+    }
+}
+
 /** Map markers / quest entries (PC engine 104): journal entry and map label are the object's name. */
 function markers(env: PuzzleEnv, rep: PuzzleReport): void {
     const { pc, list } = env;
@@ -597,6 +614,7 @@ export function applyPuzzleLogic(env: PuzzleEnv): PuzzleReport {
     messengers(env, rep);
     bossHeads(env, rep);
     testEbonHealth(env);
+    vulnerableBosses(env);
     markers(env, rep);
     quietCloudRings(env, rep);
     const counters = new Set<number>();

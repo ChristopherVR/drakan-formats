@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import { encodeFieldList, parseClassBody, splitClassRecord, type LvlObject, type OdbClass } from '../src/index.ts';
 import { buildPlainClassRecord, planClassMapping, setSynthesizedDefaults, type Ps2OdbIn } from '../src/ootfclass.ts';
-import { applyPuzzleLogic, setNamedParam } from '../src/ootfpuzzle.ts';
+import { applyPuzzleLogic, isVulnerableBoss, setNamedParam } from '../src/ootfpuzzle.ts';
 import type { PcLevel } from '../src/pc.ts';
 import { zlibSync } from 'fflate';
 
@@ -204,5 +204,28 @@ describe('ootfpuzzle map markers (issue 5: wrong quest text)', () => {
         ]);
         expect(conflicts).toHaveLength(1);
         expect(recordData(s.record)[2]).toBe(0x6000);
+    });
+});
+
+describe('ootfpuzzle vulnerable bosses (issue 5: Delon took no damage)', () => {
+    it('picks Delon of the creature class only', () => {
+        expect(isVulnerableBoss('Delon', 82)).toBe(true);
+        expect(isVulnerableBoss(' delon ', 82)).toBe(true);
+        expect(isVulnerableBoss('Delon', 17)).toBe(false); // the mirror-room prop
+        expect(isVulnerableBoss('Death Mage ghost', 82)).toBe(false);
+    });
+
+    it('writes Invulnerable? as an object parameter next to the others', () => {
+        const fields = [
+            { type: T_INT, name: 'Initial Health' },
+            { type: T_INT, name: 'Invulnerable?' },
+        ];
+        const o = obj(1, 2, 40);
+        const list = { objects: [o], warnings: [] };
+        setNamedParam(list, o, fields, 'Initial Health', 650);
+        expect(setNamedParam(list, o, fields, 'Invulnerable?', 0)).toBe(true);
+        const value = (name: string) => o.data[o.params.findIndex((p) => p.name === name)];
+        expect(value('Invulnerable?')).toBe(0);
+        expect(value('Initial Health')).toBe(650);
     });
 });
