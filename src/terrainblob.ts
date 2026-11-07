@@ -22,12 +22,17 @@ import type { TerrainLayer } from './terrain.ts';
 /** Largest chunk extent in cells: x is split into ceil(w/12) near-equal pieces, z likewise (98% of real layers). */
 const MAX_CHUNK = 12;
 /**
- * Most textures one chunk may list. The engine's chunk record is 0x4c bytes with room for 10 texture refs (offsets 0x14..0x3b);
- * the stream loader (FUN_00165840) does not bounds-check the count, so an 11th ref overwrites the weight-array descriptor and
- * the heap allocator later loops forever (docs/journal/2026-11-01/ootf-texture-limit.md). Chunk rectangles are free-form in the
- * file, so a crowded chunk is cut into smaller ones instead.
+ * Most textures one chunk may list: 8, the most any chunk of the PAL discs lists. The engine's chunk record is 0x4c bytes with
+ * room for 10 texture refs (offsets 0x14..0x3b) and the stream loader (FUN_00165840) does not bounds-check the count, so an
+ * 11th ref overwrites the weight-array descriptor and the heap allocator later loops forever
+ * (docs/journal/2026-11-01/ootf-texture-limit.md). 10 is not safe either: the draw pages the engine builds from a 10-texture
+ * chunk carry only 7 texture groups, the mesh drawer (FUN_00158148) still walks all 10 and sends the empty ones as a VIF UNPACK
+ * with NUM = 0, which the VIF reads as 256 and so parses the rest of the packet out of step; the garbage then changes STMOD
+ * and every later VU1 batch draws garbage ("VU1 reserved lower", 2 fps; docs/journal/2026-11-07/vu1-reserved-lower.md).
+ * Chunk rectangles are free-form in the file, so a crowded chunk is cut into smaller ones, down to single cells; a single cell
+ * whose neighbours still bring in more textures keeps its own ones and the neighbours' most used ones.
  */
-export const MAX_CHUNK_TEXTURES = 10;
+export const MAX_CHUNK_TEXTURES = 8;
 /** Layer definition flag bit: flat layer, no per-vertex normals in the blob. */
 export const LAYER_FLAG_FLAT = 0x04;
 
@@ -141,11 +146,33 @@ export function buildPs2TerrainBlob(layer: TerrainLayer, opts: TerrainBlobOption
     };
     const maxTex = opts.maxChunkTextures ?? MAX_CHUNK_TEXTURES;
     const rects: ChunkRect[] = [];
+    // Textures a chunk lists after the limit: its own cells' textures first, then the window's by how many window cells use
+    // them (first appearance breaks ties). Only a single cell can still be over the limit (it sees 3x3 cells).
+    const keptRefsOf = (r: ChunkRect): number[] => {
+        const refs = refsOf(r);
+        if (maxTex <= 0 || refs.length <= maxTex) return refs;
+        const own = new Set<number>();
+        for (let z = r.z0; z < r.z1; z++) for (let x = r.x0; x < r.x1; x++) own.add(tex(x, z));
+        const uses = new Map<number, number>();
+        for (let z = Math.max(0, r.z0 - 1); z <= Math.min(h - 1, r.z1); z++)
+            for (let x = Math.max(0, r.x0 - 1); x <= Math.min(w - 1, r.x1); x++)
+                uses.set(tex(x, z), (uses.get(tex(x, z)) ?? 0) + 1);
+        const rank = (t: number): number => (own.has(t) ? 1000 : 0) + (uses.get(t) ?? 0);
+        const keep = new Set(
+            refs
+                .map((t, i) => ({ t, i }))
+                .sort((p, q) => rank(q.t) - rank(p.t) || p.i - q.i)
+                .slice(0, maxTex)
+                .map((e) => e.t),
+        );
+        return refs.filter((t) => keep.has(t));
+    };
     const add = (r: ChunkRect): void => {
-        // A 2x2 chunk sees at most 3x3 cells, so the split always ends under the limit.
+        // A chunk sees its own cells plus a ring of neighbours (x0-1..x1, z0-1..z1), so a 1x2 chunk can see 12 textures:
+        // split down to single cells.
         const dx = r.x1 - r.x0;
         const dz = r.z1 - r.z0;
-        if (maxTex > 0 && (dx > 2 || dz > 2 || (dx > 1 && dz > 1)) && refsOf(r).length > maxTex) {
+        if (maxTex > 0 && (dx > 1 || dz > 1) && refsOf(r).length > maxTex) {
             if (dx >= dz) {
                 const m = r.x0 + (dx >> 1);
                 add({ ...r, x1: m });
@@ -167,7 +194,7 @@ export function buildPs2TerrainBlob(layer: TerrainLayer, opts: TerrainBlobOption
     for (const rect of rects) {
         {
             const { x0, x1, z0, z1 } = rect;
-            let refs = refsOf(rect);
+            let refs = keptRefsOf(rect);
             const key = opts.textureOrder;
             if (key) refs = refs.sort((p, q) => key(p) - key(q));
             const vw = x1 - x0 + 1;

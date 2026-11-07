@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { TEX_HOLE, parsePs2Terrain, splitPs2Terrain, layerHeightAt, CELL_SIZE } from '../src/terrain.ts';
 import type { TerrainLayer } from '../src/terrain.ts';
 import { ps2BlobBuilder, writePs2Terrain, type BlobBuilder } from '../src/convert.ts';
-import { LAYER_FLAG_FLAT } from '../src/terrainblob.ts';
+import { LAYER_FLAG_FLAT, MAX_CHUNK_TEXTURES } from '../src/terrainblob.ts';
 import {
     cloneTerrainLayer,
     extendTerrainLayer,
@@ -236,14 +236,14 @@ describe('rebuildPs2Terrain', () => {
         expect(key(99)).toBe(0.5);
     });
 
-    it('splits a chunk that would list more than 10 textures', () => {
+    it('splits a chunk that would list more than MAX_CHUNK_TEXTURES textures', () => {
         const { payload } = level();
         const layers = parsePs2Terrain(payload);
         const e = cloneTerrainLayer(layers[0]!);
         for (let c = 0; c < 14 * 13; c++) e.cellTexLeft[c] = e.cellTexRight[c] = 0x90010 + (c % 13);
         const r = rebuildPs2Terrain(payload, [e, layers[1]!, layers[2]!, layers[3]!]);
         const b = blobOf(r.payload, 0);
-        expect(b.chunks.every((c) => c.refs.length <= 10)).toBe(true);
+        expect(b.chunks.every((c) => c.refs.length <= MAX_CHUNK_TEXTURES)).toBe(true);
         expect(b.chunks.length).toBeGreaterThan(2);
         expect(b.seq).toBe(blobOf(payload, 0).seq);
     });

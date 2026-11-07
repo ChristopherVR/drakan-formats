@@ -133,7 +133,7 @@ export interface ConvertOptions {
     mapClassRef?: (pcRef: number, ctx: ResourceContext) => number | null;
     /**
      * Most distinct textures one layer may use (default 0 = unlimited; env DRAKAN_TERRAIN_LAYERTEX). The engine limit is
-     * per chunk (10 refs, see `MAX_CHUNK_TEXTURES`): the blob builder cuts crowded chunks, so a layer may use any number.
+     * per chunk (8 refs, see `MAX_CHUNK_TEXTURES`): the blob builder cuts crowded chunks, so a layer may use any number.
      * With a limit, cells of the surplus textures take the texture of the nearest cell of a kept one.
      */
     maxTexturesPerLayer?: number;

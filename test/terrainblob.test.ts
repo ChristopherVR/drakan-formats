@@ -105,7 +105,7 @@ describe('buildPs2TerrainBlob', () => {
         expect(at(1 * 4 + 1) & 0x10).toBe(0x10);
     });
 
-    it('cuts a chunk with more than 10 textures into smaller chunks that cover the layer once', () => {
+    it('cuts a chunk with more than MAX_CHUNK_TEXTURES textures into smaller chunks that cover the layer once', () => {
         const L = layer(24, 24, 0, (x, z) => 0x90000 + ((x * 7 + z * 13) % 40));
         const b = buildPs2TerrainBlob(L);
         const n = u32(b, 24);
@@ -134,6 +134,33 @@ describe('buildPs2TerrainBlob', () => {
                 for (let x = x0; x < x1; x++) cover[z * 24 + x] = (cover[z * 24 + x] ?? 0) + 1;
         expect(cover.every((c) => c === 1)).toBe(true);
         expect(buildPs2TerrainBlob(L, { maxChunkTextures: 0 }).length).toBeLessThan(b.length);
+    });
+
+    it('never lists more than 8 textures in a chunk, even for a single cell surrounded by other textures', () => {
+        // Every cell its own texture: a 1x2 chunk sees 3x4 window cells (12 textures), a single cell 3x3 (9). The disc never
+        // lists more than 8; a 10-texture chunk leaves the engine empty draw groups that it sends as VIF UNPACK NUM=0.
+        const W = 6;
+        const H = 7;
+        const L = layer(W, H, 0, (x, z) => 0x90000 + z * W + x);
+        const blob = readPs2Blob(buildPs2TerrainBlob(L));
+        expect(MAX_CHUNK_TEXTURES).toBe(8);
+        const cover = new Uint8Array(W * H);
+        for (const c of blob.chunks) {
+            expect(c.refs.length).toBeLessThanOrEqual(8);
+            expect(c.arrays.length).toBe(c.refs.length);
+            for (let z = c.z0; z < c.z1; z++) {
+                for (let x = c.x0; x < c.x1; x++) {
+                    cover[z * W + x]!++;
+                    // the chunk's own cells always keep their texture
+                    expect(c.refs).toContain(0x90000 + z * W + x);
+                }
+            }
+            for (const a of c.arrays) expect(a.some((v) => v !== 0)).toBe(true);
+        }
+        expect(cover.every((n) => n === 1)).toBe(true);
+        // an interior single cell: own texture plus the 7 most used of its 8 neighbours, in first-seen order
+        const inner = blob.chunks.find((c) => c.x1 - c.x0 === 1 && c.z1 - c.z0 === 1 && c.x0 > 0 && c.z0 > 0);
+        expect(inner?.refs.length).toBe(8);
     });
 
     it('writes a layer without one drawn cell in the empty form, as the disc does', () => {
