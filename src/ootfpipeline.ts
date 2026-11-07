@@ -674,8 +674,21 @@ export async function convertOotfLevels(
                     ? (cls, file) => {
                           const ow = ownerOf.get(cls);
                           const fStem = file.replace(/\.ODB$/i, '');
+                          if (!ow) return undefined;
+                          // A break-away floor's pieces live in its template ODB's own MOD and are named with db 0 there, as on
+                          // the disc. Pieces not converted yet (the first planning pass) keep the template's list for now.
+                          if (
+                              cls.rflClass === BREAKAWAY_RFL &&
+                              fStem !== hostStem &&
+                              crossOn &&
+                              ps2.hostFiles?.has(fStem) &&
+                              modelFiles.has(file)
+                          ) {
+                              const cb = crossBuilders.get(fStem);
+                              return (ref) => cb?.mapModelRef(ref >>> 16, ref & 0xffff, ow) ?? null;
+                          }
                           // Only the host's own models can be named from here (cross-ODB models live in that ODB's MOD).
-                          if (!ow || cls.rflClass !== 99 || fStem !== hostStem) return undefined;
+                          if (cls.rflClass !== 99 || fStem !== hostStem) return undefined;
                           const db = hostDbForStem(fStem);
                           if (db === null) return undefined;
                           return (ref) => {
@@ -743,11 +756,19 @@ export async function convertOotfLevels(
                 return id === null ? undefined : builder.report.creatures.find((c) => c.id === id)?.joints;
             };
             let result = planClassMapping(input, ps2Odbs, planOpts);
-            if (crossWant.length) {
+            const inputByKey = new Map<string, OdbClass>(input.map((i) => [`${i.db}:${i.id}`, i.cls]));
+            const pieceWant = crossOn
+                ? breakawayPieceHosts(
+                      result,
+                      (key) => inputByKey.get(key),
+                      (stem) => !!ps2.hostFiles?.has(stem),
+                  )
+                : [];
+            if (crossWant.length || pieceWant.length) {
                 // Models of classes cloned from template ODBs go into that ODB's own MOD / TXD: convert them, then plan again.
-                for (const w of crossWant) {
-                    const hf = ps2.hostFiles!.get(w.stem)!;
-                    let cb = crossBuilders.get(w.stem);
+                const crossBuilder = (stem: string): OotfAssetBuilder => {
+                    const hf = ps2.hostFiles!.get(stem)!;
+                    let cb = crossBuilders.get(stem);
                     if (!cb) {
                         cb = new OotfAssetBuilder(src, {
                             firstModelId: maxId(hf.mod, 0x0200) + 1,
@@ -755,10 +776,25 @@ export async function convertOotfLevels(
                             skinned: false,
                             displayList: /./, // models of template ODBs draw nothing without the strip display list 0x0211
                         });
-                        crossBuilders.set(w.stem, cb);
+                        crossBuilders.set(stem, cb);
                     }
+                    return cb;
+                };
+                for (const w of crossWant) {
+                    const cb = crossBuilder(w.stem);
                     const ow = ownerOf.get(w.cls);
                     if (ow && w.cls.model) await cb.addModelRef(ow, w.cls.model.db, w.cls.model.id);
+                }
+                // Break-away floor pieces: one collision box each, like the disc's (a one-shape OBB 0x0207 per piece).
+                for (const w of pieceWant) {
+                    const cb = crossBuilder(w.stem);
+                    const ow = ownerOf.get(w.cls);
+                    if (!ow) continue;
+                    for (const r of morphModelRefs(w.cls)) {
+                        const known = cb.mapModelRef(r >>> 16, r & 0xffff, ow);
+                        const id = known ?? (await cb.addModelRef(ow, r >>> 16, r & 0xffff, true));
+                        if (id !== null && known === null) cb.singleShapeBounds(id);
+                    }
                 }
                 result = planClassMapping(input, ps2Odbs, planOpts);
             }
@@ -2005,6 +2041,33 @@ export async function detectOotfInstallLanguage(
 ): Promise<{ language: OotfLanguageGuess; rrcPath: string | null }> {
     const rrc = await loadRrcStrings(src);
     return { language: detectOotfLanguage(rrc.strings.values()), rrcPath: rrc.path };
+}
+
+/** Engine class of break-away floors: no class model; the pieces named by "Model List" make the intact floor. */
+export const BREAKAWAY_RFL = 44;
+
+/**
+ * Break-away floors of a class plan that were cloned into a template ODB with its own MOD / TXD (`hosted(stem)`): each PC
+ * class with that ODB's stem, once. Their "Model List" pieces must be converted into that MOD and named with db 0 there,
+ * as the disc's floors do; a template ODB naming RESOURES models through its `.DB` hung level loads (ootf-props-audit.md 5).
+ */
+export function breakawayPieceHosts(
+    plan: Pick<ClassPlan, 'synthesized'>,
+    sourceOf: (pcKey: string) => OdbClass | undefined,
+    hosted: (stem: string) => boolean,
+): { stem: string; cls: OdbClass }[] {
+    const out: { stem: string; cls: OdbClass }[] = [];
+    for (const s of plan.synthesized) {
+        if (s.rfl !== BREAKAWAY_RFL) continue;
+        const stem = s.file.replace(/\.ODB$/i, '');
+        if (!hosted(stem)) continue;
+        for (const key of s.pcKeys) {
+            const cls = sourceOf(key);
+            if (cls && morphModelRefs(cls).length && !out.some((w) => w.cls === cls && w.stem === stem))
+                out.push({ stem, cls });
+        }
+    }
+    return out;
 }
 
 /** Model refs (`db << 16 | id`) named by the model-typed fields of a PC class (a Morph Plug's "Morphing Models"). */
