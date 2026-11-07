@@ -74,6 +74,7 @@ import {
     asciiLevelTitle,
     assertOotfSource,
     checkOotfSource,
+    introTemplateWarning,
     detectOotfLanguage,
     type OotfLanguageGuess,
     OotfSourceError,
@@ -377,6 +378,8 @@ export async function convertOotfLevels(
     );
     const layersEntry = ps2.template.entries.find((x) => x.type === LVL_TYPE_LAYERS)!;
     const layersRaw = await ps2.template.readRaw(layersEntry);
+    const introWarn = introTemplateWarning(tplHeader.dependencies.map((d) => d.path.text));
+    if (introWarn) res.warnings.push(`template: ${introWarn}`);
     const fallback = dominantTexture(parsePs2Terrain(layersRaw));
     const discRefs = (() => {
         const n = new Map<number, number>();

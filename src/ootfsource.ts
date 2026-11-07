@@ -300,6 +300,19 @@ export function checkOotfSource(
     return { language, rrcPath: rrc.path, rrcStrings: rrc.strings.size, errors, warnings };
 }
 
+/**
+ * A PS2 template level that names its own level database by a bare name (no folder), as `Level 0 - Intro` (LEVEL0RO) does,
+ * or null. A level converted on it asks for `Levels/<converted level>/Level 0 - Intro.*`, which only loads because the
+ * runtime serves the intro's files next to it; the intro also has no Visibility Toggler, morph or earthquake classes, so the
+ * pack loses puzzle logic. Packs exported this way froze New Game for a German player (GitHub issue 1, item 4). The check
+ * reads dependency paths only, so it is the same in every language tree.
+ */
+export function introTemplateWarning(dependencyPaths: readonly string[]): string | null {
+    const bare = dependencyPaths.filter((p) => p.trim() !== '' && !/[\\/]/.test(p));
+    if (!bare.length) return null;
+    return `the PS2 template names its own level database without a folder (${bare.join(', ')}): it is the Intro level; levels converted on it lose puzzle classes (Visibility Toggler, morphs) and need the game's alias for the bare name. Choose Level 1A - Surdana as the template`;
+}
+
 /** Throw the profile's errors as one actionable message. */
 export function assertOotfSource(p: OotfSourceProfile): void {
     if (!p.errors.length) return;

@@ -19,6 +19,7 @@ import {
     detectOotfLanguage,
     encodeXdbString,
     isOotfAirArenaLevel,
+    introTemplateWarning,
     isOotfArenaLevel,
     levelNameProblem,
     ootfLevelKey,
@@ -388,5 +389,16 @@ describe('level title edge cases of localized installs', () => {
             expect(asciiLevelTitle(t)).toBe(t);
             expect(levelNameProblem(t)).toBeNull();
         }
+    });
+});
+
+describe('the Intro as a conversion template', () => {
+    it('warns when the template names its own database without a folder, in any language tree', () => {
+        const w = introTemplateWarning(['Level 0 - Intro', '..\\Common\\System', 'Levels\\Über\\Gemeinsam']);
+        expect(w).toContain('Level 0 - Intro');
+        expect(w).toContain('Surdana');
+    });
+    it('stays silent for a template whose databases all carry a folder', () => {
+        expect(introTemplateWarning(['..\\Level 1 - Common\\Level 1 - Common', '../Common/System/System', ''])).toBeNull();
     });
 });
