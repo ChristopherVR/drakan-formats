@@ -291,7 +291,7 @@ function templateHeader(): LvlHeader {
     };
 }
 
-async function fixture() {
+async function fixture(ps2Extra: [number, string, number][] = []) {
     const objects = (() => {
         const w = new W().u16(4);
         pcObject(
@@ -363,11 +363,7 @@ async function fixture() {
             id: 77,
             name: 'lamp',
             rfl: 40,
-            fields: [
-                [2, 'speed', 0x3f800000],
-                [0x0a, 'Tag', 0],
-                [5, 'Sound', 0],
-            ],
+            fields: [[2, 'speed', 0x3f800000], [0x0a, 'Tag', 0], [5, 'Sound', 0], ...ps2Extra],
         },
     ]);
     const h = templateHeader();
@@ -423,6 +419,46 @@ describe('PC -> PS2 conversion', () => {
         expect(R.cellsFallback).toBe(6);
         expect([...L.cellTexLeft]).toEqual(new Array(6).fill(0x00090042));
         expect([...L.vertexMask]).toEqual([...ps2VertexMask(3, 2)]);
+    });
+
+    it('counts a class left out on purpose apart from the real gaps, with its note', async () => {
+        const { pc, h, classes } = await fixture();
+        const r = convertPcLevel(pc, {
+            template: { header: h, classes },
+            textureFallback: 0x00090042,
+            omitClass: (db, id) => (db === 1 && id === 2 ? 'a PC-only switch; the level keeps one sky' : null),
+        });
+        const R = r.report;
+        expect(R.objectsOut).toBe(3);
+        expect(R.unmappedClasses.size).toBe(0);
+        expect(R.omittedClasses?.get('OnlyPc')).toEqual({
+            objects: 1,
+            note: 'a PC-only switch; the level keeps one sky',
+        });
+        expect(R.warnings).toContain(
+            'kept out on purpose: "OnlyPc" (1 object): a PC-only switch; the level keeps one sky',
+        );
+        expect(R.warnings.some((w) => w.startsWith('no PS2 class for'))).toBe(false);
+        // links to the kept-out object vanish like links to any object that is not converted
+        expect(R.linksDropped).toBe(1);
+    });
+
+    it('carries a parameter that the PS2 class names differently through the alias hook', async () => {
+        const { pc, h, classes } = await fixture([[1, 'Gone Slot 0', 0]]);
+        const seen: string[] = [];
+        const r = convertPcLevel(pc, {
+            template: { header: h, classes },
+            textureFallback: 0x00090042,
+            paramAlias: (cls, name, slot) => {
+                seen.push(`${cls.name}.${name}`);
+                return name === 'Gone' ? `Gone Slot ${slot()}` : undefined;
+            },
+        });
+        expect(seen).toEqual(['Lamp.Gone']);
+        expect(r.report.droppedParams.has('Gone')).toBe(false);
+        const first = parseObjectList(writeObjectList(r.objects)).objects.find((o) => o.pos[0] === 100)!;
+        const gone = first.params.find((p) => p.name === 'Gone Slot 0')!;
+        expect(gone).toMatchObject({ fieldIndex: 3, type: 1 });
     });
 
     it('preserves unsigned native rotation words above 180 degrees on every axis', async () => {

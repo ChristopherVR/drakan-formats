@@ -100,6 +100,7 @@ import {
     type Ps2OdbIn,
 } from './ootfclass.ts';
 import { OotfAssetBuilder, type AssetReport } from './ootfassets.ts';
+import { REFERENCE_ENGINES, deliberateOmission, pcParamAlias } from './ootfcoverage.ts';
 import { loadPcLevel, parsePcOdbClasses, pcLevelName, resolvePcPath, type PcFileSource, type PcLevel } from './pc.ts';
 import {
     classDefaultReferences,
@@ -249,11 +250,14 @@ export interface ClassAuditRow {
     kind: string;
     /** Objects of the class placed in the PC level. */
     objects: number;
-    /** `name-mapped` = same-named PS2 class (PS2 model), `cloned` = new record (PC model when `model` is set), `unsupported`. */
-    outcome: 'name-mapped' | 'cloned' | 'unsupported';
+    /**
+     * `name-mapped` = same-named PS2 class (PS2 model), `cloned` = new record (PC model when `model` is set), `omitted` = left
+     * out on purpose (`deliberateOmission`: reason is its kind, detail the note), `unsupported` = a gap.
+     */
+    outcome: 'name-mapped' | 'cloned' | 'omitted' | 'unsupported';
     ps2Name?: string;
     template?: string;
-    /** `UnsupportedReason`, `max-classes` or `no-plan`. */
+    /** `UnsupportedReason`, `max-classes`, `no-plan`, `reference-only`, or the `OmissionKind` of an `omitted` row. */
     reason?: string;
     detail?: string;
     /** The PC class names a model: converted (`ok`), why it was skipped, or `none` when the class has no model. */
@@ -274,9 +278,6 @@ export interface OotfPipelineResult {
     /** Language of the PC install and the source checks (ootfsource.ts); null when no level loaded. */
     source: OotfSourceProfile | null;
 }
-
-/** PC multiplayer-only engine ids (launch pads, Soul Crystal, dragon invulnerability) that become arena data, not objects. */
-const ARENA_EXPORT_RFL: ReadonlySet<number> = new Set([18, 86, 126, 127, 128]);
 
 const hex4 = (n: number): string => n.toString(16).padStart(4, '0');
 
@@ -512,6 +513,24 @@ export async function convertOotfLevels(
                 ownedClasses.set(ownedClassKey(ow, id), cls);
             }
         }
+    /** The PC class's own model: converted (`ok`), why the asset builder skipped it, or `none` when the class has none. */
+    const modelStateOf = (cls: OdbClass): string => {
+        if (!cls.model) return 'none';
+        const ow = ownerOf.get(cls);
+        const nid = ow ? builder.mapModelRef(cls.model.db, cls.model.id, ow) : null;
+        const c = ow ? builder.resolveContainer(ow, cls.model.db) : null;
+        const why = c ? builder.report.skipped.get(`model ${c.toLowerCase()}#${cls.model.id}`) : undefined;
+        return nid !== null ? 'ok' : (why ?? (ow ? 'not converted' : 'owner unknown'));
+    };
+    /** `model 3918 is not in Alwarren.mod` when the install itself lacks the class's model, else undefined. */
+    const missingModelOf = (cls: OdbClass): string | undefined => {
+        const state = modelStateOf(cls);
+        if (state !== 'no such model' && !/\.mod not found$/i.test(state)) return undefined;
+        const ow = ownerOf.get(cls);
+        const c = ow ? builder.resolveContainer(ow, cls.model!.db) : null;
+        const file = (c ?? ow ?? 'its container').replace(/^.*[\\/]/, '');
+        return `model ${cls.model!.id} is not in ${file}.mod`;
+    };
     if (opt.classes !== false) {
         const loaded = new Set<string>();
         const initial = [...used.values()].flatMap((u) => {
@@ -884,6 +903,20 @@ export async function convertOotfLevels(
                                 return ((Number(match[1]) << 16) | target.classId) >>> 0;
                         return null;
                     },
+                    (key, ref) => {
+                        // An unresolved reference to a PC-only effect class (trails, gibs, flashes ...) is expected.
+                        const source = sourceByKey.get(key);
+                        const ow = source && ownerOf.get(source);
+                        const container = ow && builder.resolveContainer(ow, ref >>> 16);
+                        const cls = container && ownedClasses.get(ownedClassKey(container, ref & 0xffff));
+                        return cls ? REFERENCE_ENGINES.get(cls.rflClass ?? -1) : undefined;
+                    },
+                    (key, ref) => {
+                        const source = sourceByKey.get(key);
+                        const ow = source && ownerOf.get(source);
+                        const container = ow && builder.resolveContainer(ow, ref >>> 16);
+                        return container ? ownedClasses.get(ownedClassKey(container, ref & 0xffff))?.name : undefined;
+                    },
                 ),
             );
             const bowAim = buildBowAimMetadata(plan, (key) => sourceByKey.get(key));
@@ -956,21 +989,14 @@ export async function convertOotfLevels(
             const t = plan?.resolve(k?.db ?? -1, k?.id ?? -1) ?? null;
             const un = plan?.unsupported.get(key);
             const syn = plan?.synthesized.find((s) => s.pcKeys.includes(key));
-            const ow = ownerOf.get(u.cls);
-            let model = 'none';
-            if (u.cls.model) {
-                const nid = ow ? builder.mapModelRef(u.cls.model.db, u.cls.model.id, ow) : null;
-                const c = ow ? builder.resolveContainer(ow, u.cls.model.db) : null;
-                const why = c ? builder.report.skipped.get(`model ${c.toLowerCase()}#${u.cls.model.id}`) : undefined;
-                model = nid !== null ? 'ok' : (why ?? (ow ? 'not converted' : 'owner unknown'));
-            }
+            const model = modelStateOf(u.cls);
             const info = ENGINE_CLASSES.get(u.cls.rflClass ?? -1);
             res.classAudit.push({
                 pcPath: u.pc.path,
                 key: `${u.db}:${u.id}`,
                 name: u.cls.name.trim(),
                 rfl: u.cls.rflClass ?? -1,
-                kind: info?.kind ?? 'unknown',
+                kind: info?.kind ?? (REFERENCE_ENGINES.has(u.cls.rflClass ?? -1) ? 'effect-reference' : 'unknown'),
                 objects: u.pc.list.objects.filter((o) => o.dbIndex === u.db && o.classId === u.id).length,
                 outcome: syn ? 'cloned' : t ? 'name-mapped' : 'unsupported',
                 ps2Name: t?.cls.name,
@@ -1004,9 +1030,19 @@ export async function convertOotfLevels(
             row.ps2Name = musicClass.cls.name;
             row.reason = undefined;
             row.detail = 'music trigger: rewritten to the Triggered Music Loop class';
-        } else if (ARENA_EXPORT_RFL.has(row.rfl) && pc && isOotfArenaLevel(pc)) {
-            row.reason = 'arena-export';
-            row.detail = 'no PS2 engine class; the editor exports it as an arena spawn / marker (maps/*.ini)';
+        } else if (row.objects > 0 && pc) {
+            const cls = pc.classes.get(Number(row.key.split(':')[0]))?.get(Number(row.key.split(':')[1]));
+            const omit = cls
+                ? deliberateOmission(cls, { arena: isOotfArenaLevel(pc), missingModel: missingModelOf(cls) })
+                : null;
+            if (omit) {
+                row.outcome = 'omitted';
+                row.reason = omit.kind;
+                row.detail = omit.note;
+            }
+        } else if (row.objects === 0 && REFERENCE_ENGINES.has(row.rfl)) {
+            row.reason = 'reference-only';
+            row.detail = `${REFERENCE_ENGINES.get(row.rfl)} (engine ${row.rfl}): only referenced by other classes; the reference stays empty`;
         }
     }
     const resolverFor = (pc: PcLevel): ((db: number, id: number) => ClassTarget | null) | undefined => {
@@ -1017,6 +1053,14 @@ export async function convertOotfLevels(
             if (cls && music?.has(cls.name)) return musicClass!.t;
             const k = cls ? planKey.get(sig(cls)) : undefined;
             return k ? plan!.resolve(k.db, k.id) : null;
+        };
+    };
+    /** For `ConvertOptions.omitClass`: the note of a class left out on purpose (ootfcoverage.ts), else null. */
+    const omitterFor = (pc: PcLevel): ((db: number, id: number) => string | null) => {
+        const arena = isOotfArenaLevel(pc);
+        return (db, id) => {
+            const cls = pc.classes.get(db)?.get(id);
+            return cls ? (deliberateOmission(cls, { arena, missingModel: missingModelOf(cls) })?.note ?? null) : null;
         };
     };
 
@@ -1273,6 +1317,8 @@ export async function convertOotfLevels(
                 mapResource,
                 mapClassRef: opt.classes !== false ? mapObjectClassRef : undefined,
                 keepPcDefaults: (c, t) => keepsPcDefaults(c.rflClass) && nameMapped.has(`${t.dbIndex}:${t.classId}`),
+                omitClass: omitterFor(pc),
+                paramAlias: pcParamAlias,
                 name: title,
             });
         let parts = await stage(`convert ${pc.path}`, async () => convertOnce());

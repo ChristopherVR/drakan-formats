@@ -253,6 +253,10 @@ export const CLONE_ADJUST: ReadonlyMap<
     // Map Object / Map Trigger (quest markers): one PS2 map-marker record per marker name (`markerClassIdentity`); the
     // puzzle pass writes its journal / map text, type and map position into the record (the game reads them from the class).
     [104, { reset: true }],
+    // Quickening Effect (the sparks and lightning around a power orb, linked to the orb prop): the PS2 has no engine 80 and its
+    // Power FX (71) shares none of the 16 fields (spark model, flare radii ...). A Particle Spawner with its own PS2 defaults
+    // stands in at the same place, so the spot still sparkles; the PC spark settings are not carried.
+    [80, { reset: true }],
 ]);
 
 /** Generic PC marker names that carry no text of their own (the converter leaves those markers out). */
@@ -472,6 +476,8 @@ export const PC_CLASS_ALIASES: ReadonlyMap<string, string> = new Map(
             ['Orc Plate (yellow)', 'Yellow Orc : Center'],
             ['War Giant', 'Primitive Giant'],
             ['starving wargiant', 'Primitive Giant'],
+            // The multiplayer "Ambient Sound" box is the PS2 Ambient Transition with one slot named (`pcParamAlias`).
+            ['Ambient Sound', 'AmbientTransition'],
         ] as const
     ).map(([pc, ps2]) => [squash(pc), squash(ps2)] as const),
 );
@@ -977,7 +983,11 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
             !!cls.model &&
             cands.some((c) => !!c.odb.raw?.(c.id));
         const noModel = debug.noModel?.test(cls.name) ?? false;
+        // A break-away floor (44) is drawn from the pieces of its "Model List", never from the class model; a PC floor whose
+        // class also names a model (Alwarren's "Brick17": model 4101, Model List [4101]) is cloned like the model-less ones.
+        const breakaway = rfl === 44;
         const wantsModel =
+            !breakaway &&
             !sameNameSkillClone &&
             (!substituted || modelStandIn) &&
             !ownFxModel &&
@@ -991,7 +1001,7 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
         // Volcanic's launcher cloned from "Bridge Generator" kept that model and its arrow ended on its first step (issue 5).
         const modelless =
             !substituted &&
-            !cls.model &&
+            (!cls.model || breakaway) &&
             (kind === 'mechanism' || kind === 'scenery' || kind === 'fx' || kind === 'spawn') &&
             cands.some((c) => !c.cls.model && !!c.odb.raw?.(c.id));
         if (

@@ -42,15 +42,23 @@ export async function classReferenceClosure(
 
 /**
  * Class defaults use the owning ODB's dependency numbers, not a level's database numbers. Relocate only after the
- * complete plan exists, so forward and cyclic references work. An unresolved reference is explicitly diagnosed and
- * omitted/zeroed; retaining a template's unrelated spawn list can create real native effects indefinitely.
+ * complete plan exists, so forward and cyclic references work. An unresolved reference is explicitly reported and
+ * left empty (zeroed); retaining a template's unrelated spawn list can create real native effects indefinitely.
  */
 export function relocateClassDefaultReferences(
     plan: ClassPlan,
     sourceOf: (key: string) => OdbClass | undefined,
     map: (sourceKey: string, ref: number, targetFile: string) => number | null,
+    /**
+     * For an unresolved reference: the family of a PC-only effect it points at (`REFERENCE_ENGINES`, "projectile trail"),
+     * which is expected to stay empty. Those are summed into one note per family instead of one warning per reference.
+     */
+    familyOf?: (sourceKey: string, ref: number) => string | undefined,
+    /** The PC name of the referenced class, for the itemised notes. */
+    nameOf?: (sourceKey: string, ref: number) => string | undefined,
 ): string[] {
     const warnings: string[] = [];
+    const families = new Map<string, { refs: number; classes: Set<string> }>();
     for (const s of plan.synthesized) {
         const sourceKey = s.pcKeys[0]!;
         const pc = sourceOf(sourceKey);
@@ -73,9 +81,18 @@ export function relocateClassDefaultReferences(
             for (const ref of refs) {
                 const target = ref === 0 ? 0 : map(sourceKey, ref, s.file);
                 if (target === null) {
-                    warnings.push(
-                        `class ${s.name}: ${f.name}: no safe target for PC class 0x${ref.toString(16)}; omitted`,
-                    );
+                    const family = familyOf?.(sourceKey, ref);
+                    if (family) {
+                        const fam =
+                            families.get(family) ?? families.set(family, { refs: 0, classes: new Set() }).get(family)!;
+                        fam.refs++;
+                        fam.classes.add(s.name);
+                    } else {
+                        const name = nameOf?.(sourceKey, ref)?.trim();
+                        warnings.push(
+                            `class ${s.name}: ${f.name}: PC class ${name ? `"${name}" ` : ''}0x${ref.toString(16)} has no PS2 counterpart; the reference is left empty`,
+                        );
+                    }
                 } else mapped.push(target >>> 0);
             }
             if (fieldIsArray(f.type)) {
@@ -88,5 +105,11 @@ export function relocateClassDefaultReferences(
         s.cls.data = data;
         s.record = cloneClassRecord(s.record, s.name, data);
     }
+    for (const [family, { refs, classes }] of [...families].sort(
+        (a, b) => b[1].refs - a[1].refs || a[0].localeCompare(b[0]),
+    ))
+        warnings.push(
+            `PC-only ${family} references left empty: ${refs} in ${classes.size} converted class${classes.size === 1 ? '' : 'es'} (the PC effect has no PS2 class)`,
+        );
     return warnings;
 }

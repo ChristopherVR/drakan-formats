@@ -144,6 +144,13 @@ export interface ConvertOptions {
      * keeps the PS2 defaults otherwise (cloned classes already merge the PC defaults, so nothing changes for them).
      */
     keepPcDefaults?: (pcClass: OdbClass, target: ClassTarget) => boolean;
+    /**
+     * For a PC class that has no PS2 target: a note when leaving it out is the intended outcome (`deliberateOmission`,
+     * ootfcoverage.ts). Its objects are counted in `omittedClasses`, not in `unmappedClasses`.
+     */
+    omitClass?: (db: number, id: number) => string | null;
+    /** PS2 field name of a PC object parameter whose name differs on the target class (`pcParamAlias`), else undefined. */
+    paramAlias?: (pcClass: OdbClass, name: string, slot: () => number) => string | undefined;
 }
 
 export type ResourceKind = 'model' | 'sound' | 'animation' | 'sequence' | 'texture' | 'channel';
@@ -162,6 +169,8 @@ export interface ConversionReport {
     objectsOut: number;
     /** PC class name -> objects dropped because no PS2 class matched. */
     unmappedClasses: Map<string, number>;
+    /** PC class name -> objects left out on purpose and why (`ConvertOptions.omitClass`); not a gap. */
+    omittedClasses?: Map<string, { objects: number; note: string }>;
     /** PC class name -> PS2 class name it was mapped to (for the preview / review). */
     mappedClasses: Map<string, string>;
     objectsPlaceholder: number;
@@ -293,6 +302,13 @@ export function convertPcLevel(pc: PcLevel, opt: ConvertOptions): Ps2LevelParts 
         const name = pc.classes.get(src.dbIndex)?.get(src.classId)?.name ?? `class ${src.classId}/${src.dbIndex}`;
         let placeholder = false;
         if (!t) {
+            const omit = opt.omitClass?.(src.dbIndex, src.classId) ?? null;
+            if (omit !== null) {
+                const om = (report.omittedClasses ??= new Map());
+                const was = om.get(name);
+                om.set(name, { objects: (was?.objects ?? 0) + 1, note: omit });
+                continue;
+            }
             if (opt.placeholder) {
                 t = opt.placeholder;
                 placeholder = true;
@@ -362,8 +378,18 @@ export function convertPcLevel(pc: PcLevel, opt: ConvertOptions): Ps2LevelParts 
         });
         const specs: ParamSpec[] = [];
         const pcSpecs = objectParamSpecs(src);
+        const slot = (): number => {
+            const own = pcSpecs.find((p) => /^slot$/i.test(p.name.trim()));
+            if (typeof own?.value === 'number') return own.value;
+            const k = pcCls?.fields?.findIndex((f) => /^slot$/i.test(f.name.trim())) ?? -1;
+            return k >= 0 ? (pcCls!.data?.[k] ?? 0) : 0;
+        };
         for (const s of pcSpecs) {
-            const i = byName.get(s.name.trim().toLowerCase());
+            let i = byName.get(s.name.trim().toLowerCase());
+            if (i === undefined && pcCls && opt.paramAlias) {
+                const alias = opt.paramAlias(pcCls, s.name, slot);
+                if (alias) i = byName.get(alias.toLowerCase());
+            }
             const f = i === undefined ? undefined : fields![i]!;
             if (
                 i === undefined ||
@@ -457,6 +483,9 @@ export function convertPcLevel(pc: PcLevel, opt: ConvertOptions): Ps2LevelParts 
         report.warnings.push(
             `PC class defaults kept on ${n} object field(s): ${[...report.pcDefaultsKept].map(([k, c]) => `${k} x${c}`).join('; ')}`,
         );
+    }
+    for (const [n, { objects, note }] of report.omittedClasses ?? []) {
+        report.warnings.push(`kept out on purpose: "${n}" (${objects} object${objects === 1 ? '' : 's'}): ${note}`);
     }
     for (const [n, c] of report.unmappedClasses) {
         report.warnings.push(`no PS2 class for "${n}": ${c} object${c === 1 ? '' : 's'} dropped`);

@@ -463,8 +463,31 @@ describe('OotF class reference defaults', () => {
             () => null,
         );
         expect(warnings).toHaveLength(2);
-        expect(warnings.every((w) => w.includes('no safe target'))).toBe(true);
+        expect(warnings.every((w) => w.includes('has no PS2 counterpart; the reference is left empty'))).toBe(true);
         expect(plan.synthesized[0]!.cls.data!.slice(0, 3)).toEqual([0, 0x3f800000, 0]);
         expect(ownedClassKey('World\\A', 11)).toBe(ownedClassKey('world/a', 11));
+    });
+
+    it('sums references to PC-only effect families into one note each and keeps the others itemised', () => {
+        const pc = generator(11, 'A', [0x10007]);
+        pc.fields!.push({ name: 'Death Effect', type: 3 });
+        pc.data = [(1 << 16) | 3, 0x3f800000, 0x20008, 0x10007];
+        const odb = native();
+        odb.classes.get(10)!.fields!.push({ name: 'Death Effect', type: 3 });
+        odb.classes.get(10)!.data = [(2 << 16) | 3, 0x3f800000, 0x5555, 0x187a, 0x18ec];
+        const plan = planClassMapping([{ db: 1, id: 11, cls: pc }], [odb]);
+        const warnings = relocateClassDefaultReferences(
+            plan,
+            () => pc,
+            () => null,
+            (_key, ref) => (ref === 0x10007 ? 'projectile trail' : undefined),
+            (_key, ref) => (ref === 0x20008 ? 'Shrapnel' : undefined),
+        );
+        expect(warnings).toEqual([
+            'class A: Death Effect: PC class "Shrapnel" 0x20008 has no PS2 counterpart; the reference is left empty',
+            'PC-only projectile trail references left empty: 1 in 1 converted class (the PC effect has no PS2 class)',
+        ]);
+        // the summed reference is cleared exactly like an itemised one
+        expect(plan.synthesized[0]!.cls.data!.slice(0, 3)).toEqual([0, 0x3f800000, 0]);
     });
 });
