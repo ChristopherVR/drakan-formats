@@ -612,6 +612,9 @@ export interface PcToPs2Stats {
     flatToSmooth: boolean;
 }
 
+/** Printed once per session when a shape's polygon lists cannot be remapped. */
+let warnedObbRemap = false;
+
 /**
  * Rewrite the polygon lists of an OBB 0x0207 hierarchy through `map` (old polygon index -> the new indices it became): the PC
  * lists name PC polygons, and the conversion splits quads into two triangles and drops polygons of unmapped textures, so the
@@ -624,7 +627,8 @@ export function remapObbPolygons(bounds: Uint8Array, map: readonly (readonly num
     const shapes = parseObbHierarchy(bounds);
     if (!shapes || shapes.some((s) => s.polygons.some((p) => p >= map.length))) return null;
     const lists = shapes.map((s) => s.polygons.flatMap((p) => map[p]!));
-    if (lists.some((l) => l.some((p) => p > 0xffff))) return null;
+    // Indices and the per-shape count are both 16 bit fields.
+    if (lists.some((l) => l.length > 0xffff || l.some((p) => p > 0xffff))) return null;
     const n = shapes.length;
     const out = new Uint8Array(76 + n * 4 + lists.reduce((t, l) => t + 50 + l.length * 2, 0));
     out.set(bounds.subarray(0, 76 + n * 4));
@@ -708,7 +712,12 @@ export function pcToNeutral(pc: PcModel, opt: PcToPs2Options = {}): { model: Neu
     if (pc.bounds && pc.bounds.length >= 72 && !ootfDebugFlag('OOTF_SYNTH_BOUNDS')) {
         bounds = new Uint8Array(8 + pc.bounds.length);
         bounds.set(pc.bounds, 8);
-        bounds = remapObbPolygons(bounds, polyMap) ?? bounds;
+        const remapped = remapObbPolygons(bounds, polyMap);
+        if (!remapped && !warnedObbRemap) {
+            warnedObbRemap = true;
+            console.warn(`model ${pc.name}: collision polygon lists could not be remapped (kept as authored)`);
+        }
+        bounds = remapped ?? bounds;
     }
     return {
         model: {

@@ -52,6 +52,8 @@ export interface TerrainBlobOptions {
     outside?: 'any' | 'none';
     /** Most textures per chunk before the chunk is split in two (default {@link MAX_CHUNK_TEXTURES}; 0 = never split). */
     maxChunkTextures?: number;
+    /** Filled by the writer: chunks that still listed more than the limit and had textures dropped from their blend. */
+    stats?: { reducedChunks: number };
 }
 
 /** Cell rectangle of a chunk: x0..x1 and z0..z1 are vertex indices, so the chunk covers cells x0..x1-1 and z0..z1-1. */
@@ -151,6 +153,7 @@ export function buildPs2TerrainBlob(layer: TerrainLayer, opts: TerrainBlobOption
     const keptRefsOf = (r: ChunkRect): number[] => {
         const refs = refsOf(r);
         if (maxTex <= 0 || refs.length <= maxTex) return refs;
+        if (opts.stats) opts.stats.reducedChunks++;
         const own = new Set<number>();
         for (let z = r.z0; z < r.z1; z++) for (let x = r.x0; x < r.x1; x++) own.add(tex(x, z));
         const uses = new Map<number, number>();

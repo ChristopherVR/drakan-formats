@@ -724,6 +724,9 @@ export function dominantTexture(layers: readonly TerrainLayer[]): number {
     return best;
 }
 
+/** The reduced-chunk warning is printed once per session. */
+let warnedReducedChunks = false;
+
 /**
  * Inline-blob builder for converted layers. Verified in the game (docs/journal/2026-10-31/ootf-ingame.md): the engine
  * draws regenerated blobs only when `levelTag` equals the template level's (0x18 for LEVEL1NA; 0x16 drew just some
@@ -736,7 +739,15 @@ export const ps2BlobBuilder = (levelTag: number): BlobBuilder => {
         let plan = plans.get(list);
         if (!plan) plans.set(list, (plan = planTerrainSlots(list)));
         const s = plan.get(L.index);
-        return buildPs2TerrainBlob(L, { seq: s?.seq ?? 1, levelTag, slot: s });
+        const stats = { reducedChunks: 0 };
+        const blob = buildPs2TerrainBlob(L, { seq: s?.seq ?? 1, levelTag, slot: s, stats });
+        if (stats.reducedChunks > 0 && !warnedReducedChunks) {
+            warnedReducedChunks = true;
+            console.warn(
+                `terrain layer ${L.index}: ${stats.reducedChunks} chunk(s) use more than 8 textures; some blends were dropped to stay within the engine limit`,
+            );
+        }
+        return blob;
     };
 };
 
