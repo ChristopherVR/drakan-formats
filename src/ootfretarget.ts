@@ -236,6 +236,8 @@ export interface RetargetAnimOptions extends ConvertAnimOptions {
      * bind hand is open, so a retargeted scene clip left her sword hand open; the native armed clips curl the fingers.
      */
     holdPose?: ReadonlyMap<number, readonly [number, number, number, number]>;
+    /** Extra joint pairs (PS2 joint -> PC joint) for target joints the name match left alone (`leafFramePairs`). */
+    pairs?: ReadonlyMap<number, number>;
 }
 
 /** PS2 absolute parent-relative tracks -> another PS2 bind skeleton, preserving each source key and timing. */
@@ -461,6 +463,12 @@ export function retargetCreature(
     const src = buildRig(pcSkeleton, 0);
     const dst = buildRig(ps2Skeleton, 0);
     const match = matchJoints(src, dst);
+    for (const [d, s] of opt.pairs ?? []) {
+        if (match.map[d]! >= 0 || match.map.includes(s)) continue;
+        match.map[d] = s;
+        match.how[d] = 'frame';
+        match.matched++;
+    }
     const srcSize = rigSize(src);
     const scale = opt.scale ?? (srcSize > 1e-9 ? rigSize(dst) / srcSize : 1);
     const channels = opt.channels ?? ps2Skeleton.channels.length;
@@ -559,4 +567,86 @@ export function retargetCreatureAssets(input: RetargetAssetsInput, opt: Retarget
     }
     out.reason = `PS2 model ${choice.id}: ${choice.match.matched} joints matched (${(choice.sourceCoverage * 100).toFixed(0)}% of the PC rig)`;
     return out;
+}
+
+// ------------------------------------------------------------------------------------------------ channel table
+
+/**
+ * Attachment frames (leaf joints that carry a channel, such as the weapon hands) the joint match leaves unpaired because the
+ * two games name them differently: each unmatched PC channel leaf is paired with the nearest unmatched PS2 channel leaf once
+ * the PC rig is scaled to the PS2 one. Returns PS2 joint -> PC joint (feed it to `RetargetAnimOptions.pairs`).
+ */
+export function leafFramePairs(pcSkeleton: Skeleton, ps2Skeleton: Skeleton): Map<number, number> {
+    const src = buildRig(pcSkeleton, 0);
+    const dst = buildRig(ps2Skeleton, 0);
+    const match = matchJoints(src, dst);
+    const usedSrc = new Set(match.map.filter((s) => s >= 0));
+    const sp = bindPositions(src);
+    const dp = bindPositions(dst);
+    const scale = rigSize(src) > 1e-9 ? rigSize(dst) / rigSize(src) : 1;
+    const leaf = (r: Rig, j: number): boolean => !r.parents.includes(j);
+    const free = new Set(ps2Skeleton.channels.map((c) => c.joint).filter((j) => match.map[j]! < 0 && leaf(dst, j)));
+    const out = new Map<number, number>();
+    for (const c of pcSkeleton.channels) {
+        const s = c.joint;
+        if (usedSrc.has(s) || !leaf(src, s) || [...out.values()].includes(s)) continue;
+        let best = -1;
+        let bestD = Infinity;
+        for (const d of free) {
+            const dist = Math.hypot(...[0, 1, 2].map((k) => dp[d * 3 + k]! - sp[s * 3 + k]! * scale));
+            if (dist < bestD) {
+                bestD = dist;
+                best = d;
+            }
+        }
+        if (best >= 0) {
+            out.set(best, s);
+            free.delete(best);
+        }
+    }
+    return out;
+}
+
+export interface ChannelTableRow {
+    pcChannel: number;
+    pcJoint: string;
+    /** The PS2 channel the scene's attach and clip actions use instead, or -1 when the PS2 joint has no channel. */
+    ps2Channel: number;
+    ps2Joint: string;
+    /** 'joint' (the retarget's joint pair by name, side and part, tree), 'frame' (a leaf attach frame paired by position) or 'none'. */
+    how: 'joint' | 'frame' | 'none';
+}
+
+/**
+ * PC scene channel index -> PS2 channel index for a PC creature played on another PS2 rig (a scene Wartok on the disc Wartok).
+ * A channel's joint is paired with a PS2 joint exactly as the retarget pairs them (`matchJoints` plus `leafFramePairs`), and the
+ * PS2 channel on that joint is the answer. Scene attach and animation actions address skeleton channels by index, so they are
+ * rewritten through this table (`ootfseq.ts` `remapChannel`).
+ */
+export function creatureChannelTable(pcSkeleton: Skeleton, ps2Skeleton: Skeleton): ChannelTableRow[] {
+    const src = buildRig(pcSkeleton, 0);
+    const dst = buildRig(ps2Skeleton, 0);
+    const match = matchJoints(src, dst);
+    const pairs = leafFramePairs(pcSkeleton, ps2Skeleton);
+    const ps2ByJoint = new Map<number, number>();
+    ps2Skeleton.channels.forEach((c, i) => {
+        if (!ps2ByJoint.has(c.joint)) ps2ByJoint.set(c.joint, i);
+    });
+    return pcSkeleton.channels.map((c, pcChannel) => {
+        const pcJoint = src.names[c.joint] ?? '';
+        let how: ChannelTableRow['how'] = 'joint';
+        let partner = match.map.findIndex((s) => s === c.joint);
+        if (partner < 0) {
+            partner = [...pairs].find(([, s]) => s === c.joint)?.[0] ?? -1;
+            how = 'frame';
+        }
+        const ps2Channel = partner >= 0 ? (ps2ByJoint.get(partner) ?? -1) : -1;
+        return {
+            pcChannel,
+            pcJoint,
+            ps2Channel,
+            ps2Joint: partner >= 0 ? (dst.names[partner] ?? '') : '',
+            how: ps2Channel < 0 ? 'none' : how,
+        };
+    });
 }

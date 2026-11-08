@@ -27,6 +27,8 @@ export interface Ps2ModelSubstitution {
     why: string;
     /** Off unless the user turns it on (`Ps2ModelSwapOptions.on`), with the reason in `why`. */
     defaultOff?: boolean;
+    /** A scene-only prop (engine class 17) shown with the disc creature's model and rig; its scene clips are retargeted. */
+    scene?: boolean;
 }
 
 const tock = (pc: string, ps2: string, label: string): Ps2ModelSubstitution => ({
@@ -35,6 +37,14 @@ const tock = (pc: string, ps2: string, label: string): Ps2ModelSubstitution => (
     ps2,
     label,
     why: 'The Drakan 2 Wartok of the same armour: Drakan 2 ships the Order of the Flame troll as this creature (same skeleton).',
+});
+const sceneTock = (pc: string, ps2: string, label: string): Ps2ModelSubstitution => ({
+    category: 'enemies',
+    ootf: pc,
+    ps2,
+    label,
+    scene: true,
+    why: 'The cut-scene Wartok (a prop only scenes move) shown with the Drakan 2 Wartok model and rig of the same armour; its scene clips are retargeted onto the disc rig and its scene attach points follow the disc joints.',
 });
 const orc = (pc: string, ps2: string, label: string): Ps2ModelSubstitution => ({
     category: 'enemies',
@@ -58,6 +68,9 @@ export const DEFAULT_PS2_MODEL_SUBSTITUTIONS: readonly Ps2ModelSubstitution[] = 
     tock('Troll Chain defense side attack', 'ChainTock : Flank', 'Chain Wartok (flanker)'),
     tock('Troll Plate', 'PlateTock : Center', 'Plate Wartok'),
     tock('Troll Plate defense side attack', 'PlateTock : Flank', 'Plate Wartok (flanker)'),
+    sceneTock('Wartock Leather', 'LeatherWartock : Center', 'Scene Leather Wartok'),
+    sceneTock('Wartock Chain', 'ChainTock : Center', 'Scene Chain Wartok'),
+    sceneTock('Wartock Plate', 'PlateTock : Center', 'Scene Plate Wartok'),
     orc('Orc Leather (purple)', 'Purple Orc Center', 'Purple orc'),
     orc('Orc Plate (yellow)', 'Yellow Orc : Center', 'Yellow orc'),
     {
@@ -178,6 +191,8 @@ export interface Ps2ModelPlan {
     enemyOff(name: string): boolean;
     /** The Drakan 2 weapon class name whose model replaces this PC weapon's, or null. */
     weapon(name: string): Ps2ModelSubstitution | null;
+    /** The Drakan 2 class an enemy row names for this PC class (scene-only props use its model and rig), or null. */
+    enemyTarget(name: string): string | null;
 }
 
 export function planPs2Models(o: Ps2ModelSwapOptions = {}): Ps2ModelPlan {
@@ -192,6 +207,10 @@ export function planPs2Models(o: Ps2ModelSwapOptions = {}): Ps2ModelPlan {
     return {
         enemy: (name) => (on.get(modelKey(name))?.category === 'enemies' ? anim : null),
         enemyOff: (name) => all.has(modelKey(name)) && on.get(modelKey(name))?.category !== 'enemies',
+        enemyTarget: (name) => {
+            const r = on.get(modelKey(name));
+            return r?.category === 'enemies' ? r.ps2 : null;
+        },
         weapon: (name) => {
             const r = on.get(modelKey(name));
             return r?.category === 'weapons' ? r : null;

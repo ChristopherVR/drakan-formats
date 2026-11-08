@@ -21,7 +21,11 @@ describe('Drakan 2 model table', () => {
             expect(['enemies', 'weapons']).toContain(r.category);
             expect(r.why.length).toBeGreaterThan(10);
             expect(`${r.label} ${r.why}`).not.toMatch(/—/);
-            if (r.category === 'enemies' && modelKey(r.ootf) !== modelKey(r.ps2))
+            if (r.scene) {
+                // a scene prop names a disc creature that a gameplay row already plays
+                expect(DEFAULT_PS2_MODEL_SUBSTITUTIONS.some((g) => !g.scene && g.ps2 === r.ps2)).toBe(true);
+                expect(planPs2Models().enemyTarget(r.ootf)).toBe(r.ps2);
+            } else if (r.category === 'enemies' && modelKey(r.ootf) !== modelKey(r.ps2))
                 expect(PC_CLASS_ALIASES.get(modelKey(r.ootf))).toBe(modelKey(r.ps2));
         }
     });
@@ -31,7 +35,16 @@ describe('Drakan 2 model table', () => {
         expect(all.some((r) => r.ootf === 'Troll Leather')).toBe(true);
         expect(all.some((r) => r.ootf === 'Scavenger')).toBe(true);
         expect(effectiveModelSubstitutions({ off: ['scavenger'] }).some((r) => r.ootf === 'Scavenger')).toBe(false);
-        const table = [{ category: 'enemies' as const, ootf: 'Demo', ps2: 'Demo', label: 'Demo', why: 'a default-off row', defaultOff: true }];
+        const table = [
+            {
+                category: 'enemies' as const,
+                ootf: 'Demo',
+                ps2: 'Demo',
+                label: 'Demo',
+                why: 'a default-off row',
+                defaultOff: true,
+            },
+        ];
         expect(effectiveModelSubstitutions({ table }).length).toBe(0); // default-off rows stay off
         expect(effectiveModelSubstitutions({ table, on: ['demo'] }).length).toBe(1);
         expect(effectiveModelSubstitutions({ enabled: false })).toEqual([]);
@@ -58,12 +71,24 @@ describe('Drakan 2 model table', () => {
     });
 
     it('reads user edits', () => {
-        const demo = [{ category: 'enemies' as const, ootf: 'Scavenger', ps2: 'Scavenger', label: 'S', why: 'default-off demo row', defaultOff: true }];
-        const o = ps2ModelSwapFromEdits([
-            { ootf: 'Mace', ps2: null },
-            { ootf: 'Scavenger', ps2: 'Scavenger' },
-            { ootf: 'Flame Sword', ps2: 'Fire Blade', label: 'Flame sword' },
-        ], { table: demo });
+        const demo = [
+            {
+                category: 'enemies' as const,
+                ootf: 'Scavenger',
+                ps2: 'Scavenger',
+                label: 'S',
+                why: 'default-off demo row',
+                defaultOff: true,
+            },
+        ];
+        const o = ps2ModelSwapFromEdits(
+            [
+                { ootf: 'Mace', ps2: null },
+                { ootf: 'Scavenger', ps2: 'Scavenger' },
+                { ootf: 'Flame Sword', ps2: 'Fire Blade', label: 'Flame sword' },
+            ],
+            { table: demo },
+        );
         expect(o.off).toEqual(['Mace']);
         expect(o.on).toEqual(['Scavenger']);
         expect(o.extra).toEqual([

@@ -46,7 +46,7 @@ import {
 } from './ootfsound.ts';
 import { applyCulling, planLevelCulling, sceneFileKey, type LevelCulling } from './ootfcull.ts';
 import { carryCreatures, type CarrierRig } from './ootfcarry.ts';
-import type { PcSequence, PlayerGround } from './ootfseq.ts';
+import type { PcSeqActor, PcSequence, PlayerGround } from './ootfseq.ts';
 import { planShellTrims } from './ootfshell.ts';
 import { convertStompPlayers, pcStompPlayer } from './ootfstomp.ts';
 import {
@@ -137,13 +137,27 @@ import {
 } from './ootfclassrefs.ts';
 import { CELL_SIZE, LVL_TYPE_LAYERS, parsePs2Terrain, terrainGroundBelow, terrainHeightAt } from './terrain.ts';
 import { odbStemForDependency } from './odb.ts';
-import { animName, parsePs2Anim, parseSkeleton, ps2AnimFlags, writePs2Anim, type PcAnim, type Skeleton } from './ootfanim.ts';
+import {
+    animName,
+    parsePs2Anim,
+    parseSkeleton,
+    ps2AnimFlags,
+    writePs2Anim,
+    type PcAnim,
+    type Skeleton,
+} from './ootfanim.ts';
 import { buildRig, localToWorld } from './skeleton.ts';
 import { bindBasis, convertPcAnimToPs2 } from './ootfcreature.ts';
 import { sampleClip } from './anim.ts';
 import { MOD_CHARACTER } from './model.ts';
 import { SSD_SEQUENCE } from './resources.ts';
-import { chooseRetargetTarget, retargetCreature } from './ootfretarget.ts';
+import {
+    chooseRetargetTarget,
+    creatureChannelTable,
+    leafFramePairs,
+    matchJoints,
+    retargetCreature,
+} from './ootfretarget.ts';
 import {
     applyMapOverride,
     classFieldIndex,
@@ -593,6 +607,9 @@ export async function convertOotfLevels(
     // Planned class key -> source clips actually written for its compatible native target rig.
     const sequenceRetargetMaps = new Map<string, Map<number, number>>();
     const player = playerClipBuilder(ps2);
+    // Scene-only Wartoks (rfl 17 props cloned from the Lil' Goblin) shown with the disc Wartok model and rig (ootfps2model.ts).
+    const sceneTocks = new Map<OdbClass, SceneTock>();
+    const sceneClips = discClipWriter(adbOf);
     /** PC classes whose converted model is cloned instead of name-mapping them to a PS2 class with a foreign rig. */
     const convertOwn = new Set<OdbClass>();
 
@@ -815,6 +832,76 @@ export async function convertOotfLevels(
                 }
                 res.warnings.push(...retargetNotes);
             }
+            if (opt.models !== false && hostOk) {
+                for (const i of input) {
+                    const target = i.cls.rflClass === 17 ? modelSwap.enemyTarget(i.cls.name) : null;
+                    if (!target) continue;
+                    const note = (why: string): number => retargetNotes.push(`scene ${i.cls.name}: ${why}`);
+                    const ow = ownerOf.get(i.cls);
+                    const m = i.cls.model;
+                    let hit: { odb: Ps2OdbIn; cls: OdbClass } | undefined;
+                    for (const odb of ps2Odbs)
+                        for (const c of odb.classes.values())
+                            if (!hit && c.model && modelKey(c.name) === modelKey(target)) hit = { odb, cls: c };
+                    const mStem = hit?.cls.model
+                        ? containerStem(hit.odb.file.replace(/\.ODB$/i, ''), hit.cls.model.db)
+                        : null;
+                    const rec = mStem ? modOf(mStem)?.find(0x0208, hit!.cls.model!.id) : undefined;
+                    const adb = mStem ? adbOf(mStem) : undefined;
+                    const src = ow && m ? await builder.creatureSource(ow, m.db, m.id) : null;
+                    if (!hit || !mStem || !rec || !adb || !src) {
+                        note(`kept the PC model (no disc ${target} rig or no PC rig)`);
+                        continue;
+                    }
+                    const sk = parseSkeleton(await modOf(mStem)!.readRaw(rec), 'ps2');
+                    if (!chooseRetargetTarget(src.skeleton, [{ id: hit.cls.model!.id, skeleton: sk }])) {
+                        note(`kept the PC model (fewer than half of its joints match ${target})`);
+                        continue;
+                    }
+                    const names = buildRig(sk, 0).names;
+                    const match = matchJoints(buildRig(src.skeleton, 0), buildRig(sk, 0));
+                    const pairs = leafFramePairs(src.skeleton, sk);
+                    // Disc joints with no PC partner take a native Wartok pose (first key of its idle), not the bind pose.
+                    const native = await nativePose(adb, sk, ['idle', 'randomidle', 'walk']);
+                    const holdPose = new Map<number, readonly [number, number, number, number]>();
+                    match.map.forEach((s, d) => {
+                        const q = native.get(d);
+                        if (s < 0 && !pairs.has(d) && q) holdPose.set(d, q);
+                    });
+                    const floor = Math.max(0, ...builder.animEntries().map((e) => e.id)) + 1;
+                    const r = retargetCreature(src.skeleton, sk, src.anims, {
+                        holdPose,
+                        pairs,
+                        worldJoints: [...pairs.keys()],
+                    });
+                    const clips = new Map<number, number>();
+                    for (const a of r.anims) clips.set(a.id, sceneClips.put(mStem, floor, a.anim));
+                    const table = creatureChannelTable(src.skeleton, sk);
+                    const channels = new Map<number, number>();
+                    for (const row of table) if (row.ps2Channel >= 0) channels.set(row.pcChannel, row.ps2Channel);
+                    const bounds = splitClassRecord(hit.odb.raw!(hit.cls.id)!).body.slice(16, 80);
+                    sceneTocks.set(i.cls, {
+                        stem: mStem,
+                        modelId: hit.cls.model!.id,
+                        joints: names.length,
+                        clips,
+                        channels,
+                        bounds,
+                    });
+                    modelSwapsUsed.set(modelKey(i.cls.name), {
+                        category: 'enemies',
+                        ootf: i.cls.name.trim(),
+                        ps2: hit.cls.name.trim(),
+                        label: `${i.cls.name.trim()} as ${hit.cls.name.trim()} (scene)`,
+                    });
+                    note(
+                        `${hit.cls.name.trim()} model ${hit.cls.model!.id} of ${mStem}: ${match.matched + pairs.size}/${names.length} joints driven, ` +
+                            `${native.size ? holdPose.size : 0} on a native pose, ${clips.size} clips (${r.skipped.length} skipped), ` +
+                            `channels ${table.map((x) => `${x.pcChannel}:${x.pcJoint}->${x.ps2Channel}:${x.ps2Joint}(${x.how})`).join(' ')}`,
+                    );
+                }
+                res.warnings.push(...retargetNotes.filter((n) => n.startsWith('scene ')));
+            }
             const modelFiles = new Set<string>();
             const crossOn = (opt.crossOdb ?? dbgEnv0['OOTF_XODB'] !== '0') && hostOk;
             const crossOnly = dbgEnv0['OOTF_XODB_ONLY'] ? dbgEnv0['OOTF_XODB_ONLY'].split(',') : null;
@@ -855,6 +942,10 @@ export async function convertOotfLevels(
                 },
                 modelBounds: (id, file, db) => {
                     const stem = file.replace(/\.ODB$/i, '');
+                    const disc = [...sceneTocks.values()].find(
+                        (t) => t.modelId === id && t.stem === containerStem(stem, db),
+                    );
+                    if (disc) return disc.bounds;
                     // Cross-ODB models have their own id namespace. A coincident root-builder id is another model.
                     const destination = stem !== hostStem && db === 0 ? crossBuilders.get(stem) : builder;
                     return dbgEnv0['OOTF_NO_BOUNDS'] ? destination?.skeletonBounds(id) : destination?.modelBounds(id);
@@ -887,6 +978,8 @@ export async function convertOotfLevels(
                       }
                     : undefined,
                 mapAnimFor: (cls) => {
+                    const tock = sceneTocks.get(cls);
+                    if (tock) return tock.clips;
                     const ow = ownerOf.get(cls);
                     return ow && cls.model
                         ? (builder.mapAnimRef(cls.model.db, cls.model.id, ow) ?? undefined)
@@ -896,6 +989,13 @@ export async function convertOotfLevels(
                     ? (cls, file) => {
                           const ow = ownerOf.get(cls);
                           const fStem = file.replace(/\.ODB$/i, '');
+                          // A scene Wartok is shown with the disc Wartok model, named through the ODB's dependency on its MOD.
+                          const tock = sceneTocks.get(cls);
+                          if (tock) {
+                              for (let d = 0; d < 64; d++)
+                                  if (containerStem(fStem, d) === tock.stem) return { id: tock.modelId, db: d };
+                              return null;
+                          }
                           // The shared builder owns skeletons and clips. A class in another ODB must
                           // reference that model through its dependency, even if it has its own static MOD.
                           if (
@@ -940,6 +1040,8 @@ export async function convertOotfLevels(
                 return st && c.model ? tplJoints.get(`${st}#${c.model.id}`) : undefined;
             };
             planOpts.modelJoints = (cls) => {
+                const tock = sceneTocks.get(cls);
+                if (tock) return tock.joints;
                 const ow = ownerOf.get(cls);
                 const id = ow && cls.model ? builder.mapModelRef(cls.model.db, cls.model.id, ow) : null;
                 return id === null ? undefined : builder.report.creatures.find((c) => c.id === id)?.joints;
@@ -1490,16 +1592,24 @@ export async function convertOotfLevels(
             }
             let tpl: { odb: Ps2OdbIn; id: number; cls: OdbClass } | undefined;
             for (const odb of ps2Odbs)
-                for (const [id, cls] of odb.classes) if (!tpl && cls.data && isMapClass(cls) && odb.raw?.(id)) tpl = { odb, id, cls };
+                for (const [id, cls] of odb.classes)
+                    if (!tpl && cls.data && isMapClass(cls) && odb.raw?.(id)) tpl = { odb, id, cls };
             if (!tpl) {
                 res.warnings.push('level maps: the template has no Map class; levels keep its map');
                 return;
             }
             const overrides: Readonly<Record<string, LevelMapOverride>> = opt.levelMaps || {};
-            let top = Math.max(0, ...tpl.odb.classes.keys(), ...plan.synthesized.filter((x) => x.file === tpl.odb.file).map((x) => x.classId));
+            let top = Math.max(
+                0,
+                ...tpl.odb.classes.keys(),
+                ...plan.synthesized.filter((x) => x.file === tpl.odb.file).map((x) => x.classId),
+            );
             for (const pc of pcs) {
                 if (isOotfArenaLevel(pc)) continue;
-                const spec = applyMapOverride(rrcReader ? await defaultLevelMap(pc, rrcReader) : null, overrides[pc.path.toLowerCase()]);
+                const spec = applyMapOverride(
+                    rrcReader ? await defaultLevelMap(pc, rrcReader) : null,
+                    overrides[pc.path.toLowerCase()],
+                );
                 if (!spec) continue;
                 const classId = ++top;
                 const name = `OotF Map ${pcLevelName(pc.header)}`.slice(0, 40);
@@ -1712,13 +1822,15 @@ export async function convertOotfLevels(
                             ? {
                                   groundAt: (x, z, y) => terrainGroundBelow(pc.terrain, x, z, y),
                                   lowestJoint: (ref, t) => {
-                                      const a = ref >>> 16 === 0 ? playerScene.source.anims.get(ref & 0xffff) : undefined;
+                                      const a =
+                                          ref >>> 16 === 0 ? playerScene.source.anims.get(ref & 0xffff) : undefined;
                                       if (!a) return undefined;
                                       let ps2 = lowPose.get(a.name);
                                       if (!ps2) lowPose.set(a.name, (ps2 = convertPcAnimToPs2(a, bindBasis(lowRig))));
                                       const w = localToWorld(lowRig, sampleClip(lowRig, ps2, t));
                                       let low = Infinity;
-                                      for (let j = 0; j < lowRig.jointCount; j++) low = Math.min(low, w[j * 12 + 10]! * 2048);
+                                      for (let j = 0; j < lowRig.jointCount; j++)
+                                          low = Math.min(low, w[j * 12 + 10]! * 2048);
                                       return low;
                                   },
                               }
@@ -1745,16 +1857,24 @@ export async function convertOotfLevels(
                     const conv = await convertPcSequences(ssdReader, {
                         maps: {
                             objectIdMap: sceneObjectIds,
-                            channelMapForActor: (_actor, targetId) =>
-                                targetId === playerId ? playerScene?.channels : undefined,
+                            channelMapForActor: (actor, targetId) =>
+                                targetId === playerId ? playerScene?.channels : tockOf(actor, targetId)?.channels,
                             // The PS2 Rynn class has a Jaw Channel: her speech gets the lip-sync bit (tracks: ootfsound.ts).
                             lipSyncForActor: (_actor, targetId) => targetId === playerId,
+                            endIdleForActor: (_actor, targetId) =>
+                                targetId === playerId ? playerScene?.idle : undefined,
                             animMapForActor: (actor, targetId) => {
                                 // The PS2 player is the PS2 Rynn whatever the PC class's model: its clips live in its own ADB.
                                 if (targetId === playerId && player.rig) {
                                     const clips = playerScene?.clips;
                                     return { get: (ref) => (ref >>> 16 === 0 ? clips?.get(ref & 0xffff) : undefined) };
                                 }
+                                // A scene Wartok on the disc rig plays its retargeted clips (also through the channel table above).
+                                const tock = tockOf(actor, targetId);
+                                if (tock)
+                                    return {
+                                        get: (ref) => (ref >>> 16 === 0 ? tock.clips.get(ref & 0xffff) : undefined),
+                                    };
                                 // Prefer the explicit source identity, but only when it resolves to this target.
                                 // Assigned/current actors have no source object id; their fallback ids are supplied
                                 // by actorId() above and are actual mapped level object ids, not sentinel refs.
@@ -1829,14 +1949,16 @@ export async function convertOotfLevels(
             await stage(`singletons ${pc.path}`, async () => {
                 ensureSingletons(parts, pc, tplList.objects, classes);
                 const lm = levelMaps.get(pc.path);
-                const props = lm && parts.objects.objects.find((o) => classes.get(o.dbIndex)?.get(o.classId)?.rflClass === 54);
+                const props =
+                    lm && parts.objects.objects.find((o) => classes.get(o.dbIndex)?.get(o.classId)?.rflClass === 54);
                 if (lm && props) {
                     const cur = objectParamSpecs(props);
                     const spec = cur.find((x) => x.name.trim() === 'Map Object');
                     const fields = classes.get(props.dbIndex)?.get(props.classId)?.fields;
                     const j = fields?.findIndex((f) => f.name.trim() === 'Map Object') ?? -1;
                     if (spec) spec.value = lm.synth.classId;
-                    else if (fields && j >= 0) cur.push({ fieldIndex: j, type: fields[j]!.type, name: 'Map Object', value: lm.synth.classId });
+                    else if (fields && j >= 0)
+                        cur.push({ fieldIndex: j, type: fields[j]!.type, name: 'Map Object', value: lm.synth.classId });
                     if (spec || j >= 0) setObjectParams(parts.objects, props.id, cur);
                     else res.warnings.push(`${title}: Level Properties has no Map Object field`);
                 }
@@ -1886,7 +2008,6 @@ export async function convertOotfLevels(
                     detectorClass: dc,
                     levelPath: ootfLevelKey(pc),
                     initialPcId: res.music ? pcInitialMusicId(pc) : 0,
-                            endIdleForActor: (_actor, targetId) => (targetId === playerId ? playerScene?.idle : undefined),
                     loopPos: rynn ? [...rynn.pos] : [0, 0, 0],
                     trackIds: res.music?.ids,
                 });
@@ -1928,7 +2049,9 @@ export async function convertOotfLevels(
                         return db === null ? null : ((db << 16) | t.classId) >>> 0;
                     },
                     warnings: res.warnings,
-                    ...(levelMaps.get(pc.path) ? { mapPixel: (x: number, z: number) => mapPixelOf(levelMaps.get(pc.path)!.spec, x, z) } : {}),
+                    ...(levelMaps.get(pc.path)
+                        ? { mapPixel: (x: number, z: number) => mapPixelOf(levelMaps.get(pc.path)!.spec, x, z) }
+                        : {}),
                 });
                 if (rep.plates || rep.bossHeads || rep.markers || rep.messengers || rep.questLocks)
                     console.warn(
@@ -2525,14 +2648,17 @@ export async function convertOotfLevels(
             const dir = ps2.dbFiles?.get(stem)?.dir;
             const hf = ps2.hostFiles?.get(stem);
             if (!dir || !hf) {
-                res.warnings.push(`level maps: ${stem} has no own TXD to hold the pictures; levels keep the template's map`);
+                res.warnings.push(
+                    `level maps: ${stem} has no own TXD to hold the pictures; levels keep the template's map`,
+                );
                 for (const v of levelMaps.values()) v.synth.cls = { ...v.synth.cls };
                 return;
             }
             const path = `files/${dir}/${stem}.TXD`;
             const base = res.files[path] ? await SrscReader.fromBytes(res.files[path]!) : hf.txd;
             const entries: Ps2Entry[] = [];
-            for (const e of base.entries) entries.push({ type: e.type, id: e.id, sub: e.sub, data: await base.readRaw(e) });
+            for (const e of base.entries)
+                entries.push({ type: e.type, id: e.id, sub: e.sub, data: await base.readRaw(e) });
             let next = maxId(base, 0x0040) + 1;
             for (const v of levelMaps.values()) {
                 const tex = encodePs2Texture(mapTextureImage(v.spec.image), {
@@ -2569,6 +2695,7 @@ export async function convertOotfLevels(
     });
     Object.assign(res.files, ssdFiles);
     Object.assign(res.files, await player.files());
+    await sceneClips.files(res.files);
     return res;
 }
 
@@ -2644,6 +2771,15 @@ function playerClipBuilder(ps2: OotfPs2Context) {
     return {
         get rig(): boolean {
             return !!mod && !!adb;
+        },
+        /** Id of a native clip of the player's ADB by name (after `add`), for scene ends that hand Rynn back to the game. */
+        async nativeClip(name: string): Promise<number | undefined> {
+            if (!skeleton || !adb) return undefined;
+            for (const id of skeleton.animIds) {
+                const info = adb.find(0x0501, id);
+                if (info && animName(await adb.readRaw(info)).toLowerCase() === name) return id;
+            }
+            return undefined;
         },
         /** PC channel -> PS2 channel by joint name (after `add`, which loads the PS2 rig). */
         channelMap(pcSkeleton: Skeleton): Map<number, number> | undefined {
@@ -2785,15 +2921,6 @@ export type { ConversionReport };
 /** Dragon.rrc strings of the install (`<0xNNNN>` references), empty when the file is missing or unreadable. */
 async function loadRrcStrings(
     src: PcFileSource,
-        /** Id of a native clip of the player's ADB by name (after `add`), for scene ends that hand Rynn back to the game. */
-        async nativeClip(name: string): Promise<number | undefined> {
-            if (!skeleton || !adb) return undefined;
-            for (const id of skeleton.animIds) {
-                const info = adb.find(0x0501, id);
-                if (info && animName(await adb.readRaw(info)).toLowerCase() === name) return id;
-            }
-            return undefined;
-        },
 ): Promise<{ path: string | null; others: string[]; strings: Map<number, string> }> {
     const { path, others } = pickRrcPath(await src.list());
     try {
@@ -2901,4 +3028,91 @@ export function placedCorpsePose(
     if (spont >= 0 && fieldIsIndirect(cls.fields[spont]!.type))
         specs.push({ fieldIndex: spont, type: cls.fields[spont]!.type, name: cls.fields[spont]!.name, value: [] });
     return specs;
+}
+
+/** A scene-only Wartok class shown with the disc Wartok model (`ootfps2model.ts` scene rows). */
+interface SceneTock {
+    /** MOD / ADB stem that holds the disc model and gets the retargeted scene clips (NPCS). */
+    stem: string;
+    modelId: number;
+    joints: number;
+    /** PC clip id -> new clip id in the disc ADB (every clip of the PC model, retargeted onto the disc rig). */
+    clips: Map<number, number>;
+    /** PC scene channel index -> disc rig channel index (`creatureChannelTable`). */
+    channels: Map<number, number>;
+    /** The disc class's 64 byte model bounds. */
+    bounds: Uint8Array;
+}
+
+/** First key of the first clip of the rig (by name, in order of preference) for every joint: a native resting pose. */
+async function nativePose(
+    adb: SrscReader,
+    sk: Skeleton,
+    names: readonly string[],
+): Promise<Map<number, [number, number, number, number]>> {
+    const out = new Map<number, [number, number, number, number]>();
+    for (const want of names) {
+        for (const id of sk.animIds) {
+            const info = adb.find(0x0501, id);
+            const data = adb.find(0x0502, id);
+            if (!info || !data) continue;
+            const raw = await adb.readRaw(info);
+            if (animName(raw).toLowerCase() !== want) continue;
+            try {
+                const a = parsePs2Anim(raw, await adb.readRaw(data));
+                a.tracks.forEach((t, d) => {
+                    const k = t.keys[0];
+                    if (k) out.set(d, [k.q[0], k.q[1], k.q[2], k.q[3]]);
+                });
+                return out;
+            } catch {
+                // not a clip of this rig
+            }
+        }
+    }
+    return out;
+}
+
+/**
+ * New clips for disc creatures that scenes drive (the scene Wartoks): fresh ids past the ADB's own and past the converted
+ * creature clips shipped to it (`floor`), as `new/<stem>.ADB/` entries plus the ADB header override (clip count, highest id + 1;
+ * an override already written for the same ADB by the converted clips is extended, not replaced).
+ */
+function discClipWriter(adbOf: (stem: string) => SrscReader | undefined) {
+    const next = new Map<string, number>();
+    const entries = new Map<string, { id: number; info: Uint8Array; data: Uint8Array }[]>();
+    return {
+        put(stem: string, floor: number, anim: Parameters<typeof writePs2Anim>[0]): number {
+            const adb = adbOf(stem);
+            const id =
+                next.get(stem) ??
+                Math.max(
+                    floor,
+                    (adb?.entries ?? []).reduce((m, e) => (e.type === 0x0501 ? Math.max(m, e.id) : m), 0) + 1,
+                );
+            next.set(stem, id + 1);
+            const w = writePs2Anim(anim);
+            const list = entries.get(stem) ?? entries.set(stem, []).get(stem)!;
+            list.push({ id, info: w.info, data: w.data });
+            return id;
+        },
+        async files(into: Record<string, Uint8Array>): Promise<void> {
+            for (const [stem, list] of entries) {
+                const adb = adbOf(stem);
+                if (!adb || !list.length) continue;
+                for (const e of list) {
+                    into[`new/${stem}.ADB/0501_${e.id}_0.bin`] = e.info;
+                    into[`new/${stem}.ADB/0502_${e.id}_0.bin`] = e.data;
+                }
+                const hc = adb.entries.find((e) => e.type === 0x0500);
+                if (!hc) continue;
+                const key = `overrides/${stem}.ADB/0500_${hc.id}_${hc.sub}.bin`;
+                const c = (into[key] ?? (await adb.readRaw(hc))).slice();
+                const dv = new DataView(c.buffer);
+                dv.setUint16(0, dv.getUint16(0, true) + list.length, true);
+                dv.setUint16(4, Math.max(dv.getUint16(4, true), Math.max(...list.map((e) => e.id)) + 1), true);
+                into[key] = c;
+            }
+        },
+    };
 }

@@ -4,6 +4,8 @@ import type { PcAnim, Skeleton, SkelJoint } from '../src/ootfanim.ts';
 import { quatAngle } from '../src/ootfcreature.ts';
 import {
     chooseRetargetTarget,
+    creatureChannelTable,
+    leafFramePairs,
     matchJoints,
     nameKeys,
     retargetCreature,
@@ -351,12 +353,59 @@ describe('PS2 character motion retargeting', () => {
         const match = matchJoints(source, target);
         const plain = retargetPcAnim(pc, source, target, match, { scale: 2 });
         const grip = [0, 0.7071068, 0, 0.7071068] as const;
-        const held = retargetPcAnim(pc, source, target, match, { scale: 2, holdPose: new Map([[3, grip], [1, grip]]) });
+        const held = retargetPcAnim(pc, source, target, match, {
+            scale: 2,
+            holdPose: new Map([
+                [3, grip],
+                [1, grip],
+            ]),
+        });
         expect(held.tracks[3]!.keys).toHaveLength(1);
         expect(quatAngle(held.tracks[3]!.keys[0]!.q, [...grip])).toBeLessThan(1e-6);
         expect(quatAngle(plain.tracks[3]!.keys[0]!.q, [...grip])).toBeGreaterThan(0.1);
         // joint 1 has a partner and is listed: it is held too; joint 2 is not listed and keeps its keys
         expect(held.tracks[1]!.keys).toHaveLength(1);
         expect(quatAngle(held.tracks[2]!.keys.at(-1)!.q, plain.tracks[2]!.keys.at(-1)!.q)).toBeLessThan(1e-6);
+    });
+});
+
+describe('scene creature channel table', () => {
+    // PC: body -> arm -> hand (channel 2 = hand); PS2: body -> spine -> arm -> hand_x, hand_y (same arm, extra joints).
+    const pc = skeleton(['body', 'arm', 'hand'], [-1, 0, 1], [I3, I3, I3]);
+    pc.channels = [
+        { joint: 0, caps: [] },
+        { joint: 2, caps: [] },
+    ] as unknown as Skeleton['channels'];
+    const ps2 = skeleton(['body', 'spine', 'arm', 'hand', 'extra'], [-1, 0, 1, 2, 0], [I3, I3, I3, I3, I3]);
+    ps2.channels = [
+        { joint: 4, caps: [] },
+        { joint: 0, caps: [] },
+        { joint: 3, caps: [] },
+    ] as unknown as Skeleton['channels'];
+
+    it('maps a PC channel to the PS2 channel on the matched joint', () => {
+        const t = creatureChannelTable(pc, ps2);
+        expect(t.map((r) => [r.pcChannel, r.ps2Channel, r.how])).toEqual([
+            [0, 1, 'joint'],
+            [1, 2, 'joint'],
+        ]);
+    });
+
+    it('pairs an unnamed leaf attach frame with the nearest free PS2 leaf', () => {
+        const a = skeleton(['body', 'arm', 'grip_a'], [-1, 0, 1], [I3, I3, I3]);
+        a.channels = [{ joint: 2, caps: [] }] as unknown as Skeleton['channels'];
+        const b = skeleton(['body', 'arm', 'holder'], [-1, 0, 1], [I3, I3, I3]);
+        b.channels = [{ joint: 2, caps: [] }] as unknown as Skeleton['channels'];
+        expect(leafFramePairs(a, b).size).toBe(0); // the tree walk already pairs the only leaf
+        const c = skeleton(['body', 'arm', 'grip_a', 'other'], [-1, 0, 1, 1], [I3, I3, I3, I3]);
+        c.channels = [{ joint: 2, caps: [] }] as unknown as Skeleton['channels'];
+        const d = skeleton(['body', 'arm', 'holder', 'thing'], [-1, 0, 1, 1], [I3, I3, I3, I3]);
+        d.channels = [
+            { joint: 2, caps: [] },
+            { joint: 3, caps: [] },
+        ] as unknown as Skeleton['channels'];
+        const pairs = leafFramePairs(c, d);
+        expect(pairs.size).toBe(1);
+        expect(creatureChannelTable(c, d)[0]!.ps2Channel).toBeGreaterThanOrEqual(0);
     });
 });
