@@ -54,6 +54,11 @@ export interface TerrainBlobOptions {
     maxChunkTextures?: number;
     /** Filled by the writer: chunks that still listed more than the limit and had textures dropped from their blend. */
     stats?: { reducedChunks: number };
+    /**
+     * Write the empty form (no chunks) even when cells are visible. Water layers (type 2): every one of the 14 PAL levels
+     * stores them so (171 of 171 in LEVEL1NA); the engine's water pass draws them from the cells, not from chunks.
+     */
+    noDrawData?: boolean;
 }
 
 /** Cell rectangle of a chunk: x0..x1 and z0..z1 are vertex indices, so the chunk covers cells x0..x1-1 and z0..z1-1. */
@@ -115,7 +120,7 @@ export function buildPs2TerrainBlob(layer: TerrainLayer, opts: TerrainBlobOption
     const flat = (layer.flags & LAYER_FLAG_FLAT) !== 0;
     const outsideAny = (opts.outside ?? (flat ? 'none' : 'any')) === 'any';
     const o = new Out();
-    if (!layer.cellTexLeft.some((t) => !isSpecial(t))) {
+    if (opts.noDrawData || !layer.cellTexLeft.some((t) => !isSpecial(t))) {
         o.u32(0);
         writeNormals(o, layer, flat);
         return o.done();

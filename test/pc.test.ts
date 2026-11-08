@@ -16,6 +16,9 @@ import {
     parsePcObjectList,
     parsePs2Terrain,
     pcDependencyKey,
+    ps2BlobFor,
+    readPs2Blob,
+    splitPs2Terrain,
     ps2ClassTables,
     ps2VertexMask,
     resolvePcPath,
@@ -536,6 +539,29 @@ describe('PC -> PS2 conversion', () => {
         expect(serialized.cellFlags[1]! & 0xc0).toBe(0xc0);
         expect(serialized.cellFlags[2]! & 0xc0).toBe(0);
         expect([...ps2CellFlags(layer, 0)].slice(0, 3)).toEqual([0xff00, 0xffc0, 0xff30]);
+    });
+
+    it('moves water vertex kinds into the PS2 water range and clears them on other layers', async () => {
+        const { pc, h, classes } = await fixture();
+        const floor = pc.terrain[0]!;
+        floor.vertexFlags.fill(0);
+        floor.vertexFlags[0] = 1;
+        floor.vertexFlags[1] = 0x48; // a level colour on a floor: no PS2 counterpart
+        const water = { ...floor, index: 1, id: 8, name: 'water', type: 2, vertexFlags: floor.vertexFlags.slice() };
+        water.vertexFlags[1] = 49; // shallow water 60%
+        water.vertexFlags[2] = 72; // first non-water kind (Alpha Color)
+        water.vertexFlags[3] = 71; // last water kind (Underwater 8)
+        pc.terrain = [floor, water];
+        const r = convertPcLevel(pc, { template: { header: h, classes }, textureFallback: 0x00090042 });
+        expect([...r.terrain[0]!.vertexFlags].every((v) => v === 0)).toBe(true);
+        expect([...r.terrain[1]!.vertexFlags].slice(0, 5)).toEqual([0x41, 0x71, 0, 0x87, 0]);
+        const payload = writePs2Terrain(r.terrain, ps2BlobFor);
+        const parsed = parsePs2Terrain(payload);
+        expect(parsed[1]!.type).toBe(2);
+        expect([...parsed[1]!.vertexFlags].slice(0, 2)).toEqual([0x41, 0x71]);
+        // Water layers carry no chunk draw data (the disc's empty form); the engine's water pass draws them.
+        const blobs = splitPs2Terrain(payload).layers.map((s) => readPs2Blob(payload.subarray(s.defEnd, s.blobEnd)));
+        expect(blobs.map((b) => b.empty)).toEqual([false, true]);
     });
 
     it('writes terrain that the PS2 reader decodes (two layers)', async () => {

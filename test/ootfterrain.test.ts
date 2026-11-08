@@ -4,6 +4,8 @@ import { SrscReader, decodeTxd } from '../src/index.ts';
 import { writePs2Srsc } from '../src/ootfcontainer.ts';
 import { buildPs2Txd, encodePs2Texture } from '../src/ootftex.ts';
 import {
+    PS2_LAVA_TEXTURE,
+    PS2_WATER_TEXTURE,
     TerrainTextureBuilder,
     buildTerrainPoolTxd,
     convertTerrainTextures,
@@ -163,5 +165,72 @@ describe('terrain far textures (the level splat TXD)', () => {
         const b = await TerrainTextureBuilder.create(src, base, 9);
         expect(b.meanOfRef((9 << 16) | 3)).toEqual([180, 20, 30]);
         expect(b.meanOfRef((9 << 16) | 4)).toBeNull();
+    });
+});
+
+/** PC 0x0102 class record: `string name, u16 group, u16 model id, u16 model db, u16 rfl class, u16 icon, fields`. */
+function pcClassRecord(name: string, rfl: number, fields: [type: number, name: string, dword: number][]): Uint8Array {
+    const str = (s: string): number[] => {
+        const n = s.length + 1 + ((s.length + 1) % 2);
+        const out = [...u16(n), ...Array.from(s, (c) => c.charCodeAt(0))];
+        while (out.length < 2 + n) out.push(0);
+        return out;
+    };
+    return Uint8Array.from([
+        ...str(name), ...u16(0), ...u16(0), ...u16(0), ...u16(rfl), ...u16(0),
+        ...u32(fields.length), ...u32(fields.length), ...fields.flatMap((f) => u32(f[2])),
+        ...fields.flatMap((f) => [...u32(f[0]), ...str(f[1])]),
+    ]); // prettier-ignore
+}
+
+describe('liquid terrain textures', () => {
+    const f32 = (v: number): number => new Uint32Array(Float32Array.of(v).buffer)[0]!;
+    const withMaterial = (t: Uint8Array, ref: number): Uint8Array => {
+        const out = t.slice();
+        out.set(u32(ref), 38);
+        return out;
+    };
+    const pcTxd = writePs2Srsc([
+        { type: 0x40, id: 5, sub: 0, data: withMaterial(pcTex24(32, 32, [20, 40, 60]), 1) }, // water
+        { type: 0x40, id: 6, sub: 0, data: withMaterial(pcTex24(32, 32, [200, 60, 0]), 2) }, // lava
+        { type: 0x40, id: 7, sub: 0, data: withMaterial(pcTex24(32, 32, [90, 80, 70]), 3) }, // a ground material
+    ]);
+    const pcOdb = writePs2Srsc([
+        { type: 0x0102, id: 1, sub: 0, data: pcClassRecord('Water', 0x72, [[2, 'Damage (hp/s)', f32(0)]]) },
+        { type: 0x0102, id: 2, sub: 0, data: pcClassRecord('Lava FX', 0x72, [[2, 'Damage (hp/s)', f32(25)]]) },
+        { type: 0x0102, id: 3, sub: 0, data: pcClassRecord('Dirt', 0x4b, [[2, 'Damage (hp/s)', f32(0)]]) },
+    ]);
+    const src: PcFileSource = {
+        read: async (p) => ({ 'lvl/lvl.txd': pcTxd, 'lvl/lvl.odb': pcOdb })[p.toLowerCase()] ?? null,
+        list: async () => [],
+    };
+    const water = { type: 2, cellTexLeft: new Uint32Array([5, 6, 7, 5]) } as unknown as TerrainLayer;
+    const floor = { type: 0, cellTexLeft: new Uint32Array([7, 5]) } as unknown as TerrainLayer;
+    const pc = { path: 'Lvl/Lvl.lvl', header: { dependencies: [] }, terrain: [water, floor] } as unknown as PcLevel;
+    const opaque = { width: 8, height: 8, rgba: new Uint8Array(256).fill(255) };
+    const base = buildPs2Txd(
+        [3, PS2_WATER_TEXTURE, PS2_LAVA_TEXTURE].map((id) => ({ id, body: encodePs2Texture(opaque).body })),
+    );
+
+    it('maps liquid textures of water layers to the native water / lava entries and converts the rest', async () => {
+        const t = await convertTerrainTextures(pc, src, base, 9, { minSize: 0 });
+        expect(t.report.liquids).toBe(2);
+        expect(t.mapTexture(5, pc, water)).toBe((9 << 16) | PS2_WATER_TEXTURE);
+        expect(t.mapTexture(6, pc, water)).toBe((9 << 16) | PS2_LAVA_TEXTURE);
+        // a non-liquid texture on a water layer and a liquid texture painted on a floor are converted pictures
+        const ground = t.mapTexture(7, pc, water)!;
+        const floorWater = t.mapTexture(5, pc, floor)!;
+        expect(ground).toBe(t.mapTexture(7, pc, floor));
+        for (const r of [ground, floorWater])
+            expect([3, PS2_WATER_TEXTURE, PS2_LAVA_TEXTURE]).not.toContain(r & 0xffff);
+        expect(t.mapTexture(6, pc, floor)).toBeNull(); // lava only on the water layer: never converted
+        expect(t.report.converted).toBe(2);
+    });
+
+    it('keeps the picture when the template has no native liquid entry', async () => {
+        const plain = buildPs2Txd([{ id: 3, body: encodePs2Texture(opaque).body }]);
+        const t = await convertTerrainTextures(pc, src, plain, 9, { minSize: 0 });
+        expect(t.report.liquids ?? 0).toBe(0);
+        expect(t.mapTexture(5, pc, water)! & 0xffff).not.toBe(PS2_WATER_TEXTURE);
     });
 });

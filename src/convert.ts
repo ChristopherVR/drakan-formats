@@ -110,8 +110,11 @@ export interface ConvertOptions {
     classOverrides?: ReadonlyMap<string, ClassTarget | null>;
     /** PS2 class that stands in for PC classes without a counterpart (default: drop the object). */
     placeholder?: ClassTarget;
-    /** Texture ref (`id | db << 16`, PC dependency index) -> PS2 ref. Return null to use `textureFallback`. */
-    mapTexture?: (pcRef: number, pc: PcLevel) => number | null;
+    /**
+     * Texture ref (`id | db << 16`, PC dependency index) -> PS2 ref. Return null to use `textureFallback`. `layer` is the
+     * PC layer of the cell (water layers take the native liquid textures, `TerrainTextureBuilder.addLevel`).
+     */
+    mapTexture?: (pcRef: number, pc: PcLevel, layer: TerrainLayer) => number | null;
     /** PS2 ref used for every cell whose texture cannot be mapped (hole and invisible cells stay as they are). */
     textureFallback: number;
     /** Level name written to the header (default: the PC level's own name). */
@@ -508,7 +511,7 @@ function convertLayer(L: TerrainLayer, pc: PcLevel, opt: ConvertOptions, report:
         }
         let m = cache.get(ref);
         if (m === undefined) {
-            m = opt.mapTexture?.(ref, pc) ?? -1;
+            m = opt.mapTexture?.(ref, pc, L) ?? -1;
             cache.set(ref, m);
         }
         if (m === -1 || m === null) {
@@ -529,10 +532,39 @@ function convertLayer(L: TerrainLayer, pc: PcLevel, opt: ConvertOptions, report:
         cellFlags,
         cellTexLeft,
         cellTexRight: cellTexLeft,
-        vertexFlags: new Uint16Array(L.heights.length),
+        vertexFlags: ps2VertexTypes(L),
         vertexMask: ps2VertexMask(L.width, L.height, cellTexLeft),
         source: 'ps2',
     };
+}
+
+/** Layer type of water surfaces (`TerrainLayerDef.type`) on both platforms; 0 floor, 1 ceiling. */
+export const LAYER_TYPE_WATER = 2;
+/**
+ * PC landscape vertex types that are water kinds: the Drakan 1 list is 0 Normal, 1 "Water, Still", 2..25 slow / medium /
+ * fast currents, 26..36 reserved, 37..44 Water Phase, 45..49 Shallow Water 92%..60%, 53..60 Warping Phase, 61..63 Ceiling
+ * Water, 64..71 Underwater 1..8, then 72..75 the Alpha..Gamma level colours.
+ */
+export const PC_VERTEX_WATER_LAST = 71;
+/**
+ * The PS2 list has 64 "Vertex Color" entries after Normal, so a water kind sits 0x40 higher: PS2 water layers use 0x41
+ * (Surdana, Kragmor, Stratos: PC 1, still water) and 0x71 (Andrellian Isles, Ravenshold, Northern Tundra, Valley: PC 49, the
+ * 60% shallow water PC Islands uses). Without a water kind (0, Normal) the player does not swim in a water layer: she walks on its bottom.
+ */
+export const PS2_VERTEX_WATER_BASE = 0x40;
+
+/**
+ * PS2 vertex words (low byte = vertex type) of a converted layer. Water layers keep their PC water kinds moved into the
+ * PS2 water range; everything else stays 0 (PC floors carry no PS2 vertex colours). Journal 2026-11-08/ootf-water.md.
+ */
+export function ps2VertexTypes(L: Pick<TerrainLayer, 'type' | 'vertexFlags' | 'heights'>): Uint16Array {
+    const out = new Uint16Array(L.heights.length);
+    if (L.type !== LAYER_TYPE_WATER) return out;
+    for (let v = 0; v < out.length; v++) {
+        const t = L.vertexFlags[v]! & 0xff;
+        if (t >= 1 && t <= PC_VERTEX_WATER_LAST) out[v] = PS2_VERTEX_WATER_BASE + t;
+    }
+    return out;
 }
 
 /** Default for `ConvertOptions.maxTexturesPerLayer`. */
@@ -769,7 +801,13 @@ export const ps2BlobBuilder = (levelTag: number): BlobBuilder => {
         if (!plan) plans.set(list, (plan = planTerrainSlots(list)));
         const s = plan.get(L.index);
         const stats = { reducedChunks: 0 };
-        const blob = buildPs2TerrainBlob(L, { seq: s?.seq ?? 1, levelTag, slot: s, stats });
+        const blob = buildPs2TerrainBlob(L, {
+            seq: s?.seq ?? 1,
+            levelTag,
+            slot: s,
+            stats,
+            noDrawData: L.type === LAYER_TYPE_WATER,
+        });
         if (stats.reducedChunks > 0 && !warnedReducedChunks) {
             warnedReducedChunks = true;
             console.warn(

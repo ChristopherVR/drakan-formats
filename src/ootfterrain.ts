@@ -1,16 +1,19 @@
-import { type Ps2Entry, writePs2Srsc } from './ootfcontainer.ts';
+import { type Ps2Entry, parseDbText, writePs2Srsc } from './ootfcontainer.ts';
 import {
     type Ps2TextureOptions,
     type RgbaImage,
     PC_TEX_MIPMAP,
     encodePs2Texture,
     isSkip,
+    parsePcTextureInfo,
     readPcTexture,
 } from './ootftex.ts';
 import { view } from './bytes.ts';
-import { type PcFileSource, type PcLevel, resolvePcPath } from './pc.ts';
+import { type OdbClass, classFieldDefault } from './odb.ts';
+import { type PcFileSource, type PcLevel, parsePcOdbClasses, resolvePcPath } from './pc.ts';
 import { SrscReader } from './srsc.ts';
 import { TEX_HOLE, TEX_INVISIBLE, type TerrainLayer } from './terrain.ts';
+import { LAYER_TYPE_WATER } from './convert.ts';
 import { TXD_ENTRY_TYPE, decodeTxd } from './txd.ts';
 import { planTerrainSlots } from './terrainblob.ts';
 import type { LvlHeader } from './lvl.ts';
@@ -36,6 +39,20 @@ export const TERRAIN_TXD_PATH = 'files/ENGLISH/WORLDCON/PROCTEES/PROCTEES.TXD';
  */
 export const TERRAIN_TEXTURE_SLOT = 45;
 
+/**
+ * Liquid surfaces. A PC terrain texture whose material (texture header +38, a class ref into the texture container's ODB)
+ * is the Drakan 1 liquid material (RFL class 0x72: "Water", "blended water", "Lava FX", ...) is drawn by the PS2 engine's
+ * water path only when the cell names a Proc Textures entry with a PS2 liquid material (header +40: PROCTEES classes of
+ * engine class 0x100d1, which carry the scrolling textures, flow, alpha by distance, waves and specular). The disc's own
+ * entries are placeholders (a "T" or an arrow) that are never shown. So liquid textures are not converted: water maps to
+ * PROCTEES 0x10e, whose material 1 "Water" is the PS2 port of the same PC "Water" material (same textures 388 / 389 and
+ * water effect 134117; Surdana, Kragmor, Ravenshold, Valley and Stratos use it), lava (damage above 0) to 0x1d7 ("Lava
+ * (Base)", Andrellian Isles, Northern Tundra). Journal 2026-11-08/ootf-water.md.
+ */
+export const PC_LIQUID_MATERIAL_CLASS = 0x72;
+export const PS2_WATER_TEXTURE = 0x10e;
+export const PS2_LAVA_TEXTURE = 0x1d7;
+
 export interface TerrainTextureOptions {
     texture?: Ps2TextureOptions;
     /** Largest edge written for a terrain texture (default 256 = the largest PC source; 128 halved 54 of the Ruined Village textures). */
@@ -57,6 +74,8 @@ export interface TerrainTextureReport {
     bytes: number;
     /** Cells (summed over the levels added so far) whose texture has no mapping and falls back. */
     cellsUnmapped: number;
+    /** PC liquid textures mapped to the template's native water / lava entries (`PS2_WATER_TEXTURE`, `PS2_LAVA_TEXTURE`). */
+    liquids?: number;
 }
 
 /** The dependency index of the template's `Proc Textures` entry (9 in LEVEL1NA), or undefined. */
@@ -116,6 +135,9 @@ export class TerrainTextureBuilder {
     /** `container#id` (lower case) -> new id in the target TXD. */
     private readonly ids = new Map<string, number>();
     private readonly means = new Map<number, [number, number, number]>();
+    /** `<container>.odb` (lower case) -> its classes; `<container>.db` -> its dependency list. */
+    private readonly odbs = new Map<string, Promise<Map<number, OdbClass> | null>>();
+    private readonly dbs = new Map<string, Promise<Map<number, string> | null>>();
     private nextId: number;
 
     private constructor(
@@ -160,17 +182,30 @@ export class TerrainTextureBuilder {
      * Convert every texture the level's terrain uses (most used first). Returns the synchronous `mapTexture` for
      * `ConvertOptions.mapTexture` (PC ref -> `db << 16 | id`, null when the texture could not be converted).
      */
-    async addLevel(pc: PcLevel): Promise<(pcRef: number, pc: PcLevel) => number | null> {
+    async addLevel(pc: PcLevel): Promise<(pcRef: number, pc: PcLevel, layer?: TerrainLayer) => number | null> {
         const opt = this.opt;
         const maxTextures = opt.maxTextures ?? env('DRAKAN_TERRAIN_TEX_COUNT') ?? Infinity;
         const maxSize = opt.maxSize ?? env('DRAKAN_TERRAIN_TEX_MAX') ?? 256;
         const noRef = env('DRAKAN_TERRAIN_NOREF') === 1;
         const uses = new Map<number, number>();
+        const waterUses = new Map<number, number>();
         for (const L of pc.terrain) {
+            const m = L.type === LAYER_TYPE_WATER ? waterUses : uses;
             for (const r of L.cellTexLeft) {
-                if (r !== TEX_HOLE && r !== TEX_INVISIBLE) uses.set(r, (uses.get(r) ?? 0) + 1);
+                if (r !== TEX_HOLE && r !== TEX_INVISIBLE) m.set(r, (m.get(r) ?? 0) + 1);
             }
         }
+        // Water layers: liquid textures take the template's native liquid entries (see PS2_WATER_TEXTURE); a liquid
+        // texture also painted on floor cells is converted for those as well (the native entry is a placeholder picture).
+        const liquids = new Map<number, number>();
+        for (const ref of waterUses.keys()) {
+            const c = containerOf(pc, ref >>> 16);
+            const liquid = c ? await this.liquidOf(c, ref & 0xffff) : null;
+            const native = liquid === 'water' ? PS2_WATER_TEXTURE : liquid === 'lava' ? PS2_LAVA_TEXTURE : undefined;
+            if (native !== undefined && this.hasEntry(native)) liquids.set(ref, ((this.db << 16) | native) >>> 0);
+        }
+        this.report.liquids = (this.report.liquids ?? 0) + liquids.size;
+        for (const [r, n] of waterUses) if (!liquids.has(r)) uses.set(r, (uses.get(r) ?? 0) + n);
         const order = [...uses.entries()].sort((a, b) => b[1] - a[1]).map((x) => x[0]);
         const keyOf = (ref: number): string | null => {
             const c = containerOf(pc, ref >>> 16);
@@ -244,7 +279,64 @@ export class TerrainTextureBuilder {
             this.report.reduced++;
         }
         for (const [r, n] of uses) if (!level.has(r)) this.report.cellsUnmapped += n;
-        return (ref) => (noRef ? null : (level.get(ref) ?? null));
+        return (ref, _pc, layer) =>
+            noRef
+                ? null
+                : ((layer?.type === LAYER_TYPE_WATER ? liquids.get(ref) : undefined) ?? level.get(ref) ?? null);
+    }
+
+    private hasEntry(id: number): boolean {
+        return this.entries.some((x) => x.type === TXD_ENTRY_TYPE && x.id === id);
+    }
+
+    private cached<T>(
+        m: Map<string, Promise<T | null>>,
+        key: string,
+        load: () => Promise<T | null>,
+    ): Promise<T | null> {
+        const k = key.toLowerCase();
+        let p = m.get(k);
+        if (!p) {
+            p = load().catch(() => null);
+            m.set(k, p);
+        }
+        return p;
+    }
+
+    /**
+     * 'water' / 'lava' when PC texture `id` of `<container>.txd` has the Drakan 1 liquid material (`PC_LIQUID_MATERIAL_CLASS`;
+     * lava = a damage above 0), else null. The material ref is `db << 16 | class`, db indexing `<container>.db` (0 = itself).
+     */
+    async liquidOf(container: string, id: number): Promise<'water' | 'lava' | null> {
+        const txd = await this.open(container);
+        const e = txd?.find(TXD_ENTRY_TYPE, id);
+        if (!txd || !e) return null;
+        let ref: number;
+        try {
+            ref = parsePcTextureInfo(await txd.readRaw(e)).materialRef;
+        } catch {
+            return null;
+        }
+        const db = ref >>> 16;
+        let owner: string | null = container;
+        if (db !== 0) {
+            const deps = await this.cached(this.dbs, container, async () => {
+                const b = await this.src.read(`${container}.db`);
+                return b ? parseDbText(new TextDecoder('latin1').decode(b)) : null;
+            });
+            const rel = deps?.get(db);
+            owner = rel ? resolvePcPath(container.split('/').slice(0, -1).join('/'), rel) : null;
+        }
+        if (!owner) return null;
+        const classes = await this.cached(this.odbs, owner, async () => {
+            const b = await this.src.read(`${owner}.odb`);
+            return b ? parsePcOdbClasses(await SrscReader.fromBytes(b)) : null;
+        });
+        const c = classes?.get(ref & 0xffff);
+        if (!c || ((c.rflClass ?? c.runtimeClass ?? 0) & 0xffff) !== PC_LIQUID_MATERIAL_CLASS) return null;
+        const dmg = c.fields?.findIndex((f) => f.name.startsWith('Damage (')) ?? -1;
+        const damage = dmg >= 0 ? classFieldDefault(c, dmg) : 0;
+        return typeof damage === 'number' && damage > 0 ? 'lava' : 'water';
     }
 
     private async decode(container: string, id: number, label: string): Promise<RgbaImage | null> {
@@ -293,7 +385,7 @@ export class TerrainTextureBuilder {
 
 export interface TerrainTextures {
     /** `ConvertOptions.mapTexture` compatible. */
-    mapTexture: (pcRef: number, pc: PcLevel) => number | null;
+    mapTexture: (pcRef: number, pc: PcLevel, layer?: TerrainLayer) => number | null;
     /** The target TXD with the converted textures appended (for `TERRAIN_TXD_PATH`). */
     txd: Uint8Array;
     /** Dependency index the new refs use. */
