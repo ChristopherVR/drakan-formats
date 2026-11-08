@@ -10,6 +10,8 @@ import {
 } from '../src/index.ts';
 import {
     ENGINE_CLASSES,
+    FADER_RFL,
+    MODEL_FADER_STANDIN,
     buildClassEntries,
     aliasSquash,
     buildPlainClassRecord,
@@ -19,6 +21,7 @@ import {
     patchRecordModel,
     PS2_SUBSTITUTES,
     planClassMapping,
+    substituteFor,
     type Ps2OdbIn,
 } from '../src/ootfclass.ts';
 import { zlibSync } from 'fflate';
@@ -545,6 +548,80 @@ describe('ootfclass', () => {
         expect(s.template.name).toBe('Hermit Key.');
         expect(s.cls.rflClass).toBe(33);
         expect(s.cls.data).toEqual([1, 20]);
+    });
+
+    it('turns a PC model fader into a Ground Object with its model; a model-less fader stays a screen fader', () => {
+        const faderFields: [number, string][] = [
+            [T_FLOAT, 'Fade In Time (s)'],
+            [T_FLOAT, 'Faded Time (-1.0s = trigger)'],
+            [T_FLOAT, 'Fade Out Time (s)'],
+            [T_ENUM, 'Start Mode'],
+            [T_INT, 'Color'],
+        ];
+        const groundFields: [number, string][] = [
+            [T_INT, 'Initial Health'],
+            [T_ENUM, 'Send Damage Along Links?'],
+            [T_INT, 'Explosion Generator'],
+        ];
+        const o = odb();
+        const screen = cls(50, 'Level Fade In', FADER_RFL, faderFields, [0, 0, 0, 0, 0]);
+        // a breakable prop is the closest Ground Object template: the stand-in must not inherit its health or explosion
+        const prop = { ...cls(51, 'Crystal Stump', 17, groundFields, [10, 1, 15697]), model: { id: 6297, db: 0 } };
+        o.classes.set(50, screen);
+        o.classes.set(51, prop);
+        const body = new Uint8Array(94 + 12);
+        const d = new DataView(body.buffer);
+        d.setUint16(2, prop.model.id, true);
+        d.setUint32(6, 1, true);
+        d.setUint32(80, 0x10011, true);
+        d.setUint32(86, 3, true);
+        d.setUint32(90, 3, true);
+        prop.data!.forEach((v, i) => d.setUint32(94 + i * 4, v, true));
+        const recs = new Map([
+            [
+                50,
+                buildPlainClassRecord({
+                    name: screen.name,
+                    group: 5,
+                    rfl: FADER_RFL,
+                    icon: 1,
+                    fieldCount: 5,
+                    data: screen.data!,
+                }),
+            ],
+            [51, joinClassRecord(prop.name, body)],
+        ]);
+        const raw = o.raw;
+        o.raw = (id) => recs.get(id) ?? raw?.(id);
+        // the Intro's "Presents" (model 68, fades in over 1 s on a message) and its black "scene fade" (no model)
+        const presents = {
+            ...cls(140, 'Presents', FADER_RFL, faderFields, [f32(1), f32(-1), 0, 1, 0xffffff]),
+            model: { id: 68, db: 0 },
+        };
+        const sceneFade = cls(147, 'scene fade', FADER_RFL, faderFields, [f32(2), f32(-1), f32(0.1), 1, 0]);
+        const pc = [
+            { db: 14, id: 140, cls: presents },
+            { db: 14, id: 147, cls: sceneFade },
+        ];
+        const plan = planClassMapping(pc, [o], {
+            substituteEngineId: PS2_SUBSTITUTES,
+            modelFor: (c) => (c === presents ? { id: 7000, db: 0 } : null),
+        });
+        expect(plan.unsupported.size).toBe(0);
+        const byName = new Map(plan.synthesized.map((s) => [s.name, s]));
+        const model = byName.get('Presents')!;
+        expect(model.template.name).toBe('Crystal Stump');
+        expect(model.cls.rflClass).toBe(MODEL_FADER_STANDIN);
+        expect(model.cls.model).toEqual({ id: 7000, db: 0 });
+        expect(model.cls.data).toEqual([0, 0, 0]); // inert: no health, no damage links, no explosion
+        const fade = byName.get('scene fade')!;
+        expect(fade.template.name).toBe('Level Fade In');
+        expect(fade.cls.rflClass).toBe(FADER_RFL);
+        expect(fade.cls.data?.slice(0, 5)).toEqual(sceneFade.data);
+        // without the substitution table (no model conversion) nothing is redirected
+        expect(substituteFor(presents, undefined)).toBeUndefined();
+        expect(substituteFor(sceneFade, PS2_SUBSTITUTES)).toBeUndefined();
+        expect(substituteFor(presents, PS2_SUBSTITUTES)).toBe(17);
     });
 
     it('maps an aliased PC creature name to the differently named PS2 class', () => {

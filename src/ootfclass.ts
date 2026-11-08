@@ -201,6 +201,44 @@ export const FORCED_SUBSTITUTES: ReadonlySet<number> = new Set([144, 92, 117]);
  */
 export const MODEL_STANDINS: ReadonlySet<number> = new Set([130, 88, 100, 101, 29, 117]);
 
+/** Engine id of the Fader on both platforms. */
+export const FADER_RFL = 136;
+
+/**
+ * A PC Fader (136) with a model fades that model in and out (the Intro's owl ring, "Presents", "Psygnosis Monolith", Surreal
+ * text); only a model-less one fades the screen (OpenDrakan `Fader_Cl`: model -> the object's colour modifier, else a
+ * full-screen quad). Every PS2 Fader class is model-less (a screen fader), so a model fader cloned from one showed nothing:
+ * the Intro's Psygnosis plate, "Presents", the D R A K A N letters and the Surreal text never appeared (journal
+ * 2026-11-08/ootf-intro-black-start.md). Such a class becomes a static Ground Object (17) with the converted PC model, like
+ * the Pirate Ship: the scenes' show/hide actions still put it on and off screen at the authored times, without the alpha ramp.
+ */
+export const MODEL_FADER_STANDIN = 17;
+
+/**
+ * The Ground Object template a model fader is cloned from may be a breakable prop (health, explosion and damage links); the
+ * stand-in is inert scenery, as the PC fader is.
+ */
+const MODEL_FADER_ADJUST = {
+    set: [
+        ['Initial Health', 0],
+        ['Send Damage Along Links?', 0],
+        ['AutoTarget Priority (0=highest, -1=none)', 0xffffffff],
+        ['2D Explosion Object', 0],
+        ['Explosion Generator', 0],
+        ['Smoke Generator', 0],
+    ],
+} as const;
+
+/** The PS2 engine id a PC class is cloned from instead of its own (undefined = its own id). */
+export function substituteFor(
+    cls: Pick<OdbClass, 'rflClass' | 'model'>,
+    table: ReadonlyMap<number, number> | undefined,
+): number | undefined {
+    if (!table) return undefined;
+    if (cls.rflClass === FADER_RFL && cls.model) return MODEL_FADER_STANDIN;
+    return table.get(cls.rflClass ?? -1);
+}
+
 /** The IEEE-754 single bit pattern of a value (PS2 float fields are stored as raw dwords). */
 function floatBits(v: number): number {
     const b = new DataView(new ArrayBuffer(4));
@@ -850,11 +888,13 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
     for (const { db, id, cls } of ordered) {
         const key = pcClassKey(db, id);
         const rfl = cls.rflClass ?? -1;
-        const info = ENGINE_CLASSES.get(rfl);
+        const modelFader = rfl === FADER_RFL && !!cls.model && !!opt.substituteEngineId;
+        const info = modelFader ? ENGINE_CLASSES.get(MODEL_FADER_STANDIN) : ENGINE_CLASSES.get(rfl);
         let cands = byRfl.get(rfl) ?? [];
         let substituted = false;
-        if ((!cands.length || FORCED_SUBSTITUTES.has(rfl)) && opt.substituteEngineId?.has(rfl)) {
-            cands = byRfl.get(opt.substituteEngineId.get(rfl)!) ?? [];
+        const sub = substituteFor(cls, opt.substituteEngineId);
+        if ((!cands.length || FORCED_SUBSTITUTES.has(rfl) || modelFader) && sub !== undefined) {
+            cands = byRfl.get(sub) ?? [];
             substituted = cands.length > 0;
         }
         // 1. same name and same engine class (unless the caller wants the PC model converted instead: `keepOwnModel`)
@@ -974,7 +1014,7 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
             continue;
         }
         const kind = info?.kind;
-        const modelStandIn = substituted && MODEL_STANDINS.has(rfl);
+        const modelStandIn = substituted && (MODEL_STANDINS.has(rfl) || modelFader);
         // Particle emitters (43, 71, 97): the PC model is only an emitter box. The clone keeps the template's own emitter model.
         const ownFxModel =
             !substituted &&
@@ -1146,7 +1186,7 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
                 best = { c, m };
         }
         const { c } = best!;
-        const adj = CLONE_ADJUST.get(rfl);
+        const adj = modelFader ? MODEL_FADER_ADJUST : CLONE_ADJUST.get(rfl);
         const m = adj ? adjustClone(cls, c.cls, best!.m, adj) : best!.m;
         usedTemplates.add(`${c.odb.file}|${c.id}`);
         if (opt.rewriteText && c.cls.fields) opt.rewriteText(c.odb.file, c.cls.fields, m.data);
