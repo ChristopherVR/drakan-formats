@@ -13,6 +13,7 @@ import {
     rebuildObbHierarchy,
     parsePcModel,
     pcToNeutral,
+    type PcModel,
     type PcToPs2Options,
 } from './ootfmodel.ts';
 import {
@@ -126,6 +127,8 @@ export class OotfAssetBuilder {
     private readonly texFrames = new Map<number, number>();
     private readonly texBodies: { id: number; body: Uint8Array }[] = [];
     private readonly modelIds = new Map<string, number>();
+    /** `container#id` (lower case) -> PC polygon indices left out of that model (`dropPolygonsOf`). */
+    private readonly polygonDrops = new Map<string, ReadonlySet<number>>();
     private readonly models: {
         id: number;
         model: NeutralModel;
@@ -324,6 +327,7 @@ export class OotfAssetBuilder {
         }
         const { model, stats } = pcToNeutral(pc, {
             ...this.options.model,
+            dropPolygons: skin ? undefined : this.polygonDrops.get(key),
             mapTexture: (r) => map.get(`${r.db}/${r.id}`) ?? null,
             doubleSided: (this.options.doubleSidedAlpha ?? true) ? (r) => this.texAlpha.get(r.id) === true : undefined,
             textureFrames: (r) => (r.db === 0 ? (this.texFrames.get(r.id) ?? 1) : 1),
@@ -662,6 +666,32 @@ export class OotfAssetBuilder {
             { type: 0x0501, id: a.id, sub: 0, data: a.info },
             { type: 0x0502, id: a.id, sub: 0, data: a.data },
         ]);
+    }
+
+    /**
+     * Leave PC polygons `drop` of a rigid model out of its conversion (inward shell walls, `ootfshell.ts`). Call before the
+     * model is added; false when the reference does not resolve or the model was already converted.
+     */
+    async dropPolygonsOf(owner: string, pcDb: number, pcId: number, drop: ReadonlySet<number>): Promise<boolean> {
+        await this.registerOwner(owner);
+        const c = this.resolveContainer(owner, pcDb);
+        const key = c ? `${lower(c)}#${pcId}` : '';
+        if (!c || this.modelIds.has(key)) return false;
+        this.polygonDrops.set(key, drop);
+        return true;
+    }
+
+    /** The PC model a reference in `owner`'s ODB names (null when missing or unreadable), without converting it. */
+    async readPcModel(owner: string, pcDb: number, pcId: number): Promise<PcModel | null> {
+        await this.registerOwner(owner);
+        const c = this.resolveContainer(owner, pcDb);
+        const mod = c ? await this.open(c, 'mod') : null;
+        if (!mod) return null;
+        try {
+            return await parsePcModel(mod, pcId);
+        } catch {
+            return null;
+        }
     }
 
     /**

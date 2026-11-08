@@ -610,6 +610,8 @@ export interface PcToPs2Options {
     /** Flat shading (0x01) occurs in no disc model: turn it into smooth (default true). */
     flatToSmooth?: boolean;
     flipNormals?: boolean;
+    /** PC polygon indices to leave out (walls of an inward shell the PC culls from the cut-scene cameras, `ootfshell.ts`). */
+    dropPolygons?: ReadonlySet<number>;
 }
 
 export interface PcToPs2Stats {
@@ -665,9 +667,13 @@ export function pcToNeutral(pc: PcModel, opt: PcToPs2Options = {}): { model: Neu
     // PC polygon index -> the indices of what it became (none when dropped, two for a split quad), for the bounds lists.
     const polyMap: number[][] = [];
     const split = !(opt.keepQuads ?? false);
-    for (const p of pc.polygons) {
+    for (const [pi, p] of pc.polygons.entries()) {
         const into: number[] = [];
         polyMap.push(into);
+        if (opt.dropPolygons?.has(pi)) {
+            stats.polygonsDropped++;
+            continue;
+        }
         let idx = slot.get(p.texture);
         if (idx === undefined) {
             const src = pc.textures[p.texture];

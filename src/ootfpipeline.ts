@@ -43,6 +43,7 @@ import {
     writePs2Sdb,
     type PcSoundBank,
 } from './ootfsound.ts';
+import { planShellTrims } from './ootfshell.ts';
 import { convertStompPlayers, pcStompPlayer } from './ootfstomp.ts';
 import {
     convertPcSequences,
@@ -588,6 +589,15 @@ export async function convertOotfLevels(
     }
     if (opt.models !== false && opt.classes !== false && hostOk) {
         await stage('models', async () => {
+            // Inward shells (the Intro's black backdrop box) lose the walls the PC culls from outside cut-scene cameras:
+            // the PS2 culls no back faces, so those walls hid the whole Intro opening (ootfshell.ts).
+            const shells = await planShellTrims(pcs, src, async (c) => {
+                const ow = ownerOf.get(c);
+                return ow && c.model ? builder.readPcModel(ow, c.model.db, c.model.id) : null;
+            });
+            for (const [c, t] of shells)
+                if (await builder.dropPolygonsOf(ownerOf.get(c)!, c.model!.db, c.model!.id, t.drop))
+                    log(`shell ${c.name}: ${t.drop.size} of ${t.walls} walls left out (${t.placements} placed)`);
             for (const u of used.values()) {
                 const m = u.cls.model;
                 const ow = ownerOf.get(u.cls);
