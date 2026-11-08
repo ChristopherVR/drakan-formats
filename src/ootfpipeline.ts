@@ -1,5 +1,6 @@
 import { buildBowAimMetadata } from './ootfbowaim.ts';
 import { requireGenericPropDrawLists, requireRigidWeaponDrawLists } from './ootfpropdraw.ts';
+import { holdLinkedDoors } from './ootfdoors.ts';
 import { splitClassRecord } from './odbwrite.ts';
 import { carryStartingInventory } from './ootfstartinventory.ts';
 import { ootfDebugFlag } from './ootfdebug.ts';
@@ -2060,6 +2061,25 @@ export async function convertOotfLevels(
                 laid++;
             }
             if (laid) res.warnings.push(`${pc.path}: ${laid} creature(s) placed dead start in their death pose`);
+        }
+        {
+            // Ambush doors wait for the trigger that sends their creature out instead of the PS2 auto-open (ootfdoors.ts).
+            const held = holdLinkedDoors(
+                parts.objects,
+                (o) => {
+                    const t = plan?.synthesized.find((x) => x.dbIndex === o.dbIndex && x.classId === o.classId);
+                    return t ? { ...t.cls, rflClass: t.rfl } : classes.get(o.dbIndex)?.get(o.classId);
+                },
+                (o) => {
+                    if (o.flags & 1) return false;
+                    const rfl =
+                        classes.get(o.dbIndex)?.get(o.classId)?.rflClass ??
+                        plan?.synthesized.find((x) => x.dbIndex === o.dbIndex && x.classId === o.classId)?.rfl ??
+                        -1;
+                    return ENGINE_CLASSES.get(rfl)?.kind === 'creature';
+                },
+            );
+            if (held.length) log(`${pc.path}: ${held.length} ambush door(s) keep Auto-Open? 0`);
         }
         if (dbgEnv['DRAKAN_DBG_DROP']) {
             // Test aid: remove every object whose class name matches the regex (bisecting a crash to a class).

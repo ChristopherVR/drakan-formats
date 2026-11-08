@@ -543,6 +543,7 @@ export class OotfAssetBuilder {
             key,
             clips: skin ? [...(this.animMaps.get(key)?.values() ?? [])] : undefined,
         });
+        if (!skin && records?.some((r) => r.type === MOD_DISPLAY_LIST)) this.squareDrawListTextures(key, out.textures);
         const m = this.report.models;
         m.converted++;
         m.triangles += stats.trianglesOut;
@@ -562,7 +563,55 @@ export class OotfAssetBuilder {
             existing.model = dl.model;
             existing.records = [...writePs2ModelRecords(dl.model), { type: MOD_DISPLAY_LIST, data: dl.record }];
         }
+        this.squareDrawListTextures(existing.key, existing.model.textures);
         return true;
+    }
+
+    /**
+     * A model drawn from its strip display list draws nothing when one of its textures is not square, like the skinned models
+     * (`addTexture`): Ruined Village's cart (a 64 x 128 plank texture) stayed invisible while the barrel and crate standing on
+     * it seemed to float (journal 2026-11-08/ootf-ruined-village-ambush-props.md). Such textures of this builder are rewritten
+     * square in place (8 bpp, the weapons' upgrade), keeping their ids; square ones of any depth stay as they are.
+     */
+    private squareDrawListTextures(key: string, textures: readonly ModelTextureRef[]): void {
+        const frames = new Set<number>();
+        for (const ref of textures) {
+            if (ref.db !== 0) continue;
+            let base = ref.id,
+                count = 1;
+            for (const [candidate, length] of this.texFrames)
+                if (ref.id >= candidate && ref.id < candidate + length) {
+                    base = candidate;
+                    count = length;
+                    break;
+                }
+            for (let frame = base; frame < base + count; frame++) frames.add(frame);
+        }
+        for (const frame of frames) {
+            const stored = this.texBodies.find((t) => t.id === frame);
+            if (!stored) continue;
+            const dv = new DataView(stored.body.buffer, stored.body.byteOffset, stored.body.byteLength);
+            const oldBpp = dv.getUint32(12, true);
+            if (dv.getUint32(0, true) === dv.getUint32(4, true)) continue;
+            let next: ReturnType<typeof upgradeIndexedSquareTexture>;
+            try {
+                next = upgradeIndexedSquareTexture(stored.body);
+            } catch (error) {
+                const warning = `model ${key}: texture ${frame} could not be made square (${error instanceof Error ? error.message : String(error)})`;
+                if (!this.report.warnings.includes(warning)) this.report.warnings.push(warning);
+                continue;
+            }
+            if (!next) continue;
+            this.report.textures.bytes += next.body.length - stored.body.length;
+            if (oldBpp !== next.bpp) {
+                const previous = (this.report.textures.byBpp[oldBpp] ?? 0) - 1;
+                if (previous > 0) this.report.textures.byBpp[oldBpp] = previous;
+                else delete this.report.textures.byBpp[oldBpp];
+                this.report.textures.byBpp[next.bpp] = (this.report.textures.byBpp[next.bpp] ?? 0) + 1;
+            }
+            if (next.lossy) this.report.textures.lossy++;
+            stored.body = next.body;
+        }
     }
 
     /**

@@ -4,7 +4,7 @@ import type { ClassPlan } from '../src/ootfclass.ts';
 import { requireGenericPropDrawLists, requireRigidWeaponDrawLists } from '../src/ootfpropdraw.ts';
 
 describe('native generic-prop draw requirements', () => {
-    it('selects chosen native targets instead of a source runtime-class whitelist', () => {
+    it('selects drawn native targets (props, doors, mechanisms) and leaves weapons and effects alone', () => {
         const target = (rfl: number, model: { id: number; db: number } | null, file = 'RESOURES.ODB') =>
             ({ rfl, cls: { model }, file }) as ClassPlan['synthesized'][number];
         const host = { requireDisplayList: vi.fn(() => true) };
@@ -17,7 +17,9 @@ describe('native generic-prop draw requirements', () => {
                 synthesized: [
                     target(17, { id: 40, db: 0 }), // e.g. a source pressure plate mapped to native generic prop
                     target(17, { id: 41, db: 1 }, 'NPCS.ODB'), // model owned by the host through a dependency
-                    target(35, { id: 42, db: 0 }), // native Lift is a separate path
+                    target(35, { id: 42, db: 0 }), // a mechanism: native ones all carry the draw list
+                    target(19, { id: 45, db: 0 }), // a door
+                    target(60, { id: 46, db: 0 }), // an effect (weapon blur): native ones have none
                     target(14, { id: 43, db: 0 }), // no weapon-class extension
                     target(17, null),
                     target(17, { id: 44, db: 9 }), // unknown destination is not silently assigned to the host
@@ -25,11 +27,13 @@ describe('native generic-prop draw requirements', () => {
             },
             resolve,
         );
-        expect(local.requireDisplayList.mock.calls).toEqual([[40]]);
+        expect(local.requireDisplayList.mock.calls).toEqual([[40], [42], [45]]);
         expect(host.requireDisplayList.mock.calls).toEqual([[41]]);
         expect(resolve.mock.calls).toEqual([
             ['RESOURES.ODB', 0],
             ['NPCS.ODB', 1],
+            ['RESOURES.ODB', 0],
+            ['RESOURES.ODB', 0],
             ['RESOURES.ODB', 9],
         ]);
     });

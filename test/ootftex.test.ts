@@ -835,6 +835,50 @@ describe('containers and the asset builder', () => {
         expect(b.report.models.converted).toBe(0);
     });
 
+    it('makes the non-square textures of a required draw list square in place (the invisible cart)', async () => {
+        const tall = (ids: number[]): Uint8Array =>
+            writePs2Srsc([
+                {
+                    type: 0x30,
+                    id: 0,
+                    sub: 0,
+                    data: palette([
+                        [0, 0, 0],
+                        [200, 100, 50],
+                    ]),
+                },
+                ...ids.map((id) => ({
+                    type: 0x40,
+                    id,
+                    sub: 0,
+                    data: pcTex({ w: 32, h: 64, bpp: 8, data: new Array(2048).fill(1) }),
+                })),
+            ]);
+        const local: PcFileSource = {
+            ...src,
+            read: async (p) => (p.toLowerCase() === 'common/c/c.txd' ? tall([8]) : src.read(p)),
+        };
+        const size = async (b: OotfAssetBuilder): Promise<number[]> => {
+            const t = await SrscReader.fromBytes(b.build('out', 'test').files['out/TEST.TXD']!);
+            const out: number[] = [];
+            for (const e of t.entries.filter((x) => x.type === 0x40)) {
+                const image = decodeTxd(await t.readRaw(e));
+                out.push(image.width / image.height);
+            }
+            return out;
+        };
+        const plain = new OotfAssetBuilder(local);
+        expect(await plain.addModelRef('Lvl/Lvl', 0, 5)).toBe(2);
+        expect(await size(plain)).toEqual([0.5]); // an ordinary static model keeps its texture as converted
+        const b = new OotfAssetBuilder(local);
+        expect(await b.addModelRef('Lvl/Lvl', 0, 5)).toBe(2);
+        expect(b.requireDisplayList(2)).toBe(true);
+        expect(await size(b)).toEqual([1]);
+        const upfront = new OotfAssetBuilder(local);
+        expect(await upfront.addModelRef('Lvl/Lvl', 0, 5, true)).toBe(2);
+        expect(await size(upfront)).toEqual([1]);
+    });
+
     it('leaves original model ids and imported skeletal records untouched by rigid upgrade requests', async () => {
         const b = new OotfAssetBuilder(src);
         await b.addModelRef('Lvl/Lvl', 0, 5);
