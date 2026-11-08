@@ -100,9 +100,29 @@ const lower = (s: string): string => s.toLowerCase();
 const MOD_DISPLAY_LIST = 0x0211;
 const DEFAULT_DISPLAY_LIST = /tree|birch/i;
 
+/**
+ * PC cage models (Cage01wPerson2, Cage02Empty, Cage02wPerson ...: hanging cages, some with a prisoner). The PC collides
+ * them through a sphere or boxes listing the bar polygons; on the PS2 Rynn walks through a sphere and pushes 100 to 150
+ * units past thin listed bars, into the cage. They get one solid box (no polygon list), the disc's own form for props.
+ */
+const SOLID_BOX_MODEL = /^cage\d/i;
+
+/** One solid OBB over the polygons' vertices (display-list pad vertices left out); the disc's one-shape, no-polygon form. */
+function solidBoxBounds(model: NeutralModel): Uint8Array {
+    const used = [...new Set(model.polygons.flatMap((p) => p.indices))];
+    return synthesizeBounds(
+        Float32Array.from(used.flatMap((v) => [0, 1, 2].map((k) => model.positions[v * 3 + k]!))),
+        0,
+    );
+}
+
 /** Rebuild polygon-index-dependent bounds, retaining the source's conservative sphere/box and excluding pad vertices. */
 function rigidDisplayList(model: NeutralModel): ReturnType<typeof withDisplayList> {
     const dl = withDisplayList(model);
+    if (SOLID_BOX_MODEL.test(model.name)) {
+        dl.model.bounds = solidBoxBounds(dl.model);
+        return dl;
+    }
     const original = model.bounds ?? synthesizeBounds(model.positions, model.polygons.length);
     // Sphere hierarchies refer only to shapes, so vertex/polygon remapping cannot invalidate them.
     // In particular, native rigid weapons reject an OBB replacement and delete the item on attack.
@@ -112,8 +132,9 @@ function rigidDisplayList(model: NeutralModel): ReturnType<typeof withDisplayLis
     }
     // An OBB hierarchy keeps its shapes (a hollow model, e.g. a tunnel shell, must stay hollow) and its polygon lists, which
     // `model.bounds` already names in `model.polygons` (pcToNeutral): they follow the display list's polygon order. A PC list
-    // names every polygon crossing its box, so a bar of a cage can be in several; giving each polygon only to the box holding
-    // its centre (rebuildObbHierarchy) left boxes without the bars Rynn touches there, and she walked into the cages.
+    // names every polygon crossing its box (a bar can be in several) and uses boxes without polygons as solid blocks; giving
+    // each polygon only to the box holding its centre (rebuildObbHierarchy) dropped 74,147 list entries from 303 campaign props
+    // and collapsed 83 hierarchies of blocker boxes into one box.
     if (model.bounds) {
         const into: number[][] = model.polygons.map(() => []);
         dl.layout.polygonSource.forEach((src, i) => into[src]?.push(i));

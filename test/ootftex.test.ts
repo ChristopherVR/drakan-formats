@@ -426,6 +426,7 @@ describe('containers and the asset builder', () => {
         offset = 0,
         bounds?: Uint8Array,
         drawable = true,
+        modelName = 'mod1',
     ): Uint8Array => {
         const rec = (type: number, data: number[]) => ({ type, id, sub: 0, data: Uint8Array.from(data) });
         const verts = [...u16(3)];
@@ -438,7 +439,7 @@ describe('containers and the asset builder', () => {
             [2, 0, 1],
         ] as const)
             poly.push(...u16(i), ...new Uint8Array(new Float32Array([u, v]).buffer));
-        const name = [...u16(4), 0x6d, 0x6f, 0x64, 0x31, ...u32(2)];
+        const name = [...u16(modelName.length), ...[...modelName].map((c) => c.charCodeAt(0)), ...u32(2)];
         const tl = [...u32(texRefs.length), ...texRefs.flatMap(([i, d]) => [...u16(i!), ...u16(d!)])];
         const recs = [rec(0x200, name), rec(0x206, tl), rec(0x203, verts), rec(0x204, drawable ? poly : [0, 0])];
         if (character) recs.push(rec(0x208, new Array(70).fill(0)));
@@ -670,6 +671,36 @@ describe('containers and the asset builder', () => {
             [0, 2, 0, 0.125, []],
             [0, 0, 0.875, 0.125, []],
         ]);
+    });
+
+    it('gives a PC cage model one solid collision box instead of its sphere or bar polygon lists', async () => {
+        // Rynn walks through a cage's sphere and pushes past thin listed bars on the PS2; a box without polygons stops her.
+        const sphere = new Uint8Array(68 + 4 + 16);
+        new DataView(sphere.buffer).setUint16(64, 1, true); // one sphere, is_obb 0
+        const local: PcFileSource = {
+            ...src,
+            read: async (p) =>
+                p.toLowerCase() === 'lvl/lvl.mod'
+                    ? model(
+                          5,
+                          [
+                              [3, 0],
+                              [8, 1],
+                          ],
+                          false,
+                          0,
+                          sphere,
+                          true,
+                          'Cage02Empty(H)',
+                      )
+                    : src.read(p),
+        };
+        const b = new OotfAssetBuilder(local);
+        expect(await b.addModelRef('Lvl/Lvl', 0, 5, true)).toBe(2);
+        const mod = await SrscReader.fromBytes(b.build('out', 'test').files['out/TEST.MOD']!);
+        const shapes = parseObbHierarchy(await mod.readRaw(mod.find(0x207, 2)!))!;
+        expect(shapes.map((s) => [s.child, s.sibling, s.polygons])).toEqual([[0, 0, []]]);
+        expect(shapes[0]!.box).toEqual([0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1]); // the triangle, not the pad vertex
     });
 
     it.each([
