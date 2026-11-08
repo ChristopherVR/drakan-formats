@@ -19,6 +19,7 @@ import {
     synthesizeBounds,
     sphereHierarchyCount,
     rebuildObbHierarchy,
+    remapObbPolygons,
     parsePcModel,
     pcToNeutral,
     type PcModel,
@@ -109,8 +110,20 @@ function rigidDisplayList(model: NeutralModel): ReturnType<typeof withDisplayLis
         dl.model.bounds = original;
         return dl;
     }
-    // An OBB hierarchy keeps its shapes (a hollow model, e.g. a tunnel shell, must stay hollow); only the leaf polygon
-    // lists are rebuilt for the new polygons.
+    // An OBB hierarchy keeps its shapes (a hollow model, e.g. a tunnel shell, must stay hollow) and its polygon lists, which
+    // `model.bounds` already names in `model.polygons` (pcToNeutral): they follow the display list's polygon order. A PC list
+    // names every polygon crossing its box, so a bar of a cage can be in several; giving each polygon only to the box holding
+    // its centre (rebuildObbHierarchy) left boxes without the bars Rynn touches there, and she walked into the cages.
+    if (model.bounds) {
+        const into: number[][] = model.polygons.map(() => []);
+        dl.layout.polygonSource.forEach((src, i) => into[src]?.push(i));
+        const mapped = remapObbPolygons(original, into);
+        if (mapped) {
+            dl.model.bounds = mapped;
+            return dl;
+        }
+    }
+    // Otherwise only the leaf polygon lists are rebuilt for the new polygons (each to the leaf holding its centre).
     const kept = rebuildObbHierarchy(original, dl.model.positions, dl.model.polygons);
     if (kept) {
         dl.model.bounds = kept;

@@ -2,7 +2,7 @@
 import { zlibSync } from 'fflate';
 import { describe, expect, it } from 'vitest';
 import { SrscReader, decodeTxd, parseModel } from '../src/index.ts';
-import { type NeutralModel, writePs2ModelRecords } from '../src/ootfmodel.ts';
+import { type NeutralModel, parseObbHierarchy, writePs2ModelRecords } from '../src/ootfmodel.ts';
 import { OotfAssetBuilder } from '../src/ootfassets.ts';
 import { buildDbText, parseDbText, writePs2Srsc } from '../src/ootfcontainer.ts';
 import {
@@ -599,6 +599,77 @@ describe('containers and the asset builder', () => {
         // the triangle spans (5,5,5)..(6,5,6); the display list's pad vertex at the origin is not in the box
         expect([80, 84, 88, 92, 112, 124].map((i) => bv.getFloat32(i, true))).toEqual([5, 5, 5, 1, 0, 1]);
         expect(m.positions.slice(-3)).toEqual(new Float32Array([0, 0, 0]));
+    });
+
+    // A PC OBB 0x0207 (no PS2 prefix): `shapes` = (child, sibling, box minimum x, box size, polygon list).
+    const pcObb = (shapes: [number, number, number, number, number[]][]): Uint8Array => {
+        const size = 68 + shapes.length * 4 + shapes.reduce((t, s) => t + 50 + s[4].length * 2, 0);
+        const b = new Uint8Array(size);
+        const dv = new DataView(b.buffer);
+        dv.setUint16(64, shapes.length, true);
+        dv.setUint16(66, 1, true);
+        let o = 68 + shapes.length * 4;
+        shapes.forEach(([child, sibling, x, w, list], i) => {
+            dv.setUint16(68 + i * 4, child, true);
+            dv.setUint16(70 + i * 4, sibling, true);
+            [x, -1, 0, w, 0, 0, 0, 2, 0, 0, 0, 2].forEach((v, k) => dv.setFloat32(o + k * 4, v, true));
+            dv.setUint16(o + 48, list.length, true);
+            list.forEach((p, k) => dv.setUint16(o + 50 + k * 2, p, true));
+            o += 50 + list.length * 2;
+        });
+        return b;
+    };
+    const convertedObb = async (pcBounds: Uint8Array) => {
+        const local: PcFileSource = {
+            ...src,
+            read: async (p) =>
+                p.toLowerCase() === 'lvl/lvl.mod'
+                    ? model(
+                          5,
+                          [
+                              [3, 0],
+                              [8, 1],
+                          ],
+                          false,
+                          0,
+                          pcBounds,
+                      )
+                    : src.read(p),
+        };
+        const b = new OotfAssetBuilder(local);
+        expect(await b.addModelRef('Lvl/Lvl', 0, 5, true)).toBe(2); // a generic prop: display list required
+        const mod = await SrscReader.fromBytes(b.build('out', 'test').files['out/TEST.MOD']!);
+        expect(mod.find(0x211, 2)).toBeDefined();
+        return parseObbHierarchy(await mod.readRaw(mod.find(0x207, 2)!))!;
+    };
+
+    it('keeps a polygon in every collision box the PC lists it in when a prop gets a display list', async () => {
+        // The triangle (0,0,0) (1,0,0) (0,0,1) crosses two leaf boxes; its centre is in the first only. A cage bar crosses
+        // boxes the same way: listing it only in the box holding its centre let Rynn walk through the bars in the other box.
+        const shapes = await convertedObb(
+            pcObb([
+                [1, 0, 0, 1, [0]],
+                [0, 2, 0, 0.5, [0]],
+                [0, 0, 0.5, 0.5, [0]],
+            ]),
+        );
+        expect(shapes.map((s) => s.polygons)).toEqual([[0], [0], [0]]);
+    });
+
+    it('keeps plain blocker boxes (leaves without polygons) instead of one box over the whole prop', async () => {
+        // The PC cage of the Islands and Volcanic's Dragon Platform: walls as boxes without polygons under a root listing all.
+        const shapes = await convertedObb(
+            pcObb([
+                [1, 0, 0, 1, [0]],
+                [0, 2, 0, 0.125, []],
+                [0, 0, 0.875, 0.125, []],
+            ]),
+        );
+        expect(shapes.map((s) => [s.child, s.sibling, s.box[0], s.box[3], s.polygons])).toEqual([
+            [1, 0, 0, 1, [0]],
+            [0, 2, 0, 0.125, []],
+            [0, 0, 0.875, 0.125, []],
+        ]);
     });
 
     it.each([

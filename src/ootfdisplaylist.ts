@@ -204,8 +204,13 @@ export interface DisplayListLayout {
      * vertex i copies, or -1 for a zero pad vertex. Identity (plus pad) when the model fits one group.
      */
     source: Int32Array;
-    /** Input polygons re-indexed into the new vertex layout (same order, same flags, textures and UVs). */
+    /**
+     * Input polygons re-indexed into the new vertex layout (same flags, textures and UVs). Same order when the model fits
+     * one window or is skinned; a rigid model split into chunks gets one triangle per polygon fan triangle, in chunk order.
+     */
     polygons: NeutralPoly[];
+    /** `polygonSource[i]` = the input polygon that output polygon i comes from (identity when the order is kept). */
+    polygonSource: Int32Array;
     /** Number of groups written. */
     groups: number;
     batches: number;
@@ -389,6 +394,7 @@ export function buildDisplayList(
     const groupStarts: number[] = [];
     const plan: BatchPlan[] = [];
     let polygons: NeutralPoly[];
+    let polygonSource: number[] | null = null;
     const vj = opt.vertexJoints;
     const maxJoints = opt.maxJoints ?? 16;
     let order = tris;
@@ -506,6 +512,7 @@ export function buildDisplayList(
     } else {
         // Every chunk becomes a group with its own copies of the vertices; polygons become single triangles.
         polygons = [];
+        polygonSource = [];
         for (const chunk of chunkTriangles(order, limit, vj, maxJoints)) {
             const start = pad4(source.length);
             while (source.length < start) source.push(-1);
@@ -529,6 +536,7 @@ export function buildDisplayList(
                 plan.push({ loads: first ? [{ group: g, slot: 0 }] : [], texture: tex, tris: local });
                 first = false;
                 for (const t of own) {
+                    polygonSource.push(t.poly);
                     polygons.push({
                         flags: model.polygons[t.poly]!.flags & ~4,
                         texture: tex,
@@ -631,6 +639,7 @@ export function buildDisplayList(
         record: Uint8Array.from(o.b),
         source: Int32Array.from(source),
         polygons,
+        polygonSource: polygonSource ? Int32Array.from(polygonSource) : Int32Array.from(polygons, (_, i) => i),
         groups: groupCounts.length,
         batches: batches.length,
     };
