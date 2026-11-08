@@ -598,6 +598,13 @@ export interface PcToPs2Options {
     mapTexture?: (ref: ModelTextureRef) => ModelTextureRef | null;
     /** True when the (mapped) PS2 texture has transparency: its polygons are flagged double sided. */
     doubleSided?: (ref: ModelTextureRef) => boolean;
+    /**
+     * Frame count of an animated (mapped) PS2 texture: the first frame and `n - 1` following ids with the "next frame" flag
+     * (0x20 at TXD +37). The frames are listed right after the first one in the model's texture list, as every animated
+     * disc model does (SurdanaFalls01 / 02, D2 flame breath, Mulgak_Head: all frames listed, polygons use the first) and as
+     * the PC models do. Without the list entries the engine draws frame 0 only (journal 2026-11-08/ootf-waterfall-flow.md).
+     */
+    textureFrames?: (ref: ModelTextureRef) => number;
     /** Keep quads instead of splitting them into triangles (default false: PS2 models are almost all triangles). */
     keepQuads?: boolean;
     /** Flat shading (0x01) occurs in no disc model: turn it into smooth (default true). */
@@ -668,6 +675,8 @@ export function pcToNeutral(pc: PcModel, opt: PcToPs2Options = {}): { model: Neu
             if (mapped) {
                 idx = textures.length;
                 textures.push(mapped);
+                const frames = opt.textureFrames?.(mapped) ?? 1;
+                for (let k = 1; k < frames; k++) textures.push({ id: mapped.id + k, db: mapped.db });
             } else idx = -1;
             slot.set(p.texture, idx);
         }

@@ -326,6 +326,7 @@ export class OotfAssetBuilder {
             ...this.options.model,
             mapTexture: (r) => map.get(`${r.db}/${r.id}`) ?? null,
             doubleSided: (this.options.doubleSidedAlpha ?? true) ? (r) => this.texAlpha.get(r.id) === true : undefined,
+            textureFrames: (r) => (r.db === 0 ? (this.texFrames.get(r.id) ?? 1) : 1),
         });
         if (model.polygons.length === 0 && pc.polygons.length > 0) return fail('no polygon left (textures missing)');
         if (model.positions.length / 3 > 0xffff) return fail('too many vertices');

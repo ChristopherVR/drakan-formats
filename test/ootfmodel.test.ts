@@ -145,6 +145,26 @@ describe('PC model -> PS2 model', () => {
         expect(model.polygons.map((p) => p.flags)).toEqual([2, 2, 0]);
     });
 
+    it('lists the frames of an animated texture right after its first frame (waterfalls flow)', async () => {
+        const pc = (await parsePcModel(await SrscReader.fromBytes(pcModelFile()), 7))!;
+        // PC list entry 0 (texture 11) maps to PS2 40, the first of 3 frames 40..42; entry 1 (12) maps to 50, a still texture.
+        const { model } = pcToNeutral(pc, {
+            mapTexture: (t) => ({ id: t.id === 11 ? 40 : 50, db: 0 }),
+            textureFrames: (t) => (t.id === 40 ? 3 : 1),
+        });
+        expect(model.textures).toEqual([
+            { id: 40, db: 0 },
+            { id: 41, db: 0 },
+            { id: 42, db: 0 },
+            { id: 50, db: 0 },
+        ]);
+        // Polygons keep naming the first frame; the still texture moves behind the frames.
+        expect(model.polygons.map((p) => p.texture)).toEqual([0, 0, 3]);
+        const m = (await parseModel(await SrscReader.fromBytes(buildPs2Mod([{ id: 2, model }])), 2))!;
+        expect(m.textures.map((t) => t.id)).toEqual([40, 41, 42, 50]);
+        expect(Array.from(m.triTexture)).toEqual([0, 0, 3]);
+    });
+
     it('drops polygons of unmapped textures and keeps quads on request', async () => {
         const pc = (await parsePcModel(await SrscReader.fromBytes(pcModelFile()), 7))!;
         const a = pcToNeutral(pc, { mapTexture: (t) => (t.id === 11 ? { id: 1, db: 0 } : null) });

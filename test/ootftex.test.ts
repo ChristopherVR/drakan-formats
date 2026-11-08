@@ -922,7 +922,13 @@ describe('containers and the asset builder', () => {
                 expect(new DataView(body.buffer, body.byteOffset, body.byteLength).getUint32(40, true)).toBe(91);
             }
             const mod = await SrscReader.fromBytes(built.files['out/TEST.MOD']!);
-            for (const id of [2, 3]) expect((await parseModel(mod, id))!.textures).toEqual([{ id: 1, db: 0 }]);
+            // Every frame of the animated texture is listed after the first (the disc convention; frame 0 only draws still).
+            for (const id of [2, 3])
+                expect((await parseModel(mod, id))!.textures).toEqual([
+                    { id: 1, db: 0 },
+                    { id: 2, db: 0 },
+                    { id: 3, db: 0 },
+                ]);
             const size = (
                 await Promise.all(txd.entries.filter((e) => e.type === 0x40).map((e) => txd.readRaw(e)))
             ).reduce((n, r) => n + r.length, 0);
