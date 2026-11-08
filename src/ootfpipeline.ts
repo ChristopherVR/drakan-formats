@@ -119,6 +119,7 @@ import {
 } from './ootfclass.ts';
 import { OotfAssetBuilder, type AssetReport } from './ootfassets.ts';
 import { type Ps2TextureSwapOptions, effectiveSubstitutions, resolvePs2Substitutes } from './ootfps2tex.ts';
+import { type Ps2ModelSwapOptions, modelKey, planPs2Models } from './ootfps2model.ts';
 import { REFERENCE_ENGINES, deliberateOmission, pcParamAlias } from './ootfcoverage.ts';
 import { loadPcLevel, parsePcOdbClasses, pcLevelName, resolvePcPath, type PcFileSource, type PcLevel } from './pc.ts';
 import {
@@ -268,6 +269,12 @@ export interface OotfPipelineOptions {
      * `DEFAULT_PS2_TEXTURE_SUBSTITUTIONS`; `{ enabled: false }` keeps every OotF texture. Needs `OotfPs2Context.readPs2Txd`.
      */
     ps2Textures?: Ps2TextureSwapOptions;
+    /**
+     * Drakan 2 models for OotF enemies and weapons where the curated table has a counterpart (ootfps2model.ts). Default on with
+     * `DEFAULT_PS2_MODEL_SUBSTITUTIONS` (enemies keep the disc's own clips, `enemyAnimations: 'ootf'` retargets the PC clips
+     * onto the disc rigs as before); `{ enabled: false }` converts the OotF models of the table's enemies and weapons.
+     */
+    ps2Models?: Ps2ModelSwapOptions;
 }
 
 export interface OotfStageResult {
@@ -327,6 +334,8 @@ export interface OotfPipelineResult {
     music: OotfMusicPack | null;
     /** Drakan 2 textures used in place of OotF ones (`OotfPipelineOptions.ps2Textures`), and rows that could not be used. */
     ps2Textures?: { used: { ootf: string; ps2: string; label: string }[]; skipped: { ootf: string; reason: string }[] };
+    /** Drakan 2 models used for OotF classes (`OotfPipelineOptions.ps2Models`), by OotF class name. */
+    ps2Models?: { used: { ootf: string; ps2: string; label: string; category: string }[] };
 }
 
 const hex4 = (n: number): string => n.toString(16).padStart(4, '0');
@@ -626,6 +635,17 @@ export async function convertOotfLevels(
                 used.set(`reference|${ownedClassKey(c.owner, c.id)}`, { db: -1, id: c.id, cls: c.cls, pc: pcs[0]! });
             }
     }
+    // Drakan 2 models for OotF enemies and weapons (ootfps2model.ts): weapon class name -> model of the host's own MOD.
+    const modelSwap = planPs2Models(opt.ps2Models);
+    const modelSwapsUsed = new Map<string, { ootf: string; ps2: string; label: string; category: string }>();
+    const ps2WeaponModels = new Map<string, number>();
+    {
+        const hostOdb = ps2.odbs.get((opt.hostStem ?? 'RESOURES').toUpperCase());
+        if (hostOdb)
+            for (const c of (await parseOdbClasses(hostOdb)).values())
+                if (c.model && c.model.db === 0 && !ps2WeaponModels.has(modelKey(c.name)))
+                    ps2WeaponModels.set(modelKey(c.name), c.model.id);
+    }
     if (opt.models !== false && opt.classes !== false && hostOk) {
         await stage('models', async () => {
             // Inward shells (the Intro's black backdrop box) lose the walls the PC culls from outside cut-scene cameras:
@@ -642,6 +662,17 @@ export async function convertOotfLevels(
                 const ow = ownerOf.get(u.cls);
                 if (!m || !ow) continue;
                 ownerOf.set(u.cls, ow);
+                // A Drakan 2 weapon model in place of the PC one (ootfps2model.ts): a model of the host's own MOD.
+                const swap = [14, 39, 79].includes(u.cls.rflClass ?? -1) ? modelSwap.weapon(u.cls.name) : null;
+                const native = swap ? ps2WeaponModels.get(modelKey(swap.ps2)) : undefined;
+                if (swap && native === undefined)
+                    res.warnings.push(
+                        `drakan 2 model for ${u.cls.name.trim()} not used: no ${swap.ps2} in ${hostStem}`,
+                    );
+                if (swap && native !== undefined && (await builder.useNativeModel(ow, m.db, m.id, native))) {
+                    modelSwapsUsed.set(modelKey(u.cls.name), { ...swap, ootf: u.cls.name.trim() });
+                    continue;
+                }
                 // Native generic props need the strip draw representation even when their model is rigid.
                 await builder.addModelRef(ow, m.db, m.id, u.cls.rflClass === 17);
                 // A Morph Plug (99) shows the models of its "Morphing Models" in turn: convert all of them (`mapModelFor`),
@@ -692,6 +723,24 @@ export async function convertOotfLevels(
                     if (!ow || !m || newId === null || !builder.report.creatures.some((c) => c.id === newId)) continue;
                     const hit = byName.get(norm(i.cls)) ?? byName.get(`${i.cls.rflClass}|${aliasSquash(i.cls.name)}`);
                     if (!hit?.cls.model) continue;
+                    // Drakan 2 enemies (ootfps2model.ts): the disc's own clips need no retarget; a row turned off keeps the PC model.
+                    if (modelSwap.enemyOff(i.cls.name)) {
+                        convertOwn.add(i.cls);
+                        retargetNotes.push(`convert ${i.cls.name}: Drakan 2 model turned off`);
+                        continue;
+                    }
+                    const enemy = modelSwap.enemy(i.cls.name);
+                    if (enemy)
+                        modelSwapsUsed.set(modelKey(i.cls.name), {
+                            category: 'enemies',
+                            ootf: i.cls.name.trim(),
+                            ps2: hit.cls.name.trim(),
+                            label: `${i.cls.name.trim()} as ${hit.cls.name.trim()}`,
+                        });
+                    if (enemy === 'drakan2') {
+                        retargetNotes.push(`drakan 2 ${i.cls.name}: PS2 model ${hit.cls.model.id} with its own clips`);
+                        continue;
+                    }
                     const mStem = containerStem(hit.odb.file.replace(/\.ODB$/i, ''), hit.cls.model.db);
                     const rec = mStem ? modOf(mStem)?.find(0x0208, hit.cls.model.id) : undefined;
                     if (!mStem || !rec) continue; // the PS2 class is not skinned: nothing to retarget onto
@@ -2110,6 +2159,8 @@ export async function convertOotfLevels(
     // ---- files
     if (terrBuilder) res.files[TERRAIN_TXD_PATH] = terrBuilder.build();
     res.assets = builder.report;
+    res.ps2Models = { used: [...modelSwapsUsed.values()] };
+    for (const u of modelSwapsUsed.values()) log(`drakan 2 model: ${u.ootf} -> ${u.ps2}`);
     if (ps2Subs) {
         const used = new Map<string, { ootf: string; ps2: string; label: string }>();
         const kept = new Map<string, string>();

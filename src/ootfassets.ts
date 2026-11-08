@@ -809,6 +809,20 @@ export class OotfAssetBuilder {
     }
 
     /**
+     * Name the host container's own model `nativeId` (a Drakan 2 model, ootfps2model.ts) for PC model `pcId` of the container
+     * `pcDb` resolves to from `owner`, instead of converting it: `mapModelRef` then answers `nativeId` and nothing is added to
+     * the output MOD. Returns false when the reference does not resolve or the PC model was already converted.
+     */
+    async useNativeModel(owner: string, pcDb: number, pcId: number, nativeId: number): Promise<boolean> {
+        await this.registerOwner(owner);
+        const c = this.resolveContainer(owner, pcDb);
+        const key = c ? `${lower(c)}#${pcId}` : null;
+        if (!key || (this.modelIds.has(key) && this.modelIds.get(key) !== nativeId)) return false;
+        this.modelIds.set(key, nativeId);
+        return true;
+    }
+
+    /**
      * PS2 model reference (`id`, db 0 = the level's own MOD) for a PC model reference, after `addModel` /
      * `addModelRef`; null when it was not converted (skinned, missing, failed). `owner` is the container base path
      * whose `.db` resolves `pcDb` (call `registerOwner` first).
