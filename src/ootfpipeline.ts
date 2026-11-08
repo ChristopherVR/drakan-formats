@@ -1041,6 +1041,9 @@ export async function convertOotfLevels(
         return null;
     };
     const musicClass = findPs2Class((c) => /^triggered music loop$/i.test(c.name.trim()) && !!c.fields);
+    /** Dependency index of PS2 Music in the template level's table (LEVEL1NA: 14), what sequence music refs name. */
+    const musicDb =
+        tplHeader.dependencies.find((d) => odbStemForDependency(d.path.text) === 'PS2MUSIC')?.dbIndex ?? null;
     if (opt.music !== false && opt.ootfMusic !== false && pcs.length) {
         res.music = await stage('music tracks', async () => {
             const rrc = await src.read('Music.rrc');
@@ -1448,12 +1451,13 @@ export async function convertOotfLevels(
                                     return db === null || id === null ? undefined : ((db << 16) | id) >>> 0;
                                 },
                             },
-                            // cut scene music (PC action 8): the rendered OotF track, through the SSD stem's `.DB` entry
-                            // for PS2 Music (LEVEL1ON.DB: 8)
+                            // cut scene music (PC action 8): the rendered OotF track. Unlike sounds, a sequence's music
+                            // ref names the LEVEL's dependency index of PS2 Music (disc: LEVEL0RO 7, LEVEL1NA 14,
+                            // LEVEL2RE 18, LEVEL8OS 19 match their LVL tables, not the SSD stem's `.DB`)
                             musicMap: {
                                 get: (pcId) => {
                                     const id = res.music?.ids.get(pcId);
-                                    const db = dbIndexIn(g.stem, 'PS2MUSIC');
+                                    const db = musicDb;
                                     return id === undefined || db === null ? undefined : ((db << 16) | id) >>> 0;
                                 },
                             },
