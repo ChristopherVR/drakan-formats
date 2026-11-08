@@ -1664,7 +1664,11 @@ export async function convertOotfLevels(
                         if (!source || !container) return null;
                         const clips = await player.add(`${container}#${cls.model.id}`, source, refs);
                         for (const w of clips.warnings) res.warnings.push(`sequences ${pc.path}: player clips: ${w}`);
-                        return { clips: clips.map, channels: player.channelMap(source.skeleton) };
+                        return {
+                            clips: clips.map,
+                            channels: player.channelMap(source.skeleton),
+                            idle: await player.nativeClip('ncidle'),
+                        };
                     })();
                     const conv = await convertPcSequences(ssdReader, {
                         maps: {
@@ -1809,6 +1813,7 @@ export async function convertOotfLevels(
                     detectorClass: dc,
                     levelPath: ootfLevelKey(pc),
                     initialPcId: res.music ? pcInitialMusicId(pc) : 0,
+                            endIdleForActor: (_actor, targetId) => (targetId === playerId ? playerScene?.idle : undefined),
                     loopPos: rynn ? [...rynn.pos] : [0, 0, 0],
                     trackIds: res.music?.ids,
                 });
@@ -2707,6 +2712,15 @@ export type { ConversionReport };
 /** Dragon.rrc strings of the install (`<0xNNNN>` references), empty when the file is missing or unreadable. */
 async function loadRrcStrings(
     src: PcFileSource,
+        /** Id of a native clip of the player's ADB by name (after `add`), for scene ends that hand Rynn back to the game. */
+        async nativeClip(name: string): Promise<number | undefined> {
+            if (!skeleton || !adb) return undefined;
+            for (const id of skeleton.animIds) {
+                const info = adb.find(0x0501, id);
+                if (info && animName(await adb.readRaw(info)).toLowerCase() === name) return id;
+            }
+            return undefined;
+        },
 ): Promise<{ path: string | null; others: string[]; strings: Map<number, string> }> {
     const { path, others } = pickRrcPath(await src.list());
     try {

@@ -413,6 +413,34 @@ describe('ootfseq', () => {
         expect(flags(seq.actors[1]!)).toEqual([0x10]);
     });
 
+    it('plays the native idle just before an actor is released to the game', async () => {
+        const clip = act(1, 2, [...u32(0), ...u32(7), ...u32(0), ...f32(0), ...f32(1), ...u32(0x15)]);
+        const release = act(5, 10, u32(1));
+        const bytes = w(str('End'), u32(126), u32(0), u32(2), u32(1), actor('Rynn', 1, 1740, [clip, release]));
+        const run = async (idle?: number) => {
+            const result = await convertPcSequences(stub(bytes), {
+                maps: {
+                    objectIdMap: new Map([[1740, 42]]),
+                    animMapForActor: () => new Map([[7, 2400]]),
+                    endIdleForActor: () => idle,
+                },
+                usedIds: new Set(),
+            });
+            const entry = result.entries.find((e) => e.type === 0x311)!;
+            return parseActions(parseSequence(entry.id, entry.sub, entry.data)!.actors[0]!)!;
+        };
+        expect((await run()).map((x) => [x.type, x.time])).toEqual([
+            [1, 2],
+            [5, 10],
+        ]);
+        const withIdle = await run(1147);
+        expect(withIdle.map((x) => [x.type, x.time])).toEqual([
+            [1, 2],
+            [1, 9.5],
+            [5, 10],
+        ]);
+    });
+
     it('allocates holes below the maximum first and builds pack paths', () => {
         expect(ssdEntryPath('LEVEL1ON.SSD', { type: 0x311, id: 5, sub: 2 })).toBe('new/LEVEL1ON.SSD/0311_5_2.bin');
         expect(remapSequenceRefs([1, 2, 3], new Map([[2, 9]]))).toEqual([9]);

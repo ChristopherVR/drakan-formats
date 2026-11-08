@@ -151,6 +151,14 @@ export interface SequenceMaps {
     lipSyncForActor?: (actor: PcSeqActor, targetObjectId: number) => boolean;
     /** Set per actor by convertActor from `lipSyncForActor`. */
     lipSync?: boolean;
+    /**
+     * Native idle clip (id in the actor's own ADB) to play, with a blend, just before the actor's release (a type-5 action that
+     * hands the actor back to the game). Without it the engine drops the last scene clip at the release and the body snaps
+     * into its gameplay idle; with it the pose under the fade is already the idle stance. Used for the player.
+     */
+    endIdleForActor?: (actor: PcSeqActor, targetObjectId: number) => number | undefined;
+    /** Set per actor by convertActor from `endIdleForActor`. */
+    endIdle?: number;
     /** PC sound ref `(db << 16) | id` -> final PS2 ref word (`(db << 16) | id` in the target SSD's `.DB` frame). */
     soundMap?: RefLookup;
     /** PC music id (first u32 of the music action; 0 = stop) -> PS2 music ref word (`(db << 16) | id`). */
@@ -450,6 +458,7 @@ function convertActor(a: PcSeqActor, opts: SequenceConvertOptions, report: Seque
     if (opts.maps.animMapForActor) maps.animMap = opts.maps.animMapForActor(a, target.ref);
     maps.channelMap = opts.maps.channelMapForActor?.(a, target.ref);
     maps.lipSync = opts.maps.lipSyncForActor?.(a, target.ref) ?? false;
+    maps.endIdle = opts.maps.endIdleForActor?.(a, target.ref);
     const actionOptions = { ...opts, maps };
     const chunks: Uint8Array[] = [];
     const sorted = a.actions.map((x, i) => ({ x, i })).sort((p, q) => p.x.time - q.x.time || p.i - q.i);
@@ -467,10 +476,28 @@ function convertActor(a: PcSeqActor, opts: SequenceConvertOptions, report: Seque
         }
         chunks.push(c);
     }
-    for (const { x } of sorted) {
+    // The release is the last run/stop action that gives the actor back to the game (payload non-zero).
+    let release = -1;
+    if (maps.endIdle !== undefined) sorted.forEach(({ x }, i) => (isRelease(x) ? (release = i) : undefined));
+    let lastTime = 0;
+    sorted.forEach(({ x }, i) => {
+        if (i === release) {
+            const at = Math.max(lastTime, x.time - END_IDLE_LEAD);
+            const idle = pcBytes(1, at, 24);
+            const dv = view(idle);
+            dv.setUint32(6, 0, true); // channel 0: the whole body
+            dv.setUint32(10, maps.endIdle! >>> 0, true);
+            dv.setUint32(14, 0, true);
+            dv.setFloat32(18, END_IDLE_BLEND, true);
+            dv.setFloat32(22, 1, true);
+            dv.setUint32(26, 0x15, true);
+            chunks.push(idle);
+            report.actionsOut++;
+        }
         const b = convertAction(x, actionOptions, report);
         if (b) chunks.push(b);
-    }
+        lastTime = Math.max(lastTime, x.time);
+    });
     const j = joinActions(chunks);
     const mode = opts.actorMode?.(a) ?? (target.special === 'rynn' || target.special === 'dragon' ? 1 : 0);
     const actor: SsdActor = {
@@ -485,6 +512,11 @@ function convertActor(a: PcSeqActor, opts: SequenceConvertOptions, report: Seque
     };
     return { actor };
 }
+
+/** Seconds before the release at which the idle clip starts, and its blend time (the blend word of an animation action). */
+const END_IDLE_LEAD = 0.5;
+const END_IDLE_BLEND = 0.4;
+const isRelease = (x: PcAction): boolean => x.type === 5 && x.time > 0 && view(x.payload).getUint32(0, true) !== 0;
 
 const lookup = (m: RefLookup | undefined, k: number): number | undefined => m?.get(k >>> 0);
 
