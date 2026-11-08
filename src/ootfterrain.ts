@@ -32,10 +32,9 @@ import type { LvlHeader } from './lvl.ts';
 /** Where the replacement `Proc Textures` TXD goes inside a mod pack. */
 export const TERRAIN_TXD_PATH = 'files/ENGLISH/WORLDCON/PROCTEES/PROCTEES.TXD';
 /**
- * u32 at texture header +40 of converted terrain textures. On the disc it is a per-texture number that is 0 in splat
- * textures and 1..113 (plus 199646 on a few) in Proc Textures; the engine uses it for terrain textures: 114 and above
- * froze the world, 1 drew flat dark olive, 45 (PROCTEES id 563) drew the texture correctly. Meaning unknown; 45 is the
- * only value verified to render right.
+ * u32 at texture header +40 of converted terrain textures: the texture's material, a class of `PROCTEES.ODB` (0 in splat
+ * textures). 45 is "Blue Snow", a splat material, the only value verified to render right; 1 is "Water" (drew flat dark
+ * olive on ground), 114 and above froze the world in the 2026-10-31 runs (journal 2026-11-08/ootf-water.md).
  */
 export const TERRAIN_TEXTURE_SLOT = 45;
 
