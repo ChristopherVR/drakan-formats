@@ -436,6 +436,8 @@ export interface Ps2TextureOptions {
     minSize?: number;
     /** Write a square texture (the larger edge both ways): every one of the 154 disc creature textures is square. */
     square?: boolean;
+    /** Cut alpha at 50 %: every texel opaque or clear, so the texture is a depth-writing cut-out instead of a blended one. */
+    hardAlpha?: boolean;
     /** Animation fps byte (disc: 10). */
     fps?: number;
     /** u32 at header +40 (disc: a per-container counter, 0 in splat textures; meaning unknown). */
@@ -511,7 +513,13 @@ function header(
 }
 
 /** Encode an RGBA image as a PS2 TXD record body. Sizes are rounded up to powers of two (8 .. maxSize). */
-export function encodePs2Texture(src: RgbaImage, opt: Ps2TextureOptions = {}): Ps2Texture {
+export function encodePs2Texture(source: RgbaImage, opt: Ps2TextureOptions = {}): Ps2Texture {
+    let src = source;
+    if (opt.hardAlpha) {
+        const rgba = new Uint8Array(source.rgba);
+        for (let i = 3; i < rgba.length; i += 4) rgba[i] = rgba[i]! >= 128 ? 255 : 0;
+        src = { ...source, rgba };
+    }
     const maxSize = opt.maxSize ?? 256;
     const minSize = Math.min(maxSize, opt.minSize ?? 0);
     let opaque = true;

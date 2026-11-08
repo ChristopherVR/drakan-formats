@@ -242,6 +242,8 @@ export class OotfAssetBuilder {
     /** Convert PC texture `id` of `<container>.txd` (and the frames that follow it). Returns the new PS2 id or null. */
     async addTexture(container: string, id: number, indexed = false): Promise<number | null> {
         // Textures of skinned models are written 8 bpp (`indexed`): see the journal, 32 bpp textures do not draw on creature classes.
+        // Graded alpha is cut at 50 % (`hardAlpha`): a blended texture does not write depth, so the layered feather polygons of the
+        // Intro owl (inner wing / chest cards) painted over the chest in strip order. `OOTF_SKIN_SOFT_ALPHA=1` keeps the blend (test aid).
         // They are also written square: a non-square texture (Scavenger 256x128) makes the creature body vanish (shadow only); the disc's are all square.
         const sfx = indexed ? ':i' : '';
         const key = `${lower(container)}#${id}${sfx}`;
@@ -281,7 +283,9 @@ export class OotfAssetBuilder {
             const t = encodePs2Texture(f.image, {
                 fps: f.info.fps || 10,
                 ...this.options.texture,
-                ...(indexed ? { mode: 'indexed' as const, square: true } : {}),
+                ...(indexed
+                    ? { mode: 'indexed' as const, square: true, hardAlpha: process.env.OOTF_SKIN_SOFT_ALPHA !== '1' }
+                    : {}),
             });
             if (i > 0) t.body[37] = t.body[37]! | PC_TEX_NEXT_FRAME;
             const nid = base + i;

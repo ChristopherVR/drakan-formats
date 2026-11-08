@@ -1096,3 +1096,14 @@ describe('containers and the asset builder', () => {
         expect(b.mapTexture(0xffffffff, pc)).toBeNull();
     });
 });
+
+describe('hard alpha (skinned cut-outs)', () => {
+    it('writes graded alpha as an opaque / clear cut-out (selector 1, not the blend 8)', () => {
+        const rgba = new Uint8Array(16 * 16 * 4);
+        for (let i = 0; i < 256; i++) rgba.set([200, 100, 50, i % 3 === 0 ? 40 : i % 3 === 1 ? 200 : 255], i * 4);
+        const soft = encodePs2Texture({ width: 16, height: 16, rgba }, { mode: 'indexed', square: true });
+        const hard = encodePs2Texture({ width: 16, height: 16, rgba }, { mode: 'indexed', square: true, hardAlpha: true });
+        expect(soft.body[16]).toBe(8);
+        expect(hard.body[16]).toBe(1);
+    });
+});
