@@ -223,6 +223,13 @@ export interface RetargetAnimOptions extends ConvertAnimOptions {
     scale?: number;
     /** Render-only actor: its controller already supplies world motion, so retain root bind translation. */
     inPlace?: boolean;
+    /**
+     * Target joints that must take the source joint's model-space orientation instead of a bind-relative delta:
+     * attachment frames (e.g. `Rweapon`) whose items were authored on the source rig. Their bind frames can differ
+     * by 100 degrees between rigs, which would otherwise turn every held item by that constant. Leaf joints only:
+     * the change is not propagated to children.
+     */
+    worldJoints?: readonly number[];
 }
 
 /** PS2 absolute parent-relative tracks -> another PS2 bind skeleton, preserving each source key and timing. */
@@ -255,8 +262,17 @@ export function retargetPs2Anim(
             invertMat12(rotation(sb.local[s]!)),
         );
         const right = mulMat12(rotation(sb.parentWorld[s]!), invertMat12(rotation(tb.parentWorld[d]!)));
+        // Every matched ancestor follows world = bindWorld * delta on both rigs, so pre-multiplying the local key by
+        // sourceBindWorld * inverse(targetBindWorld) yields exactly the source joint's animated world orientation.
+        const world = opt.worldJoints?.includes(d)
+            ? mulMat12(
+                  mulMat12(rotation(sb.local[s]!), rotation(sb.parentWorld[s]!)),
+                  invertMat12(mulMat12(rotation(tb.local[d]!), rotation(tb.parentWorld[d]!))),
+              )
+            : null;
         const keys = original.keys.map((k) => {
-            const q = mat12ToQuat(mulMat12(mulMat12(left, quatToMat12(k.q, [0, 0, 0])), right));
+            const delta = mulMat12(mulMat12(left, quatToMat12(k.q, [0, 0, 0])), right);
+            const q = mat12ToQuat(world ? mulMat12(world, delta) : delta);
             const length = Math.hypot(...q);
             const pos =
                 root && !opt.inPlace && k.pos

@@ -265,4 +265,25 @@ describe('PS2 character motion retargeting', () => {
         expect(result.tracks[0]!.keys.at(-1)!.pos).toEqual(expected.tracks[0]!.keys.at(-1)!.pos);
         expect(result.tracks[3]!.keys).toHaveLength(1);
     });
+    it('gives an attachment joint the source model-space orientation, whatever its bind frame', () => {
+        // Animated model-space orientation of joint j at key k (all joints share the key times here).
+        const worldAt = (anim: typeof original, parents: number[], j: number, k: number): Float32Array => {
+            const local = quatToMat12(anim.tracks[j]!.keys[Math.min(k, anim.tracks[j]!.keys.length - 1)]!.q, [0, 0, 0]);
+            return parents[j]! < 0 ? local : mulMat12(local, worldAt(anim, parents, parents[j]!, k));
+        };
+        const angle = (a: Float32Array, b: Float32Array): number => {
+            const m = mulMat12(a, invertMat12(b));
+            return Math.acos(Math.max(-1, Math.min(1, (m[0]! + m[4]! + m[8]! - 1) / 2)));
+        };
+        const match = matchJoints(source, target);
+        const plain = retargetPs2Anim(original, source, target, match, { inPlace: true });
+        const held = retargetPs2Anim(original, source, target, match, { inPlace: true, worldJoints: [2] });
+        for (const k of [0, 1]) {
+            const want = worldAt(original, source.parents, 2, k);
+            expect(angle(worldAt(held, target.parents, 2, k), want)).toBeLessThan(0.001);
+            expect(angle(worldAt(plain, target.parents, 2, k), want)).toBeGreaterThan(0.1);
+            // Other joints keep the bind-relative delta.
+            expect(quatAngle(held.tracks[1]!.keys[k]!.q, plain.tracks[1]!.keys[k]!.q)).toBeLessThan(0.001);
+        }
+    });
 });
