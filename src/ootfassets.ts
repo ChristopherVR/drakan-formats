@@ -22,12 +22,14 @@ import {
     buildPs2Txd,
     encodePs2Texture,
     isSkip,
+    parsePcTextureInfo,
     readPcTexture,
     upgradeIndexedSquareTexture,
 } from './ootftex.ts';
 import { type PcFileSource, type PcLevel, resolvePcPath } from './pc.ts';
 import { SrscReader } from './srsc.ts';
 import { TXD_ENTRY_TYPE } from './txd.ts';
+import { type Ps2SubstituteTexture, substituteMismatch } from './ootfps2tex.ts';
 
 /**
  * Packaging of converted Order of the Flame assets for a mod pack: one PS2 MOD + TXD + DB for a converted level (or for
@@ -63,6 +65,8 @@ export interface AssetBuilderOptions {
     displayList?: RegExp;
     /** Convert skinned models (default true); false skips them like before. */
     skinned?: boolean;
+    /** Drakan 2 disc textures copied in place of OotF ones, by lower-case `container#id` (ootfps2tex.ts). */
+    ps2Textures?: ReadonlyMap<string, Ps2SubstituteTexture>;
 }
 
 export interface AssetReport {
@@ -70,6 +74,8 @@ export interface AssetReport {
     textures: { converted: number; bytes: number; byBpp: Record<string, number>; lossy: number };
     /** `container#id` -> why there is no PS2 counterpart. */
     skipped: Map<string, string>;
+    /** OotF `container#id` -> the Drakan 2 texture used instead (`ps2Textures`), or why the OotF one was kept. */
+    ps2Textures?: Map<string, { ps2: string; used: boolean; reason?: string }>;
     /** Skinned models converted, with the number of clips written and skipped. */
     creatures: { key: string; id: number; joints: number; groups: number; anims: number; animsSkipped: number }[];
     warnings: string[];
@@ -126,6 +132,8 @@ export class OotfAssetBuilder {
     /** Texture base id -> number of animation frames (ids base .. base + n - 1). */
     private readonly texFrames = new Map<number, number>();
     private readonly texBodies: { id: number; body: Uint8Array }[] = [];
+    /** Drakan 2 texture ref (lower case) -> the id its copy got (`useSubstitute`). */
+    private readonly ps2TexIds = new Map<string, number>();
     private readonly modelIds = new Map<string, number>();
     /** `container#id` (lower case) -> PC polygon indices left out of that model (`dropPolygonsOf`). */
     private readonly polygonDrops = new Map<string, ReadonlySet<number>>();
@@ -203,6 +211,11 @@ export class OotfAssetBuilder {
             this.skip(key, `${container}.txd not found`);
             return null;
         }
+        const sub = this.options.ps2Textures?.get(`${lower(container)}#${id}`);
+        if (sub) {
+            const used = await this.useSubstitute(txd, container, id, sfx, sub, indexed);
+            if (used !== null) return used;
+        }
         const first = await readPcTexture(txd, id);
         if (isSkip(first)) {
             this.skip(key, first.reason);
@@ -240,6 +253,58 @@ export class OotfAssetBuilder {
         });
         this.nextTex += frames.length;
         this.texFrames.set(base, frames.length);
+        return base;
+    }
+
+    /**
+     * Copy the Drakan 2 texture `sub` (and its frames) in place of OotF texture `id` of `container`: the record is the disc's,
+     * byte for byte, so the game and the Drakan 2 HD pack see the disc texture. Null (OotF texture kept) when it does not fit.
+     */
+    private async useSubstitute(
+        txd: SrscReader,
+        container: string,
+        id: number,
+        sfx: string,
+        sub: Ps2SubstituteTexture,
+        indexed: boolean,
+    ): Promise<number | null> {
+        const log = (this.report.ps2Textures ??= new Map());
+        const ootf = `${container}#${id}`;
+        const e = txd.find(TXD_ENTRY_TYPE, id);
+        let why: string | null = e ? null : 'no such OotF texture';
+        if (e) {
+            try {
+                const info = parsePcTextureInfo(await txd.readRaw(e));
+                why = substituteMismatch(sub, info.width, info.height, indexed);
+            } catch (x) {
+                why = x instanceof Error ? x.message : String(x);
+            }
+        }
+        const shared = this.ps2TexIds.get(sub.row.ps2.toLowerCase());
+        if (why === null && shared === undefined && this.nextTex + sub.frames.length - 1 > 0xffff)
+            why = 'texture id space exhausted';
+        if (why !== null) {
+            log.set(ootf, { ps2: sub.row.ps2, used: false, reason: why });
+            return null;
+        }
+        log.set(ootf, { ps2: sub.row.ps2, used: true });
+        if (shared !== undefined) {
+            // Several OotF textures map to one disc texture (pine trunk and log bark): one copy.
+            this.texIds.set(`${lower(container)}#${id}${sfx}`, shared);
+            return shared;
+        }
+        const base = this.nextTex;
+        sub.frames.forEach((body, i) => {
+            this.texBodies.push({ id: base + i, body });
+            this.texAlpha.set(base + i, sub.hasAlpha);
+            this.report.textures.converted++;
+            this.report.textures.bytes += body.length;
+            this.report.textures.byBpp[sub.bpp] = (this.report.textures.byBpp[sub.bpp] ?? 0) + 1;
+        });
+        this.texIds.set(`${lower(container)}#${id}${sfx}`, base);
+        this.nextTex += sub.frames.length;
+        this.texFrames.set(base, sub.frames.length);
+        this.ps2TexIds.set(sub.row.ps2.toLowerCase(), base);
         return base;
     }
 

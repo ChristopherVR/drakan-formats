@@ -116,6 +116,7 @@ import {
     type Ps2OdbIn,
 } from './ootfclass.ts';
 import { OotfAssetBuilder, type AssetReport } from './ootfassets.ts';
+import { type Ps2TextureSwapOptions, effectiveSubstitutions, resolvePs2Substitutes } from './ootfps2tex.ts';
 import { REFERENCE_ENGINES, deliberateOmission, pcParamAlias } from './ootfcoverage.ts';
 import { loadPcLevel, parsePcOdbClasses, pcLevelName, resolvePcPath, type PcFileSource, type PcLevel } from './pc.ts';
 import {
@@ -193,6 +194,11 @@ export interface OotfPs2Context {
     hostFiles?: ReadonlyMap<string, { mod: SrscReader; txd: SrscReader }>;
     /** Upper-case names of the XDBs on the disc (`SYSTEM.XDB`). A class in an ODB without one (FX) gets no text ids: its string defaults are blanked. */
     xdbFiles?: ReadonlySet<string>;
+    /**
+     * Reads a TXD of the disc by its path relative to the language folder (`WORLDCON/WORLDCON/WORLDCON.TXD`): the source of the
+     * Drakan 2 textures `OotfPipelineOptions.ps2Textures` copies in place of OotF ones. Without it no texture is replaced.
+     */
+    readPs2Txd?: (discPath: string) => Promise<Uint8Array | null>;
 }
 
 export interface OotfPipelineOptions {
@@ -243,6 +249,11 @@ export interface OotfPipelineOptions {
     /** Name written into the header; default the PC level's name. */
     name?: (pc: PcLevel) => string;
     log?: (msg: string) => void;
+    /**
+     * Drakan 2 textures in place of OotF ones where the curated table has a counterpart (ootfps2tex.ts). Default on with
+     * `DEFAULT_PS2_TEXTURE_SUBSTITUTIONS`; `{ enabled: false }` keeps every OotF texture. Needs `OotfPs2Context.readPs2Txd`.
+     */
+    ps2Textures?: Ps2TextureSwapOptions;
 }
 
 export interface OotfStageResult {
@@ -300,6 +311,8 @@ export interface OotfPipelineResult {
     source: OotfSourceProfile | null;
     /** The rendered OotF music (PC id -> PS2MUSIC.SDB id, title track); null when not rendered. */
     music: OotfMusicPack | null;
+    /** Drakan 2 textures used in place of OotF ones (`OotfPipelineOptions.ps2Textures`), and rows that could not be used. */
+    ps2Textures?: { used: { ootf: string; ps2: string; label: string }[]; skipped: { ootf: string; reason: string }[] };
 }
 
 const hex4 = (n: number): string => n.toString(16).padStart(4, '0');
@@ -464,7 +477,17 @@ export async function convertOotfLevels(
     const maxId = (r: SrscReader | undefined, type: number): number =>
         (r?.entries ?? []).reduce((m, e) => (e.type === type ? Math.max(m, e.id) : m), 0);
     const hostGroup = ps2.hostMod?.entries.find((e) => e.type === 0x0200)?.sub ?? 1;
+    // Drakan 2 textures for OotF ones (ootfps2tex.ts): read once here, copied by the asset builders on first use.
+    const ps2Subs =
+        ps2.readPs2Txd && opt.textures !== false
+            ? await stage('drakan 2 textures', () =>
+                  resolvePs2Substitutes(effectiveSubstitutions(opt.ps2Textures), ps2.readPs2Txd!),
+              )
+            : null;
+    for (const s of ps2Subs?.skipped ?? [])
+        res.warnings.push(`drakan 2 texture for ${s.row.ootf} not used: ${s.reason}`);
     const builder = new OotfAssetBuilder(src, {
+        ps2Textures: ps2Subs?.byOotf,
         firstModelId: maxId(ps2.hostMod, 0x0200) + 1,
         firstTextureId: maxId(ps2.hostTxd, 0x0040) + 1,
         // Past every clip id of the host ADB and of the ADBs of ODBs that may host clones (the clips ship to each of them).
@@ -829,6 +852,7 @@ export async function convertOotfLevels(
                             firstModelId: maxId(hf.mod, 0x0200) + 1,
                             firstTextureId: maxId(hf.txd, 0x0040) + 1,
                             skinned: false,
+                            ps2Textures: ps2Subs?.byOotf,
                             displayList: /./, // models of template ODBs draw nothing without the strip display list 0x0211
                         });
                         crossBuilders.set(stem, cb);
@@ -2002,6 +2026,26 @@ export async function convertOotfLevels(
     // ---- files
     if (terrBuilder) res.files[TERRAIN_TXD_PATH] = terrBuilder.build();
     res.assets = builder.report;
+    if (ps2Subs) {
+        const used = new Map<string, { ootf: string; ps2: string; label: string }>();
+        const kept = new Map<string, string>();
+        for (const r of [builder.report, ...[...crossBuilders.values()].map((c) => c.report)])
+            for (const [ootf, u] of r.ps2Textures ?? []) {
+                const label = ps2Subs.byOotf.get(ootf.toLowerCase())?.row.label ?? ootf;
+                if (u.used) used.set(ootf.toLowerCase(), { ootf, ps2: u.ps2, label });
+                else kept.set(ootf.toLowerCase(), u.reason ?? '');
+            }
+        res.ps2Textures = {
+            used: [...used.values()],
+            skipped: [
+                ...ps2Subs.skipped.map((s) => ({ ootf: s.row.ootf, reason: s.reason })),
+                ...[...kept].filter(([k]) => !used.has(k)).map(([ootf, reason]) => ({ ootf, reason })),
+            ],
+        };
+        for (const u of used.values()) log(`drakan 2 texture: ${u.label} (${u.ootf} -> ${u.ps2})`);
+        for (const [ootf, reason] of kept)
+            if (!used.has(ootf)) res.warnings.push(`drakan 2 texture for ${ootf} not used: ${reason}`);
+    }
     if (hostOk) {
         await stage('assets', async () => {
             const add = builder.entries(hostGroup);

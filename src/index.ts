@@ -26,6 +26,7 @@ export * from './stringrefs.ts';
 export * from './ootfcontainer.ts';
 export * from './ootfmodel.ts';
 export * from './ootftex.ts';
+export * from './ootfps2tex.ts';
 export * from './ootfassets.ts';
 export * from './ootfseq.ts';
 export * from './ootfsound.ts';
