@@ -466,7 +466,7 @@ export function convertPcLevel(pc: PcLevel, opt: ConvertOptions): Ps2LevelParts 
     // ---- terrain
     const floors = pc.terrain.filter((L) => L.type === 0);
     const groundAt = (x: number, z: number, y: number): number => terrainGroundBelow(floors, x, z, y);
-    const terrain = pc.terrain.map((L) => convertLayer(L, pc, opt, report, groundAt));
+    const terrain = linkFarWater(pc.terrain.map((L) => convertLayer(L, pc, opt, report, groundAt)));
 
     // ---- header
     const name = opt.name ?? pcLevelName(pc.header);
@@ -545,6 +545,30 @@ function convertLayer(
         vertexMask: ps2VertexMask(L.width, L.height, cellTexLeft),
         source: 'ps2',
     };
+}
+
+/**
+ * How far (cells) a layer's `visible` list reaches for water. The engine draws, from the layer the camera is in, only the layers
+ * of that layer's list. The PC lists were made for its 12 / 30 lu draw distance, so a coastal layer lists a handful of the 102
+ * Ruined Village sea layers and the sea stops short of the horizon (a diagonal edge against the sky), while the PS2 template
+ * sees 65 lu and more. Water layers within this distance of a layer are added to its list. Journal 2026-11-09/ootf-sea-sky.md.
+ */
+export const WATER_VISIBLE_CELLS = 96;
+
+export function linkFarWater(layers: TerrainLayer[], reach = WATER_VISIBLE_CELLS): TerrainLayer[] {
+    const water = layers.filter((L) => L.type === LAYER_TYPE_WATER);
+    if (!water.length) return layers;
+    return layers.map((L) => {
+        const have = new Set(L.visible);
+        const add: number[] = [];
+        for (const W of water) {
+            if (have.has(W.index)) continue;
+            const dx = Math.max(W.originX - (L.originX + L.width), L.originX - (W.originX + W.width), 0);
+            const dz = Math.max(W.originZ - (L.originZ + L.height), L.originZ - (W.originZ + W.height), 0);
+            if (Math.max(dx, dz) <= reach) add.push(W.index);
+        }
+        return add.length ? { ...L, visible: [...L.visible, ...add] } : L;
+    });
 }
 
 /** Layer type of water surfaces (`TerrainLayerDef.type`) on both platforms; 0 floor, 1 ceiling. */

@@ -20,6 +20,7 @@ import {
     ps2BlobFor,
     readPs2Blob,
     waterHoleHeights,
+    linkFarWater,
     splitPs2Terrain,
     ps2ClassTables,
     ps2VertexMask,
@@ -597,5 +598,18 @@ describe('PC -> PS2 conversion', () => {
         expect(back[0]!.heights[5]).toBe(first.heights[5]);
         expect(back[1]!.name).toBe('layer 2');
         expect([...back[0]!.cellUv]).toEqual([...first.cellUv]);
+    });
+});
+
+describe('linkFarWater', () => {
+    const mk = (index: number, type: number, originX: number, visible: number[]) =>
+        ({ index, type, originX, originZ: 0, width: 10, height: 10, visible }) as never;
+    it('lists water layers within reach in every layer and leaves far ones out', () => {
+        const layers = [mk(0, 0, 0, [0]), mk(1, 2, 20, [1]), mk(2, 2, 400, [2]), mk(3, 0, 25, [3, 1])];
+        const out = linkFarWater(layers, 96);
+        expect(out[0]!.visible).toEqual([0, 1]);
+        expect(out[1]!.visible).toEqual([1]);
+        expect(out[3]!.visible).toEqual([3, 1]);
+        expect(out[2]!.visible).toEqual([2]);
     });
 });
