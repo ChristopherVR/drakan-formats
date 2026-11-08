@@ -602,14 +602,31 @@ describe('PC -> PS2 conversion', () => {
 });
 
 describe('linkFarWater', () => {
-    const mk = (index: number, type: number, originX: number, visible: number[]) =>
-        ({ index, type, originX, originZ: 0, width: 10, height: 10, visible }) as never;
-    it('lists water layers within reach in every layer and leaves far ones out', () => {
-        const layers = [mk(0, 0, 0, [0]), mk(1, 2, 20, [1]), mk(2, 2, 400, [2]), mk(3, 0, 25, [3, 1])];
+    const mk = (index: number, type: number, originX: number, visible: number[], h = 11000) =>
+        ({
+            index,
+            type,
+            originX,
+            originZ: 0,
+            width: 1,
+            height: 1,
+            visible,
+            heights: new Float32Array(4).fill(h),
+            cellTexLeft: new Uint32Array([5]),
+        }) as never;
+    it('links only sea-level water layers within reach, not rivers above the sea', () => {
+        const layers = [
+            mk(0, 0, 0, [0]),
+            mk(1, 2, 20, [1]),
+            mk(2, 2, 400, [2]),
+            mk(3, 0, 25, [3, 1]),
+            mk(4, 2, 30, [4], 19500),
+            mk(5, 2, 40, [5]),
+        ];
         const out = linkFarWater(layers, 96);
-        expect(out[0]!.visible).toEqual([0, 1]);
-        expect(out[1]!.visible).toEqual([1]);
-        expect(out[3]!.visible).toEqual([3, 1]);
+        expect(out[0]!.visible).toEqual([0, 1, 5]);
+        expect(out[3]!.visible).toEqual([3, 1, 5]);
         expect(out[2]!.visible).toEqual([2]);
+        expect(out[4]!.visible).toEqual([4, 1, 5]);
     });
 });

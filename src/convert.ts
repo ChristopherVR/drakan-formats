@@ -509,10 +509,13 @@ function convertLayer(
     const cellTexLeft = new Uint32Array(nc);
     const cache = new Map<number, number>();
     for (let c = 0; c < nc; c++) {
-        // PS2 keeps one ref per cell: the PC left triangle decides (a hole in only one triangle keeps the hole).
         const l = L.cellTexLeft[c]!;
         const r = L.cellTexRight[c]!;
-        const ref = l === TEX_HOLE || r === TEX_HOLE ? TEX_HOLE : l;
+        // PS2 keeps one ref per cell: the PC left triangle decides (a hole in only one triangle keeps the hole). A water layer
+        // keeps the water instead: the PC cell is water in one half (shore cells on a diagonal), and turning it into a hole
+        // left stair-stepped gaps in pools and streams (418 cells in Ruined Village); the hole cell is also drawn by the water pass.
+        const half = (l === TEX_HOLE) !== (r === TEX_HOLE);
+        const ref = L.type === LAYER_TYPE_WATER && half ? (l === TEX_HOLE ? r : l) : l === TEX_HOLE || r === TEX_HOLE ? TEX_HOLE : l;
         if (ref === TEX_HOLE || ref === TEX_INVISIBLE) {
             cellTexLeft[c] = ref;
             continue;
@@ -558,10 +561,50 @@ export const WATER_VISIBLE_CELLS = 96;
 export function linkFarWater(layers: TerrainLayer[], reach = WATER_VISIBLE_CELLS): TerrainLayer[] {
     const water = layers.filter((L) => L.type === LAYER_TYPE_WATER);
     if (!water.length) return layers;
+    // Only the sea is linked from afar: the level's most common water surface height. Rivers, pools and lakes above it are
+    // drawn only where the PC lists them (linked everywhere they showed as sheets in the air over valleys and rock faces).
+    const count = new Map<number, number>();
+    for (const W of water) {
+        const sw = W.width + 1;
+        const seen = new Set<number>();
+        for (let z = 0; z < W.height; z++)
+            for (let x = 0; x < W.width; x++) {
+                const t = W.cellTexLeft[z * W.width + x]!;
+                if (t === TEX_HOLE || t === TEX_INVISIBLE) continue;
+                for (const v of [z * sw + x, z * sw + x + 1, (z + 1) * sw + x, (z + 1) * sw + x + 1]) seen.add(v);
+            }
+        for (const v of seen) {
+            const h = Math.round(W.heights[v]!);
+            count.set(h, (count.get(h) ?? 0) + 1);
+        }
+    }
+    let sea = NaN;
+    let best = 0;
+    for (const [h, n] of count)
+        if (n > best) {
+            best = n;
+            sea = h;
+        }
+    const isSea = (W: TerrainLayer): boolean => {
+        const sw = W.width + 1;
+        let total = 0;
+        let flat = 0;
+        for (let z = 0; z < W.height; z++)
+            for (let x = 0; x < W.width; x++) {
+                const t = W.cellTexLeft[z * W.width + x]!;
+                if (t === TEX_HOLE || t === TEX_INVISIBLE) continue;
+                for (const v of [z * sw + x, z * sw + x + 1, (z + 1) * sw + x, (z + 1) * sw + x + 1]) {
+                    total++;
+                    if (Math.abs(W.heights[v]! - sea) <= SEA_LEVEL_TOLERANCE) flat++;
+                }
+            }
+        return total > 0 && flat >= total * 0.8;
+    };
+    const sealayers = Number.isFinite(sea) ? water.filter(isSea) : [];
     return layers.map((L) => {
         const have = new Set(L.visible);
         const add: number[] = [];
-        for (const W of water) {
+        for (const W of sealayers) {
             if (have.has(W.index)) continue;
             const dx = Math.max(W.originX - (L.originX + L.width), L.originX - (W.originX + W.width), 0);
             const dz = Math.max(W.originZ - (L.originZ + L.height), L.originZ - (W.originZ + W.height), 0);
@@ -570,6 +613,9 @@ export function linkFarWater(layers: TerrainLayer[], reach = WATER_VISIBLE_CELLS
         return add.length ? { ...L, visible: [...L.visible, ...add] } : L;
     });
 }
+
+/** A water layer is "the sea" when 80 % of its water vertices are within this of the level's most common water height. */
+export const SEA_LEVEL_TOLERANCE = 64;
 
 /** Layer type of water surfaces (`TerrainLayerDef.type`) on both platforms; 0 floor, 1 ceiling. */
 export const LAYER_TYPE_WATER = 2;
