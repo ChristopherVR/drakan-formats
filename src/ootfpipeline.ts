@@ -43,6 +43,8 @@ import {
     writePs2Sdb,
     type PcSoundBank,
 } from './ootfsound.ts';
+import { applyCulling, planLevelCulling, sceneFileKey, type LevelCulling } from './ootfcull.ts';
+import type { PcSequence } from './ootfseq.ts';
 import { planShellTrims } from './ootfshell.ts';
 import { convertStompPlayers, pcStompPlayer } from './ootfstomp.ts';
 import {
@@ -373,6 +375,12 @@ function cloneObject(o: LvlObject, id: number): LvlObject {
     };
 }
 
+/** The culling rewrite of the scenes of PC scene file `container` (path without extension), if it has a plan. */
+function cullRewrite(culling: LevelCulling | null, container: string): ((seq: PcSequence) => PcSequence) | undefined {
+    const plan = culling?.plans.get(sceneFileKey(container));
+    return plan ? (seq) => applyCulling(seq, plan) : undefined;
+}
+
 async function buildPs2OdbIn(stem: string, dbIndex: number, odb: SrscReader): Promise<Ps2OdbIn> {
     const classes = await parseOdbClasses(odb);
     const raw = new Map<number, Uint8Array>();
@@ -666,17 +674,32 @@ export async function convertOotfLevels(
                 if (c.model && c.model.db === 0 && !ps2WeaponModels.has(modelKey(c.name)))
                     ps2WeaponModels.set(modelKey(c.name), c.model.id);
     }
+    let culling: LevelCulling | null = null;
     if (opt.models !== false && opt.classes !== false && hostOk) {
         await stage('models', async () => {
             // Inward shells (the Intro's black backdrop box) lose the walls the PC culls from outside cut-scene cameras:
             // the PS2 culls no back faces, so those walls hid the whole Intro opening (ootfshell.ts).
-            const shells = await planShellTrims(pcs, src, async (c) => {
+            const readModel = async (c: OdbClass) => {
                 const ow = ownerOf.get(c);
                 return ow && c.model ? builder.readPcModel(ow, c.model.db, c.model.id) : null;
-            });
-            for (const [c, t] of shells)
-                if (await builder.dropPolygonsOf(ownerOf.get(c)!, c.model!.db, c.model!.id, t.drop))
-                    log(`shell ${c.name}: ${t.drop.size} of ${t.walls} walls left out (${t.placements} placed)`);
+            };
+            const shells = await planShellTrims(pcs, src, readModel);
+            // The PC culls back faces in the Intro's scenes too: polygons never seen from the front are left out and models
+            // turned away from the camera are hidden by the converted scenes (ootfcull.ts).
+            culling = dbgEnv0['OOTF_NO_CULL'] === '1' ? null : await planLevelCulling(pcs, src, readModel);
+            const drops = new Map<OdbClass, Set<number>>([...shells].map(([c, t]) => [c, new Set(t.drop)]));
+            for (const [c, d] of culling?.drops ?? []) drops.set(c, new Set([...(drops.get(c) ?? []), ...d]));
+            for (const [c, d] of drops)
+                if (await builder.dropPolygonsOf(ownerOf.get(c)!, c.model!.db, c.model!.id, d)) {
+                    const t = shells.get(c);
+                    if (t) log(`shell ${c.name}: ${t.drop.size} of ${t.walls} walls left out (${t.placements} placed)`);
+                    const k = culling?.drops.get(c);
+                    if (k) log(`cull ${c.name}: ${k.size} polygon(s) never seen from the front left out`);
+                }
+            for (const [k, p] of culling?.plans ?? []) {
+                const n = [...p.visibility.values()].reduce((m, v) => m + v.size, 0);
+                if (n) log(`cull ${k}: ${n} show / hide timeline(s) in ${p.visibility.size} scene(s)`);
+            }
             for (const u of used.values()) {
                 const m = u.cls.model;
                 const ow = ownerOf.get(u.cls);
@@ -1703,6 +1726,7 @@ export async function convertOotfLevels(
                         cameraObjectId: actorId(27),
                         cameraFov: pcLevelFov(pc),
                         holdPlayerObjectId: syntheticPlayer,
+                        rewrite: c ? cullRewrite(culling, c) : undefined,
                         usedIds: used,
                         only: g.ids,
                         pcDbIndex: g.db,

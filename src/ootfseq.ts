@@ -194,6 +194,8 @@ export interface SequenceConvertOptions {
      * orbs draw over the whole Intro.
      */
     holdPlayerObjectId?: number;
+    /** Rewrites each parsed PC scene before it is converted (the Intro's culling show / hide timelines, `ootfcull.ts`). */
+    rewrite?: (seq: PcSequence) => PcSequence;
 }
 
 export interface Ps2SsdEntry {
@@ -342,6 +344,7 @@ export async function convertPcSequences(pc: SrscReader, opts: SequenceConvertOp
             report.warnings.push(`sequence ${e.id} skipped: ${(err as Error).message}`);
             continue;
         }
+        if (opts.rewrite) seq = opts.rewrite(seq);
         const out = convertSequence(seq, opts, report);
         const newId = allocateId(opts.usedIds);
         entries.push({ type: SSD_SEQUENCE, id: newId, sub: folder!, data: out });
