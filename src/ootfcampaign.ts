@@ -95,8 +95,13 @@ export interface CampaignExit {
 /** Longest level title the converter writes (the pipeline cuts other titles there too); the runtime takes 80. */
 export const CAMPAIGN_TITLE_MAX = 60;
 
-/** Length of the three Intro sequences ("Intro 1", "Intro 2", "Intro 3": 14.5 + 10.2 + 16.4 s) plus a short margin. */
-export const INTRO_SECONDS = 44;
+/**
+ * Length of the three Intro sequences ("Intro 1", "Intro 2", "Intro 3": 14.51 + 10.24 + 16.39 s, the time of each one's last
+ * message to the next scene or the Gui Trigger) plus a short margin. The rendered Intro shows the end of Intro 3 at 41.2 s of engine
+ * time; the PC level ends there, with the Gui Trigger. A longer timer (it was 44 s) left the wide owl shot standing for 2.8 s
+ * after the last scene, which reads as a freeze before the next level loads.
+ */
+export const INTRO_SECONDS = 41.4;
 /** Length of the Book's narration sequence ("The Book", 25.7 s) plus a short margin. */
 export const BOOK_SECONDS = 28;
 

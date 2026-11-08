@@ -349,7 +349,7 @@ describe('applyCampaignExits', () => {
         const exit = list.objects.find((o) => o.id === timer.links[0])!;
         expect(exit.classId).toBe(966);
         expect(timer.params.map((p) => p.name)).toEqual(['Time Until Trigger', 'Start Mode', 'Trigger Message']);
-        expect(new DataView(new Uint32Array([timer.data[0]!]).buffer).getFloat32(0, true)).toBeCloseTo(44, 3);
+        expect(new DataView(new Uint32Array([timer.data[0]!]).buffer).getFloat32(0, true)).toBeCloseTo(41.4, 3);
         expect(timer.data[1]).toBe(0); // Start Mode: at once
         expect(timer.data[2]).toBe(5);
     });
