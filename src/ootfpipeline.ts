@@ -87,7 +87,7 @@ import {
 } from './ootfmusic.ts';
 import { buildOotfMusicPack, type OotfMusicPack } from './ootfdmusic.ts';
 import { applyPuzzleLogic, relayDetectorSequences } from './ootfpuzzle.ts';
-import type { Ps2TextureOptions, TextureMode } from './ootftex.ts';
+import { encodePs2Texture, type Ps2TextureOptions, type TextureMode } from './ootftex.ts';
 import { TextPlan, isTextField, parseRrcStrings, rewriteClassTextDefaults, rewriteObjectTexts } from './ootftext.ts';
 import {
     asciiLevelTitle,
@@ -109,6 +109,7 @@ import {
     PS2_SUBSTITUTES,
     aliasSquash,
     buildClassEntries,
+    cloneClassRecord,
     keepsPcDefaults,
     setSynthesizedDefaults,
     levelPropertiesParams,
@@ -117,6 +118,7 @@ import {
     type PcClassIn,
     type PlanOptions,
     type Ps2OdbIn,
+    type Synthesized,
 } from './ootfclass.ts';
 import { OotfAssetBuilder, type AssetReport } from './ootfassets.ts';
 import { type Ps2TextureSwapOptions, effectiveSubstitutions, resolvePs2Substitutes } from './ootfps2tex.ts';
@@ -136,6 +138,17 @@ import { buildRig } from './skeleton.ts';
 import { MOD_CHARACTER } from './model.ts';
 import { SSD_SEQUENCE } from './resources.ts';
 import { chooseRetargetTarget, retargetCreature } from './ootfretarget.ts';
+import {
+    applyMapOverride,
+    classFieldIndex,
+    defaultLevelMap,
+    isMapClass,
+    mapClassValues,
+    mapPixelOf,
+    mapTextureImage,
+    type LevelMapOverride,
+    type LevelMapSpec,
+} from './ootfmap.ts';
 
 /**
  * One call from an Order of the Flame level to everything a PS2 mod pack needs: the converted LVL parts, the new
@@ -276,6 +289,12 @@ export interface OotfPipelineOptions {
      * onto the disc rigs as before); `{ enabled: false }` converts the OotF models of the table's enemies and weapons.
      */
     ps2Models?: Ps2ModelSwapOptions;
+    /**
+     * The map screen of each level (ootfmap.ts): every campaign level gets a Map class with its Order of the Flame parchment and
+     * calibration (default on; `false` keeps the template's map). A record keyed by the lower-case PC level path replaces the
+     * picture, the world rectangle or the covered part of the picture of that level.
+     */
+    levelMaps?: false | Readonly<Record<string, LevelMapOverride>>;
 }
 
 export interface OotfStageResult {
@@ -1431,6 +1450,60 @@ export async function convertOotfLevels(
             ? await TerrainTextureBuilder.create(src, ps2.procTxd, procDb, opt.terrain)
             : null;
 
+    // ---- level maps: one Map class (picture, world rectangle, picture rectangle) per level with an Order of the Flame parchment
+    const levelMaps = new Map<string, { spec: LevelMapSpec; synth: Synthesized; texture?: Uint8Array }>();
+    if (opt.levelMaps !== false && plan && ps2Odbs.length) {
+        await stage('level maps', async () => {
+            let rrcReader: SrscReader | null = null;
+            try {
+                const bytes = rrc.path ? await src.read(rrc.path) : null;
+                rrcReader = bytes ? await SrscReader.fromBytes(bytes) : null;
+            } catch {
+                rrcReader = null;
+            }
+            let tpl: { odb: Ps2OdbIn; id: number; cls: OdbClass } | undefined;
+            for (const odb of ps2Odbs)
+                for (const [id, cls] of odb.classes) if (!tpl && cls.data && isMapClass(cls) && odb.raw?.(id)) tpl = { odb, id, cls };
+            if (!tpl) {
+                res.warnings.push('level maps: the template has no Map class; levels keep its map');
+                return;
+            }
+            const overrides: Readonly<Record<string, LevelMapOverride>> = opt.levelMaps || {};
+            let top = Math.max(0, ...tpl.odb.classes.keys(), ...plan.synthesized.filter((x) => x.file === tpl.odb.file).map((x) => x.classId));
+            for (const pc of pcs) {
+                if (isOotfArenaLevel(pc)) continue;
+                const spec = applyMapOverride(rrcReader ? await defaultLevelMap(pc, rrcReader) : null, overrides[pc.path.toLowerCase()]);
+                if (!spec) continue;
+                const classId = ++top;
+                const name = `OotF Map ${pcLevelName(pc.header)}`.slice(0, 40);
+                const data = [...tpl.cls.data!];
+                for (const [fname, v] of mapClassValues(spec)) {
+                    const j = classFieldIndex(tpl.cls, fname);
+                    if (j >= 0) data[j] = v >>> 0;
+                }
+                const group = tpl.odb.group?.(tpl.id) ?? tpl.cls.group;
+                const synth: Synthesized = {
+                    pcKeys: [],
+                    name,
+                    file: tpl.odb.file,
+                    dbIndex: tpl.odb.dbIndex,
+                    classId,
+                    group,
+                    rfl: tpl.cls.rflClass ?? 0,
+                    template: { dbIndex: tpl.odb.dbIndex, classId: tpl.id, name: tpl.cls.name },
+                    record: cloneClassRecord(tpl.odb.raw!(tpl.id)!, name, data),
+                    cls: { ...tpl.cls, id: classId, name, group, data },
+                    copied: [],
+                    skipped: [],
+                    coverage: 1,
+                };
+                plan.synthesized.push(synth);
+                levelMaps.set(pc.path, { spec, synth });
+                log(`${pc.path}: map class ${classId} (${name})`);
+            }
+        });
+    }
+
     // Classes mapped onto a PS2 class by name (no clone): their objects take the PC class defaults explicitly.
     const nameMapped = new Set([...(plan?.mapped.values() ?? [])].map((t) => `${t.dbIndex}:${t.classId}`));
 
@@ -1653,6 +1726,18 @@ export async function convertOotfLevels(
         if (opt.singletons !== false) {
             await stage(`singletons ${pc.path}`, async () => {
                 ensureSingletons(parts, pc, tplList.objects, classes);
+                const lm = levelMaps.get(pc.path);
+                const props = lm && parts.objects.objects.find((o) => classes.get(o.dbIndex)?.get(o.classId)?.rflClass === 54);
+                if (lm && props) {
+                    const cur = objectParamSpecs(props);
+                    const spec = cur.find((x) => x.name.trim() === 'Map Object');
+                    const fields = classes.get(props.dbIndex)?.get(props.classId)?.fields;
+                    const j = fields?.findIndex((f) => f.name.trim() === 'Map Object') ?? -1;
+                    if (spec) spec.value = lm.synth.classId;
+                    else if (fields && j >= 0) cur.push({ fieldIndex: j, type: fields[j]!.type, name: 'Map Object', value: lm.synth.classId });
+                    if (spec || j >= 0) setObjectParams(parts.objects, props.id, cur);
+                    else res.warnings.push(`${title}: Level Properties has no Map Object field`);
+                }
                 const swap = rynnPropSwap.get(pc.path);
                 const objs = parts.objects.objects;
                 const prop = swap && objs.find((o) => o.id === swap.prop);
@@ -1740,6 +1825,7 @@ export async function convertOotfLevels(
                         return db === null ? null : ((db << 16) | t.classId) >>> 0;
                     },
                     warnings: res.warnings,
+                    ...(levelMaps.get(pc.path) ? { mapPixel: (x: number, z: number) => mapPixelOf(levelMaps.get(pc.path)!.spec, x, z) } : {}),
                 });
                 if (rep.plates || rep.bossHeads || rep.markers || rep.messengers || rep.questLocks)
                     console.warn(
@@ -2308,6 +2394,35 @@ export async function convertOotfLevels(
                     `template ODB ${stem}: ${cb.report.models.converted} models, ${cb.report.textures.converted} textures added to its own MOD / TXD`,
                 );
             }
+        });
+    }
+    if (levelMaps.size) {
+        await stage('level map textures', async () => {
+            const first = [...levelMaps.values()][0]!;
+            const stem = first.synth.file.replace(/\.ODB$/i, '');
+            const dir = ps2.dbFiles?.get(stem)?.dir;
+            const hf = ps2.hostFiles?.get(stem);
+            if (!dir || !hf) {
+                res.warnings.push(`level maps: ${stem} has no own TXD to hold the pictures; levels keep the template's map`);
+                for (const v of levelMaps.values()) v.synth.cls = { ...v.synth.cls };
+                return;
+            }
+            const path = `files/${dir}/${stem}.TXD`;
+            const base = res.files[path] ? await SrscReader.fromBytes(res.files[path]!) : hf.txd;
+            const entries: Ps2Entry[] = [];
+            for (const e of base.entries) entries.push({ type: e.type, id: e.id, sub: e.sub, data: await base.readRaw(e) });
+            let next = maxId(base, 0x0040) + 1;
+            for (const v of levelMaps.values()) {
+                const tex = encodePs2Texture(mapTextureImage(v.spec.image), {
+                    mode: 'truecolor',
+                    maxTruecolorPixels: Infinity,
+                    square: true,
+                });
+                entries.push({ type: 0x0040, id: next, sub: 0, data: tex.body });
+                res.warnings.push(...setSynthesizedDefaults(v.synth, [['Map Texture', next]]));
+                next++;
+            }
+            res.files[path] = writePs2Srsc(entries);
         });
     }
     if (plan && ps2Odbs.length) {
