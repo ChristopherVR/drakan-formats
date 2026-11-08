@@ -9,9 +9,10 @@
  * role, feed that joint's keys through the target's own bind basis, and leave unmatched target joints at their bind
  * pose. The root translation is scaled by the size ratio of the two rigs.
  */
-import { type PcAnim, type Ps2Anim, type Skeleton, writePs2Anim } from './ootfanim.ts';
+import { type PcAnim, type Ps2Anim, type Ps2Track, type Skeleton, writePs2Anim } from './ootfanim.ts';
 import { type ConvertAnimOptions, bindBasis, convertPcAnimToPs2 } from './ootfcreature.ts';
-import { buildRig, invertMat12, mulMat12, quatToMat12, mat12ToQuat, type Rig } from './skeleton.ts';
+import { sampleClip } from './anim.ts';
+import { buildRig, invertMat12, localToWorld, mulMat12, quatToMat12, mat12ToQuat, type Rig } from './skeleton.ts';
 
 // ------------------------------------------------------------------------------------------------ name matching
 
@@ -218,6 +219,19 @@ export function chooseRetargetTarget(
 
 // ------------------------------------------------------------------------------------------------ animation retarget
 
+/**
+ * Off hand on a two-handed grip: the PS2 arm is not the PC arm (the hand ends up about 30 units off the sword), so where the
+ * PC clip holds the left hand at the sword the arm is solved to the native two-handed grip: `grip` is the left hand frame
+ * in the right weapon frame (taken from a native two-handed idle).
+ */
+export interface HandHold {
+    uparm: number;
+    forearm: number;
+    hand: number;
+    weapon: number;
+    grip: ArrayLike<number>;
+}
+
 export interface RetargetAnimOptions extends ConvertAnimOptions {
     /** Root translation scale. Default: target rig size / source rig size. */
     scale?: number;
@@ -236,6 +250,8 @@ export interface RetargetAnimOptions extends ConvertAnimOptions {
      * bind hand is open, so a retargeted scene clip left her sword hand open; the native armed clips curl the fingers.
      */
     holdPose?: ReadonlyMap<number, readonly [number, number, number, number]>;
+    /** Solve the left arm onto the native two-handed grip where the clip holds the sword with both hands. */
+    handHold?: HandHold;
     /** Extra joint pairs (PS2 joint -> PC joint) for target joints the name match left alone (`leafFramePairs`). */
     pairs?: ReadonlyMap<number, number>;
 }
@@ -421,7 +437,7 @@ export function retargetPcAnim(
         const track = out.tracks[d];
         if (track) track.keys = [{ time: 0, q: [q[0], q[1], q[2], q[3]], pos: null }];
     }
-    if (!opt.worldJoints?.length) return out;
+    if (!opt.worldJoints?.length) return finishScenePose(out, dstRig, opt);
     // Attachment frames take the source joint's orientation (as retargetPs2Anim does): every matched ancestor follows
     // world = bindWorld * delta on both rigs, so pre-multiplying the local key by sourceBindWorld * inverse(targetBindWorld)
     // gives the source joint's animated world orientation. The PC Rynn's `Rweapon` sits about 104 degrees from the PS2
@@ -443,7 +459,120 @@ export function retargetPcAnim(
             return { ...k, q: q.map((v) => v / length) as [number, number, number, number] };
         });
     }
+    return finishScenePose(out, dstRig, opt);
+}
+
+/** Poses that read the final world frames (after the weapon frames took the source orientation). */
+function finishScenePose(out: Ps2Anim, rig: Rig, opt: RetargetAnimOptions): Ps2Anim {
+    if (opt.handHold) applyHandHold(out, rig, opt.handHold);
     return out;
+}
+
+/** Distance of the clip's left hand from the right weapon frame (model units) under which it counts as a two-handed hold. */
+const HOLD_NEAR = 90 / 2048;
+const HOLD_FAR = 150 / 2048;
+
+const dot3 = (a: number[], b: number[]) => a[0]! * b[0]! + a[1]! * b[1]! + a[2]! * b[2]!;
+const sub3 = (a: ArrayLike<number>, b: ArrayLike<number>) => [a[0]! - b[0]!, a[1]! - b[1]!, a[2]! - b[2]!];
+const len3 = (a: number[]) => Math.hypot(a[0]!, a[1]!, a[2]!);
+
+/** Row-vector rotation taking direction `u` onto `v` (both nonzero). */
+function rotationBetween(u: number[], v: number[]): Float32Array {
+    const a = len3(u);
+    const b = len3(v);
+    const uu = u.map((x) => x / a);
+    const vv = v.map((x) => x / b);
+    const c = [uu[1]! * vv[2]! - uu[2]! * vv[1]!, uu[2]! * vv[0]! - uu[0]! * vv[2]!, uu[0]! * vv[1]! - uu[1]! * vv[0]!];
+    const w = 1 + dot3(uu, vv);
+    if (w < 1e-6) return Float32Array.from([1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]);
+    const l = Math.hypot(c[0]!, c[1]!, c[2]!, w);
+    return quatToMat12([c[0]! / l, c[1]! / l, c[2]! / l, w / l], [0, 0, 0]);
+}
+
+/** Replaces the left arm keys by a solution that puts the hand on the native grip (see `HandHold`), sampled where the arm moves. */
+function applyHandHold(anim: Ps2Anim, rig: Rig, hold: HandHold): void {
+    const { uparm, forearm, hand, weapon } = hold;
+    const tU = anim.tracks[uparm];
+    const tF = anim.tracks[forearm];
+    const tH = anim.tracks[hand];
+    if (!tU || !tF || !tH) return;
+    const rot = (r: ArrayLike<number>) => Float32Array.from([...Array.from(r).slice(0, 9), 0, 0, 0]);
+    const times = new Set<number>([0, anim.duration]);
+    for (const j of [weapon, hand, forearm, uparm]) {
+        for (let k = j; k >= 0; k = rig.parents[k]!) for (const key of anim.tracks[k]?.keys ?? []) times.add(key.time);
+    }
+    const sorted = [...times].filter((t) => t >= 0 && t <= anim.duration + 1e-6).sort((a, b) => a - b);
+    const out: [Ps2Track['keys'], Ps2Track['keys'], Ps2Track['keys']] = [[], [], []];
+    let used = false;
+    const worlds = sorted.map((t) => localToWorld(rig, sampleClip(rig, anim, t)));
+    const locals = sorted.map((t) => sampleClip(rig, anim, t));
+    sorted.forEach((t, n) => {
+        const w = worlds[n]!;
+        const local = locals[n]!;
+        const at = (j: number) => Array.from(w.subarray(j * 12 + 9, j * 12 + 12));
+        const frame = (j: number) => rot(w.subarray(j * 12, j * 12 + 12));
+        // The hand's offset from the weapon frame, to decide whether this key holds the sword with both hands.
+        const wInv = invertMat12(w.subarray(weapon * 12, weapon * 12 + 12));
+        const h = at(hand);
+        const rel = [0, 1, 2].map((c) => h[0]! * wInv[c]! + h[1]! * wInv[3 + c]! + h[2]! * wInv[6 + c]! + wInv[9 + c]!);
+        const d = len3(rel);
+        const k = Math.min(1, Math.max(0, (HOLD_FAR - d) / (HOLD_FAR - HOLD_NEAR)));
+        const own = [uparm, forearm, hand].map((j) => mat12ToQuat(local.subarray(j * 12, j * 12 + 12)));
+        if (k <= 0) {
+            [uparm, forearm, hand].forEach((_, i) =>
+                out[i]!.push({ time: t, q: [...own[i]!] as [number, number, number, number], pos: null }),
+            );
+            return;
+        }
+        used = true;
+        // Target hand frame: the native grip in the current right weapon frame.
+        const target = mulMat12(
+            Float32Array.from(hold.grip as ArrayLike<number>),
+            w.subarray(weapon * 12, weapon * 12 + 12),
+        );
+        const goal = Array.from(target.subarray(9, 12));
+        const shoulder = at(uparm);
+        const elbow = at(forearm);
+        const a = len3(sub3(elbow, shoulder));
+        const b = len3(sub3(h, elbow));
+        let dist = len3(sub3(goal, shoulder));
+        dist = Math.min(Math.max(dist, Math.abs(a - b) + 1e-6), a + b - 1e-6);
+        const dir = sub3(goal, shoulder).map((x) => x / (len3(sub3(goal, shoulder)) || 1));
+        // Elbow: on the circle of reach, bent towards the current elbow (pole).
+        const along = (a * a - b * b + dist * dist) / (2 * dist);
+        const pole = sub3(elbow, shoulder);
+        const pd = dot3(pole, dir);
+        const perp = [pole[0]! - dir[0]! * pd, pole[1]! - dir[1]! * pd, pole[2]! - dir[2]! * pd];
+        const pl = len3(perp) || 1;
+        const height = Math.sqrt(Math.max(0, a * a - along * along));
+        const elbowNew = [0, 1, 2].map((c) => shoulder[c]! + dir[c]! * along + (perp[c]! / pl) * height);
+        const r1 = rotationBetween(sub3(elbow, shoulder), sub3(elbowNew, shoulder));
+        const handAfter = (() => {
+            // hand position after the upper arm turns: elbow stays on the arm
+            const v = sub3(h, shoulder);
+            return [0, 1, 2].map((c) => shoulder[c]! + v[0]! * r1[c]! + v[1]! * r1[3 + c]! + v[2]! * r1[6 + c]!);
+        })();
+        const r2 = rotationBetween(sub3(handAfter, elbowNew), sub3(goal, elbowNew));
+        const uFrame = mulMat12(frame(uparm), r1);
+        const parentU = rig.parents[uparm]!;
+        const uLocal = mulMat12(uFrame, invertMat12(rot(w.subarray(parentU * 12, parentU * 12 + 12))));
+        const fFrame = mulMat12(mulMat12(frame(forearm), r1), r2);
+        const fLocal = mulMat12(fFrame, invertMat12(uFrame));
+        const hLocal = mulMat12(rot(target), invertMat12(fFrame));
+        const solved = [uLocal, fLocal, hLocal].map((m) => mat12ToQuat(m));
+        [uparm, forearm, hand].forEach((_, i) => {
+            const sq = solved[i]!;
+            const oq = own[i]!;
+            const sign = sq[0] * oq[0] + sq[1] * oq[1] + sq[2] * oq[2] + sq[3] * oq[3] < 0 ? -1 : 1;
+            const q = sq.map((v, c) => v * k + oq[c]! * (1 - k) * sign);
+            const l = Math.hypot(...q) || 1;
+            out[i]!.push({ time: t, q: q.map((v) => v / l) as [number, number, number, number], pos: null });
+        });
+    });
+    if (!used) return;
+    tU.keys = out[0];
+    tF.keys = out[1];
+    tH.keys = out[2];
 }
 
 export interface RetargetResult {

@@ -14,7 +14,8 @@ import {
     retargetPs2Anim,
     rigSize,
 } from '../src/ootfretarget.ts';
-import { buildRig, invertMat12, mulMat12, quatToMat12 } from '../src/skeleton.ts';
+import { sampleClip } from '../src/anim.ts';
+import { buildRig, invertMat12, localToWorld, mulMat12, quatToMat12 } from '../src/skeleton.ts';
 
 type Rot = number[];
 const rotY = (a: number): Rot => [Math.cos(a), 0, -Math.sin(a), 0, 1, 0, Math.sin(a), 0, Math.cos(a)];
@@ -366,6 +367,41 @@ describe('PS2 character motion retargeting', () => {
         // joint 1 has a partner and is listed: it is held too; joint 2 is not listed and keeps its keys
         expect(held.tracks[1]!.keys).toHaveLength(1);
         expect(quatAngle(held.tracks[2]!.keys.at(-1)!.q, plain.tracks[2]!.keys.at(-1)!.q)).toBeLessThan(1e-6);
+    });
+});
+
+describe('off hand on a two-handed grip', () => {
+    // body -> uparm -> forearm -> hand (a straight arm of 0.02 per bone) and a weapon frame on the body; model units are tiny
+    // because the hold only applies within about 0.04 of the weapon frame.
+    const names = ['body', 'uparm', 'forearm', 'hand', 'weapon'];
+    const parents = [-1, 0, 1, 2, 0];
+    const sk = skeleton(names, parents, [I3, I3, I3, I3, I3], 0.02);
+    const rig = buildRig(sk, 0);
+    const match = matchJoints(rig, rig);
+    const clip = still(5, 'hold');
+    const position = (anim: ReturnType<typeof retargetPcAnim>, j: number): number[] => {
+        const world = localToWorld(rig, sampleClip(rig, anim, 0));
+        return [world[j * 12 + 9]!, world[j * 12 + 10]!, world[j * 12 + 11]!];
+    };
+    const hold = (grip: number[]) => ({ uparm: 1, forearm: 2, hand: 3, weapon: 4, grip: [...I3, ...grip] });
+
+    it('moves the hand onto the grip frame in the weapon frame when the clip holds the weapon near', () => {
+        const out = retargetPcAnim(clip, rig, rig, match, { scale: 1, handHold: hold([0.01, 0.03, 0]) });
+        // the weapon frame sits at y = 0.02, so the goal is (0.01, 0.05, 0)
+        const hand = position(out, 3);
+        expect(Math.hypot(hand[0]! - 0.01, hand[1]! - 0.05, hand[2]!)).toBeLessThan(1e-5);
+    });
+
+    it('leaves a clip alone whose hand is far from the weapon', () => {
+        const far = skeleton(names, parents, [I3, I3, I3, I3, I3], 0.02, [], [0, 0.02, 0.02, 0.02, 0.5]);
+        const farRig = buildRig(far, 0);
+        const plain = retargetPcAnim(clip, farRig, farRig, matchJoints(farRig, farRig), { scale: 1 });
+        const held = retargetPcAnim(clip, farRig, farRig, matchJoints(farRig, farRig), {
+            scale: 1,
+            handHold: hold([0.01, 0.03, 0]),
+        });
+        for (const j of [1, 2, 3])
+            expect(quatAngle(held.tracks[j]!.keys[0]!.q, plain.tracks[j]!.keys[0]!.q)).toBeLessThan(1e-6);
     });
 });
 

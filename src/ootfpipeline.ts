@@ -146,12 +146,13 @@ import {
     type PcAnim,
     type Skeleton,
 } from './ootfanim.ts';
-import { buildRig, localToWorld } from './skeleton.ts';
+import { buildRig, invertMat12, localToWorld, mat12ToQuat, mulMat12 } from './skeleton.ts';
 import { bindBasis, convertPcAnimToPs2 } from './ootfcreature.ts';
 import { sampleClip } from './anim.ts';
 import { MOD_CHARACTER } from './model.ts';
 import { SSD_SEQUENCE } from './resources.ts';
 import {
+    type HandHold,
     chooseRetargetTarget,
     creatureChannelTable,
     leafFramePairs,
@@ -2765,6 +2766,43 @@ function playerClipBuilder(ps2: OotfPs2Context) {
         await firstKeys(sk, GRIP_CLIPS, fingers, held);
         return held;
     };
+    // The left hand frame of the native two-handed idle in the right weapon frame: where the off hand must sit on a sword grip.
+    let holdSolved: HandHold | null | undefined;
+    const handHold = async (sk: Skeleton): Promise<HandHold | undefined> => {
+        if (holdSolved !== undefined) return holdSolved ?? undefined;
+        holdSolved = null;
+        if (!adb) return undefined;
+        const rig = buildRig(sk, 0);
+        const at = (n: string) => rig.names.findIndex((x) => x.toLowerCase() === n);
+        const [uparm, forearm, hand, weapon] = ['luparm', 'lforearm', 'lhand', 'rweapon'].map(at) as [
+            number,
+            number,
+            number,
+            number,
+        ];
+        if ([uparm, forearm, hand, weapon].some((j) => j < 0)) return undefined;
+        for (const want of ['2h_randomidle', '2h_walk']) {
+            for (const id of sk.animIds) {
+                const info = adb.find(0x0501, id);
+                const data = adb.find(0x0502, id);
+                if (!info || !data) continue;
+                const raw = await adb.readRaw(info);
+                if (animName(raw).toLowerCase() !== want) continue;
+                try {
+                    const world = localToWorld(rig, sampleClip(rig, parsePs2Anim(raw, await adb.readRaw(data)), 0));
+                    const grip = mulMat12(
+                        world.subarray(hand * 12, hand * 12 + 12),
+                        invertMat12(world.subarray(weapon * 12, weapon * 12 + 12)),
+                    );
+                    holdSolved = { uparm, forearm, hand, weapon, grip: Array.from(grip) };
+                    return holdSolved;
+                } catch {
+                    // not a clip of this rig
+                }
+            }
+        }
+        return undefined;
+    };
     let nextId = (adb?.entries ?? []).reduce((m, e) => (e.type === 0x0501 ? Math.max(m, e.id) : m), 0) + 1;
     const done = new Map<string, number>();
     const entries: { id: number; info: Uint8Array; data: Uint8Array }[] = [];
@@ -2809,7 +2847,11 @@ function playerClipBuilder(ps2: OotfPs2Context) {
             const names = buildRig(sk, 0).names;
             const worldJoints = names.flatMap((n, d) => (/^[lr]weapon$/i.test(n) ? [d] : []));
             const holdPose = await fingerGripPose(sk, names);
-            const r = retargetCreature(source.skeleton, sk, todo, { worldJoints, holdPose });
+            const r = retargetCreature(source.skeleton, sk, todo, {
+                worldJoints,
+                holdPose,
+                handHold: await handHold(sk),
+            });
             for (const a of r.anims) {
                 const id = nextId++;
                 const w = writePs2Anim(a.anim);
