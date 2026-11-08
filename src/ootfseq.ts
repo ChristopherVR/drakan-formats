@@ -188,6 +188,8 @@ export interface SequenceConvertOptions {
      * field of view of their own: they play at the level's `Default Field of View (deg)` (`pcLevelFov`). Default 80.
      */
     cameraFov?: number;
+    /** Ground height and the player's lowest joint in a scene clip, to rest her lying poses on the ground. */
+    playerGround?: PlayerGround;
     /** Keep PC run/stop-AI values (default true: 0 at the start, 1 at the end like the disc's scenes; false writes 0 everywhere,
      * which leaves the camera and the player held after the scene). */
     keepAiResume?: boolean;
@@ -204,6 +206,13 @@ export interface SequenceConvertOptions {
     holdPlayerObjectId?: number;
     /** Rewrites each parsed PC scene before it is converted (the Intro's culling show / hide timelines, `ootfcull.ts`). */
     rewrite?: (seq: PcSequence) => PcSequence;
+}
+
+export interface PlayerGround {
+    /** Ground under (x, z) for a body at height y. */
+    groundAt(x: number, z: number, y: number): number;
+    /** Height of the lowest joint over the origin in the pose of the clip `ref` (`(db << 16) | id`) at `t` seconds. */
+    lowestJoint(ref: number, t: number): number | undefined;
 }
 
 export interface Ps2SsdEntry {
@@ -451,6 +460,56 @@ function resolveObject(
     return fallback === undefined ? null : { ref: fallback, special };
 }
 
+/** Pose joints within this much of the origin mean a lying body (standing is about 500 below it). */
+const LYING_LOWEST = -200;
+/** Half the thickness of a lying body below its lowest joint. */
+const LYING_RADIUS = 75;
+/** A lying key is lowered only when it holds the body at least this far over the ground. */
+const FLOATING_GAP = 150;
+
+/**
+ * The scene keys place the player's origin where the PC clip expects it: 500 over the ground when she stands. A lying
+ * pose has its joints within about 100 of the origin, so the same height holds her body 450 and more in the air: Ruined
+ * Village scene 1.1 keeps her origin 546 (then 635) over the ground while she lies knocked out. Every key under a lying
+ * clip, and a key added where such a clip starts, rests the lowest joint on the ground.
+ */
+export function settlePlayerLying(sorted: { x: PcAction; i: number }[], g: PlayerGround | undefined): void {
+    if (!g) return;
+    const clips = sorted.filter((e) => e.x.type === 1 && view(e.x.payload).getUint32(0, true) === 0).map((e) => e.x);
+    const clipAt = (t: number): PcAction | undefined => clips.filter((c) => c.time <= t).pop();
+    const lyingLow = (c: PcAction | undefined, t: number): number | undefined => {
+        if (!c) return undefined;
+        const dv = view(c.payload);
+        const low = g.lowestJoint(dv.getUint32(4, true), dv.getFloat32(8, true) + (t - c.time) * dv.getFloat32(16, true));
+        return low !== undefined && Number.isFinite(low) && low > LYING_LOWEST ? low : undefined;
+    };
+    const rest = (payload: Uint8Array, low: number): Uint8Array | null => {
+        const dv = view(payload);
+        const y = g.groundAt(dv.getFloat32(16, true), dv.getFloat32(24, true), dv.getFloat32(20, true)) - low + LYING_RADIUS;
+        // Only lowers a body that hangs well above the ground; sitting and kneeling keys the PC placed are kept.
+        if (!Number.isFinite(y) || y > dv.getFloat32(20, true) - FLOATING_GAP) return null;
+        const out = payload.slice();
+        view(out).setFloat32(20, y, true);
+        return out;
+    };
+    const moves = sorted.filter((e) => e.x.type === 0);
+    const added: { x: PcAction; i: number }[] = [];
+    for (const c of clips) {
+        const low = lyingLow(c, c.time);
+        const before = moves.filter((m) => m.x.time <= c.time).pop();
+        if (low === undefined || !before || before.x.time === c.time) continue;
+        const payload = rest(before.x.payload, low);
+        if (payload) added.push({ x: { type: 0, time: c.time, payload }, i: -1 });
+    }
+    for (const m of moves) {
+        const low = lyingLow(clipAt(m.x.time), m.x.time);
+        const payload = low === undefined ? null : rest(m.x.payload, low);
+        if (payload) m.x = { ...m.x, payload };
+    }
+    sorted.push(...added);
+    sorted.sort((p, q) => p.x.time - q.x.time || p.i - q.i);
+}
+
 function convertActor(a: PcSeqActor, opts: SequenceConvertOptions, report: SequenceReport): ActorOutcome {
     const target = resolveObject(a, opts);
     if (!target) return { actor: null };
@@ -476,6 +535,7 @@ function convertActor(a: PcSeqActor, opts: SequenceConvertOptions, report: Seque
         }
         chunks.push(c);
     }
+    if (target.special === 'rynn') settlePlayerLying(sorted, opts.playerGround);
     // The release is the last run/stop action that gives the actor back to the game (payload non-zero).
     let release = -1;
     if (maps.endIdle !== undefined) sorted.forEach(({ x }, i) => (isRelease(x) ? (release = i) : undefined));

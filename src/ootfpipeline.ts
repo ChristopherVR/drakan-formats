@@ -45,7 +45,8 @@ import {
     type PcSoundBank,
 } from './ootfsound.ts';
 import { applyCulling, planLevelCulling, sceneFileKey, type LevelCulling } from './ootfcull.ts';
-import type { PcSequence } from './ootfseq.ts';
+import { carryCreatures, type CarrierRig } from './ootfcarry.ts';
+import type { PcSequence, PlayerGround } from './ootfseq.ts';
 import { planShellTrims } from './ootfshell.ts';
 import { convertStompPlayers, pcStompPlayer } from './ootfstomp.ts';
 import {
@@ -134,10 +135,12 @@ import {
     ownedClassKey,
     relocateClassDefaultReferences,
 } from './ootfclassrefs.ts';
-import { CELL_SIZE, LVL_TYPE_LAYERS, parsePs2Terrain, terrainHeightAt } from './terrain.ts';
+import { CELL_SIZE, LVL_TYPE_LAYERS, parsePs2Terrain, terrainGroundBelow, terrainHeightAt } from './terrain.ts';
 import { odbStemForDependency } from './odb.ts';
 import { animName, parsePs2Anim, parseSkeleton, ps2AnimFlags, writePs2Anim, type PcAnim, type Skeleton } from './ootfanim.ts';
-import { buildRig } from './skeleton.ts';
+import { buildRig, localToWorld } from './skeleton.ts';
+import { bindBasis, convertPcAnimToPs2 } from './ootfcreature.ts';
+import { sampleClip } from './anim.ts';
 import { MOD_CHARACTER } from './model.ts';
 import { SSD_SEQUENCE } from './resources.ts';
 import { chooseRetargetTarget, retargetCreature } from './ootfretarget.ts';
@@ -1667,9 +1670,78 @@ export async function convertOotfLevels(
                         return {
                             clips: clips.map,
                             channels: player.channelMap(source.skeleton),
+                            source,
                             idle: await player.nativeClip('ncidle'),
                         };
                     })();
+                    // Skeleton and clips of every skinned creature the scenes place, for the carried-creature poses (ootfcarry.ts).
+                    const creatureRigs = new Map<number, CarrierRig>();
+                    const propReaches = new Map<number, number>();
+                    for (const e of ssdReader.entries) {
+                        if (e.type !== SSD_SEQUENCE || !g.ids.has(e.id)) continue;
+                        let seq;
+                        try {
+                            seq = parsePcSequence(e.id, e.sub, (await ssdReader.read(e)).data);
+                        } catch {
+                            continue;
+                        }
+                        for (const a of seq.actors) {
+                            if (a.actorType !== 1 || creatureRigs.has(a.objectId)) continue;
+                            const object = pc.list.objects.find((o) => o.id === a.objectId);
+                            const cls = object && pc.classes.get(object.dbIndex)?.get(object.classId);
+                            const ow = cls && ownerOf.get(cls);
+                            if (!cls?.model || !ow) continue;
+                            const rig = await builder.creatureSource(ow, cls.model.db, cls.model.id);
+                            if (rig) creatureRigs.set(a.objectId, { skeleton: rig.skeleton, anims: rig.anims });
+                            else {
+                                const m = await builder.readPcModel(ow, cls.model.db, cls.model.id);
+                                if (m && m.positions.length >= 3) {
+                                    let reach = 0;
+                                    for (let i = 2; i < m.positions.length; i += 3)
+                                        reach = Math.max(reach, Math.abs(m.positions[i]!));
+                                    propReaches.set(a.objectId, reach * 2048);
+                                }
+                            }
+                        }
+                    }
+                    // Lowest joint of the player's pose in a scene clip, for the lying-pose height (see `settlePlayerLying`).
+                    const lowRig = playerScene && buildRig(playerScene.source.skeleton, 0);
+                    const lowPose = new Map<string, ReturnType<typeof convertPcAnimToPs2>>();
+                    const playerGround: PlayerGround | undefined =
+                        playerScene && lowRig
+                            ? {
+                                  groundAt: (x, z, y) => terrainGroundBelow(pc.terrain, x, z, y),
+                                  lowestJoint: (ref, t) => {
+                                      const a = ref >>> 16 === 0 ? playerScene.source.anims.get(ref & 0xffff) : undefined;
+                                      if (!a) return undefined;
+                                      let ps2 = lowPose.get(a.name);
+                                      if (!ps2) lowPose.set(a.name, (ps2 = convertPcAnimToPs2(a, bindBasis(lowRig))));
+                                      const w = localToWorld(lowRig, sampleClip(lowRig, ps2, t));
+                                      let low = Infinity;
+                                      for (let j = 0; j < lowRig.jointCount; j++) low = Math.min(low, w[j * 12 + 10]! * 2048);
+                                      return low;
+                                  },
+                              }
+                            : undefined;
+                    const carry = (seq: PcSequence): PcSequence =>
+                        carryCreatures(seq, {
+                            rigOf: (a) => (a.actorType === 1 ? creatureRigs.get(a.objectId) : undefined),
+                            propReach: (a) => (a.actorType === 1 ? propReaches.get(a.objectId) : undefined),
+                        });
+                    // The scene Wartok class a scene actor plays on (undefined for every other actor).
+                    const tockOf = (actor: PcSeqActor, targetId: number): SceneTock | undefined => {
+                        if (!sceneTocks.size) return undefined;
+                        const sourceId =
+                            actor.actorType === 1 && first.objectIdMap.get(actor.objectId) === targetId
+                                ? actor.objectId
+                                : undefined;
+                        const object = pc.list.objects.find((o) =>
+                            sourceId !== undefined ? o.id === sourceId : first.objectIdMap.get(o.id) === targetId,
+                        );
+                        const cls = object && pc.classes.get(object.dbIndex)?.get(object.classId);
+                        return cls ? sceneTocks.get(cls) : undefined;
+                    };
+                    const cull = c ? cullRewrite(culling, c) : undefined;
                     const conv = await convertPcSequences(ssdReader, {
                         maps: {
                             objectIdMap: sceneObjectIds,
@@ -1731,7 +1803,8 @@ export async function convertOotfLevels(
                         cameraObjectId: actorId(27),
                         cameraFov: pcLevelFov(pc),
                         holdPlayerObjectId: syntheticPlayer,
-                        rewrite: c ? cullRewrite(culling, c) : undefined,
+                        playerGround,
+                        rewrite: (seq) => carry(cull ? cull(seq) : seq),
                         usedIds: used,
                         only: g.ids,
                         pcDbIndex: g.db,

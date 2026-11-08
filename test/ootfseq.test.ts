@@ -11,6 +11,7 @@ import {
     pcLevelFov,
     PC_DEFAULT_FOV,
     remapSequenceRefs,
+    settlePlayerLying,
     skeletonChannelMap,
     ssdEntryPath,
     sequenceSoundRefs,
@@ -445,5 +446,44 @@ describe('ootfseq', () => {
         expect(ssdEntryPath('LEVEL1ON.SSD', { type: 0x311, id: 5, sub: 2 })).toBe('new/LEVEL1ON.SSD/0311_5_2.bin');
         expect(remapSequenceRefs([1, 2, 3], new Map([[2, 9]]))).toEqual([9]);
         expect(remapSequenceRefs(4, new Map())).toBe(0);
+    });
+});
+
+describe('settlePlayerLying', () => {
+    const move = (t: number, y: number): { x: import('../src/ootfseq.ts').PcAction; i: number } => {
+        const payload = new Uint8Array(36);
+        const dv = new DataView(payload.buffer);
+        dv.setFloat32(12, 1, true);
+        dv.setFloat32(16, 1000, true);
+        dv.setFloat32(20, y, true);
+        dv.setFloat32(24, 2000, true);
+        return { x: { type: 0, time: t, payload }, i: 0 };
+    };
+    const clip = (t: number, ref: number): { x: import('../src/ootfseq.ts').PcAction; i: number } => {
+        const payload = new Uint8Array(24);
+        const dv = new DataView(payload.buffer);
+        dv.setUint32(4, ref, true);
+        dv.setFloat32(16, 1, true);
+        return { x: { type: 1, time: t, payload }, i: 0 };
+    };
+    const ground = { groundAt: () => 0, lowestJoint: (ref: number) => (ref === 2 ? -25 : -480) };
+    const ys = (a: { x: import('../src/ootfseq.ts').PcAction }[]): number[] =>
+        a.filter((e) => e.x.type === 0).map((e) => new DataView(e.x.payload.buffer).getFloat32(20, true));
+
+    it('rests a lying pose on the ground and adds a key where the clip starts', () => {
+        const sorted = [move(0, 500), clip(1, 1), move(5, 540), clip(6, 2), move(9, 630)];
+        settlePlayerLying(sorted, ground);
+        expect(sorted.map((e) => e.x.time)).toEqual([0, 1, 5, 6, 6, 9]);
+        // standing keys keep their height; the key added at the lying clip start and the one under it rest the body at 100
+        expect(ys(sorted)).toEqual([500, 540, 100, 100]);
+    });
+
+    it('leaves standing and sitting keys alone', () => {
+        const sorted = [move(0, 500), clip(0, 1), move(4, 520)];
+        settlePlayerLying(sorted, ground);
+        expect(ys(sorted)).toEqual([500, 520]);
+        const sitting = [move(0, 260), clip(0, 2)];
+        settlePlayerLying(sitting, { groundAt: () => 100, lowestJoint: () => -184 });
+        expect(ys(sitting)).toEqual([260]);
     });
 });
