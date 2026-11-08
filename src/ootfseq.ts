@@ -14,6 +14,8 @@
 // conversion keeps PC actor ids as slots, so `attach` targets and transform `relativeActor` need no remapping.
 
 import { latin1, view } from './bytes.ts';
+import { decodeFieldValue } from './fields.ts';
+import type { PcLevel } from './pc.ts';
 import type { SrscReader } from './srsc.ts';
 import { joinActions } from './story/ssdactions.ts';
 import { writeSequence, type SsdActor, type SsdSequence } from './story/ssd.ts';
@@ -156,7 +158,10 @@ export interface SequenceConvertOptions {
     playerObjectId?: number;
     dragonObjectId?: number;
     cameraObjectId?: number;
-    /** Field of view (degrees) of the camera-setup action (type 9) inserted at time 0 of camera actors. Default 40. */
+    /**
+     * Field of view (degrees) of the camera-setup action (type 9) inserted at time 0 of camera actors. PC sequences have no
+     * field of view of their own: they play at the level's `Default Field of View (deg)` (`pcLevelFov`). Default 80.
+     */
     cameraFov?: number;
     /** Keep PC run/stop-AI values (default true: 0 at the start, 1 at the end like the disc's scenes; false writes 0 everywhere,
      * which leaves the camera and the player held after the scene). */
@@ -165,6 +170,13 @@ export interface SequenceConvertOptions {
     smallMessages?: 'keep' | 'drop';
     /** Override the PS2 actor mode (default 0 for objects, 1 for Rynn / dragon). */
     actorMode?: (a: PcSeqActor) => number | undefined;
+    /**
+     * A player no PC actor plays (the synthetic player of a cinematic-only level such as the Intro, which has none on the
+     * PC): every converted sequence gets it as one more actor that only stops its AI at t = 0, as the disc Intro's scene
+     * holds its Rynn. The native HUD stays hidden while the player is held by a scene; without this the health and mana
+     * orbs draw over the whole Intro.
+     */
+    holdPlayerObjectId?: number;
 }
 
 export interface Ps2SsdEntry {
@@ -222,6 +234,25 @@ export function sequenceSsdStem(
 /** Ids of every entry of a PS2 SSD (record ids are unique across entry types: sequences and groups share the space). */
 export function usedIdsOf(ssd: SrscReader): Set<number> {
     return new Set(ssd.entries.map((e) => e.id));
+}
+
+/** `Default Field of View (deg)` of every PC Level Properties class (all 23 levels of the English install, the Intro too). */
+export const PC_DEFAULT_FOV = 80;
+
+/**
+ * The field of view a PC level's cut scenes play at: `Default Field of View (deg)` of its Level Properties class (engine 54,
+ * first in dependency order), else PC_DEFAULT_FOV. The PC camera has no per-sequence field of view, so the PS2 camera-setup
+ * action must carry this value; a narrower one (the disc's 40) crops every shot (the Intro owl lost its head).
+ */
+export function pcLevelFov(pc: Pick<PcLevel, 'classes'>): number {
+    for (const table of [...pc.classes].sort((a, b) => a[0] - b[0]).map((x) => x[1]))
+        for (const c of table.values()) {
+            if (c.rflClass !== 54) continue;
+            const i = c.fields?.findIndex((f) => /^default field of view/i.test(f.name.trim())) ?? -1;
+            const v = i >= 0 && c.data ? Number(decodeFieldValue(c.fields![i]!.type, c.data[i] ?? 0, c.data)) : NaN;
+            return Number.isFinite(v) && v > 1 && v < 180 ? v : PC_DEFAULT_FOV;
+        }
+    return PC_DEFAULT_FOV;
 }
 
 const CAMERA_RE = /^camera$/i;
@@ -320,6 +351,23 @@ export function convertSequence(seq: PcSequence, opts: SequenceConvertOptions, r
             report.actionsOut += o.actor.actionCount;
         } else bump(report.droppedActors, a.name);
     }
+    const hold = opts.holdPlayerObjectId;
+    if (hold !== undefined && !actors.some((a) => a.ref === hold)) {
+        const run = pcBytes(5, 0, 4); // run/stop AI 0: held for the whole scene (the level ends before it would be released)
+        const j = joinActions([run]);
+        actors.push({
+            name: 'Rynn',
+            slot: actors.reduce((m, a) => Math.max(m, a.slot + 1), 1),
+            ref: hold,
+            mode: 1,
+            nameLen: 0,
+            actionCount: j.actionCount,
+            actions: j.actions,
+            keys: [],
+        });
+        report.actorsOut++;
+        report.actionsOut += j.actionCount;
+    }
     const slots = actors.reduce((m, a) => Math.max(m, a.slot + 1), 1);
     const s: SsdSequence = {
         id: 0,
@@ -376,7 +424,7 @@ function convertActor(a: PcSeqActor, opts: SequenceConvertOptions, report: Seque
         // PS2-only camera setup (type 9: f32 1.0, u32 field of view); PC sequences carry no field of view.
         const c = pcBytes(9, 0, 8);
         view(c).setFloat32(6, 1, true);
-        view(c).setUint32(10, opts.cameraFov ?? 40, true);
+        view(c).setUint32(10, Math.round(opts.cameraFov ?? PC_DEFAULT_FOV), true);
         const first = sorted[0];
         // the PS2 camera actors start with the run/stop action (5) and then the setup, both at t = 0
         if (first && first.x.type === 5 && first.x.time === 0) {

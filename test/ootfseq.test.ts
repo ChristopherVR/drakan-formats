@@ -3,9 +3,13 @@ import { describe, expect, it } from 'vitest';
 import type { SrscReader } from '../src/srsc.ts';
 import { parseSequence } from '../src/story/ssd.ts';
 import { parseActions } from '../src/story/ssdactions.ts';
+import { floatBits } from '../src/fields.ts';
+import type { OdbClass } from '../src/odb.ts';
 import {
     convertPcSequences,
     parsePcSequence,
+    pcLevelFov,
+    PC_DEFAULT_FOV,
     remapSequenceRefs,
     ssdEntryPath,
     sequenceSoundRefs,
@@ -94,6 +98,63 @@ describe('ootfseq', () => {
         expect(sequence.actors[0]!.ref).toBe(42);
         expect(parseActions(sequence.actors[0]!)![0]!.fields[0]!.value).toBe(1);
         expect(parseActions(sequence.actors[1]!)!.some((a) => a.type === 9)).toBe(true);
+    });
+    it('plays converted camera actors at the PC level field of view (80) unless told otherwise', async () => {
+        const r = await convertPcSequences(stub(pcSeq()), {
+            maps: { objectIdMap: new Map([[100, 11]]) },
+            usedIds: new Set(),
+        });
+        const s = parseSequence(r.entries[1]!.id, r.entries[1]!.sub, r.entries[1]!.data)!;
+        const setup = parseActions(s.actors[0]!)!.find((a) => a.type === 9)!;
+        expect(setup.fields.find((f) => f.name === 'b')!.value).toBe(PC_DEFAULT_FOV);
+        expect(PC_DEFAULT_FOV).toBe(80);
+    });
+    it('reads the field of view from the PC Level Properties class', () => {
+        const props = (fov: number): OdbClass => ({
+            id: 1,
+            name: 'Level Properties',
+            group: 0,
+            runtimeClass: 0x36,
+            rflClass: 54,
+            fields: [
+                { name: 'Fog Color', type: 15 },
+                { name: 'Default Field of View (deg)', type: 2 },
+            ],
+            data: [0, floatBits(fov)],
+        });
+        const other: OdbClass = { id: 2, name: 'Camera', group: 0, runtimeClass: 0x1b, rflClass: 27 };
+        expect(
+            pcLevelFov({
+                classes: new Map([
+                    [3, new Map([[1, props(65)]])],
+                    [0, new Map([[2, other]])],
+                ]),
+            }),
+        ).toBe(65);
+        expect(pcLevelFov({ classes: new Map([[0, new Map([[2, other]])]]) })).toBe(80);
+        expect(pcLevelFov({ classes: new Map([[0, new Map([[1, props(0)]])]]) })).toBe(80);
+    });
+    it('holds a synthetic player in every scene of a level without a PC player', async () => {
+        const r = await convertPcSequences(stub(pcSeq()), {
+            maps: { objectIdMap: new Map([[100, 11]]) },
+            usedIds: new Set(),
+            holdPlayerObjectId: 77,
+        });
+        const s = parseSequence(r.entries[1]!.id, r.entries[1]!.sub, r.entries[1]!.data)!;
+        const held = s.actors.find((a) => a.ref === 77)!;
+        expect([held.name, held.mode, held.slot]).toEqual(['Rynn', 1, 2]);
+        expect(s.slots).toBe(3);
+        const actions = parseActions(held)!;
+        expect(actions.map((a) => [a.type, a.time])).toEqual([[5, 0]]);
+        expect(actions[0]!.fields[0]!.value).toBe(0);
+        // a scene that already plays that player is left alone
+        const again = await convertPcSequences(stub(pcSeq()), {
+            maps: { objectIdMap: new Map([[100, 77]]) },
+            usedIds: new Set(),
+            holdPlayerObjectId: 77,
+        });
+        const t = parseSequence(again.entries[1]!.id, again.entries[1]!.sub, again.entries[1]!.data)!;
+        expect(t.actors.filter((a) => a.ref === 77)).toHaveLength(1);
     });
     it('parses the PC layout', () => {
         const s = parsePcSequence(410, 1, pcSeq());

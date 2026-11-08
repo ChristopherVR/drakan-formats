@@ -44,7 +44,14 @@ import {
     type PcSoundBank,
 } from './ootfsound.ts';
 import { convertStompPlayers, pcStompPlayer } from './ootfstomp.ts';
-import { convertPcSequences, sequenceSoundRefs, sequenceSsdStem, ssdPackFiles, usedIdsOf } from './ootfseq.ts';
+import {
+    convertPcSequences,
+    pcLevelFov,
+    sequenceSoundRefs,
+    sequenceSsdStem,
+    ssdPackFiles,
+    usedIdsOf,
+} from './ootfseq.ts';
 import { SrscReader } from './srsc.ts';
 import {
     TERRAIN_TXD_PATH,
@@ -1268,6 +1275,8 @@ export async function convertOotfLevels(
         });
     }
     const seqIds = new Map<string, number>();
+    /** PC level path -> object id of the synthetic player its converted scenes hold (cinematic-only levels). */
+    const heldPlayer = new Map<string, number>();
     const mapResource = (kind: ResourceKind, ref: number, ctx: ResourceContext): number | null => {
         const ow = owner(ctx.pc, ctx.ownerDb);
         if (!ow) return null;
@@ -1394,6 +1403,15 @@ export async function convertOotfLevels(
                         );
                         return object ? first.objectIdMap.get(object.id) : undefined;
                     };
+                    // A level with no PC player (the cinematic Intro) gets the template's Rynn from ensureSingletons, with the
+                    // next free object id; its scenes hold that player so the native HUD stays hidden, as in the disc Intro.
+                    const syntheticPlayer =
+                        actorId(9) === undefined &&
+                        opt.singletons !== false &&
+                        tplList.objects.some((o) => classes.get(o.dbIndex)?.get(o.classId)?.rflClass === 9)
+                            ? first.objects.objects.reduce((m, o) => Math.max(m, o.id), 0) + 1
+                            : undefined;
+                    if (syntheticPlayer !== undefined) heldPlayer.set(pc.path, syntheticPlayer);
                     const conv = await convertPcSequences(await SrscReader.fromBytes(bytes), {
                         maps: {
                             objectIdMap: first.objectIdMap,
@@ -1443,6 +1461,8 @@ export async function convertOotfLevels(
                         playerObjectId: actorId(9),
                         dragonObjectId: actorId(28),
                         cameraObjectId: actorId(27),
+                        cameraFov: pcLevelFov(pc),
+                        holdPlayerObjectId: syntheticPlayer,
                         usedIds: used,
                         only: g.ids,
                         pcDbIndex: g.db,
@@ -1464,7 +1484,15 @@ export async function convertOotfLevels(
         }
         if (!parts) continue;
         if (opt.singletons !== false) {
-            await stage(`singletons ${pc.path}`, async () => ensureSingletons(parts, pc, tplList.objects, classes));
+            await stage(`singletons ${pc.path}`, async () => {
+                ensureSingletons(parts, pc, tplList.objects, classes);
+                const held = heldPlayer.get(pc.path);
+                const rynn = parts.objects.objects.find((o) => classes.get(o.dbIndex)?.get(o.classId)?.rflClass === 9);
+                if (held !== undefined && rynn?.id !== held)
+                    res.warnings.push(
+                        `${title}: the scenes hold player ${held} but the level's player is ${rynn?.id ?? 'missing'}; the HUD may show in its scenes`,
+                    );
+            });
         }
         const lvl = parts;
         const xdbOf = (o: LvlObject): string | null => {
