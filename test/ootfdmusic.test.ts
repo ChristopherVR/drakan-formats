@@ -6,7 +6,7 @@ import {
     FIELD_INT,
     SrscReader,
     addLevelStartMusic,
-    applyMusicTriggers,
+    applyLevelMusic,
     buildOotfMusicPack,
     decodeFieldValue,
     decodeMsAdpcm,
@@ -394,7 +394,7 @@ describe('OotF music pack', () => {
 
     it('maps trigger music to the rendered tracks when given', () => {
         const objects: LvlObjectList = { objects: [], warnings: [] };
-        const r = applyMusicTriggers(
+        const r = applyLevelMusic(
             objects,
             [
                 {
@@ -411,9 +411,15 @@ describe('OotF music pack', () => {
                     fadeOut2: 3,
                 },
             ],
-            'Mountain World/Ruined Village/Ruined Village.lvl',
-            { musicClass, trackIds: new Map([[8, 9]]) },
+            {
+                musicClass,
+                detectorClass: { dbIndex: 4, classId: 9695, fields: [] },
+                levelPath: 'Mountain World/Ruined Village/Ruined Village.lvl',
+                initialPcId: 0,
+                loopPos: [0, 0, 0],
+                trackIds: new Map([[8, 9]]),
+            },
         );
-        expect([...r.tracks]).toEqual([[9, 1]]);
+        expect([...r.tracks]).toEqual([[8, 9]]);
     });
 });

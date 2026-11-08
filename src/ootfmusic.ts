@@ -2,8 +2,8 @@
 // Evidence and call order: docs/journal/2026-10-31/ootf-campaign.md section 4. Facts (counts only, from the user's install):
 //
 //   * PC: music is placed as "Music Trigger" objects (engine class 129, 37 objects, plus differently named copies such as
-//     "LairMusic"). A trigger has two slots, `Music 1 ID` and `Music 2 ID` (0 = none), each with a fade in / out time (f32 seconds),
-//     and is switched by messages from linked detectors. The ids 1..11 are the DirectMusic segments (RIFF DMSG, type 0x401) of
+//     "LairMusic"; the engine calls it "Music Detector"). A trigger is a two-sided box with `Music 1 ID` (front) and `Music 2 ID`
+//     (back), 0 = stop, each with a fade in / out time (f32 seconds); nothing links to it (see `applyLevelMusic`). The ids 1..11 are the DirectMusic segments (RIFF DMSG, type 0x401) of
 //     `Music.rrc`; the same file holds the DLS wave banks (ids 256..266, RIFF DLS: colh/ins/rgn/wsmp), so the segments are
 //     rendered offline (`ootfdmusic.ts`). The level class "Level Properties" (engine 54, never placed: the engine reads the
 //     defaults of the level ODB's first class of that engine) has `Initial Music ID`, the music the level starts with
@@ -14,7 +14,7 @@
 //     Music Loop" class (PS2MUSIC.ODB class 20, engine class 6, runtime 0x10006): fields `Sounds` (array of sound ids of the
 //     class's own database), `Plays overlay music (Triggered only) ?`, `Fade Out Time When Stopped`, `Fade In Time When
 //     Started`, `Message To Send To Trigger On` (1) / `Off` (0) and `Start State For Triggered Sounds`. Surdana places its
-//     music objects the same way (sound ids as plain numbers, switched by linked detectors).
+//     music objects the same way (sound ids as plain numbers), switched by Ambient Transitions and detectors.
 //
 // This module maps each (level, PC music id) to a PS2 track and rewrites the converted trigger objects. With the rendered
 // OotF tracks (`OotfMusicIds`, docs/journal/2026-11-08/ootf-main-music.md) a PC id maps to its own track; the palette of
@@ -187,6 +187,23 @@ export function findMusicTriggers(pc: PcLevel): MusicTrigger[] {
 }
 
 // ---------------------------------------------------------------- applying to the converted list
+//
+// PC: a Music Trigger ("Music Detector" in the engine) is a two-sided box (the detector box model, +-0.5 model units scaled
+// by the object, the same box as the Ambient Transition's) that the engine watches itself (no links): leaving it on the
+// front side plays `Music 1 ID`, on the back side `Music 2 ID`, and 0 stops the music (a 0 / 0 trigger exists: Succubus
+// Lair 3625). Front is the side an Ambient Transition of the same rotation calls front: Wartok's eight cave triggers each
+// sit next to an Ambient Transition, and Music 1 (the cave music) is always on that transition's cave sound side.
+//
+// PS2: music is Triggered Music Loops switched by messages: each loop listens for its own `Message To Send To Trigger On`
+// and the common Off (0) (Surdana: 1 or 19, and 0). The PS2 Ambient Transition (engine 131, Surdana's music switch) sends
+// one message per side, and in game only the first of several transitions on the same box ever fires (the engine follows
+// one transition at a time), so it cannot both stop the old music and start the new one. Trigger Detectors are
+// independent: each trigger box becomes two halves, front and back of the mid plane (the PS2 front is local +z, world
+// (cos ry, 0, sin ry) for a yaw-only rotation, measured in game), and each half holds an "off" detector (Off to every
+// loop but its music) and an "on" detector (that loop's On message). Entering a half switches to its music, so the
+// switch happens at the mid plane in both directions, like the PC exit side. Rotation and size stay the PC box's; a half
+// is at least `MIN_HALF` model units thick so a fast player cannot step over it. Both classes are template classes
+// (FX / PS2MUSIC are LEVEL1NA dependencies), so no class is appended. docs/journal/2026-11-08/ootf-level-music-triggers.md
 
 export interface MusicClassRef {
     /** `Triggered Music Loop` of PS2MUSIC.ODB: db index in the level's dependency table (14 in LEVEL1NA) and class id (20). */
@@ -195,121 +212,235 @@ export interface MusicClassRef {
     fields: readonly ClassFieldDef[];
 }
 
-export interface ApplyMusicOptions {
+/** Messages the music loops of a level listen for to start, one per PC music id (Off = 0 stops every loop). */
+export const MUSIC_ON_MESSAGES: readonly number[] = [1, 19, 20, 21, 10, 11, 12, 13, 14, 15, 16, 17, 22];
+/** Off: every loop stops on it (the class default `Message To Send To Trigger Off`). */
+export const MUSIC_OFF_MESSAGE = 0;
+/** Thinnest half box (model units, 2048 world units each) of a converted trigger. */
+export const MIN_HALF = 0.25;
+const MODEL_UNIT = 2048;
+
+export interface LevelMusicOptions {
     musicClass: MusicClassRef;
-    /** Database bits of the sound refs (default 0: the class's own database, PS2MUSIC.SDB, like Surdana's music objects). */
-    soundDb?: number;
-    /** Set `Start State For Triggered Sounds` to 1 so the track plays as soon as the level is up (in-game test aid; PC music is started by detectors). */
-    startOn?: boolean;
+    /** The PS2 Trigger Detector class (engine 61) the trigger boxes become; null = the triggers are dropped. */
+    detectorClass: MusicClassRef | null;
+    /** Level key for the palette fallback (`trackFor`). */
+    levelPath: string;
+    /** PC music id the level starts with (`pcInitialMusicId`), 0 = none. */
+    initialPcId: number;
+    /** Where the music loops sit (Rynn's start; the loops play everywhere). */
+    loopPos: Vec3;
     /** PC music id -> PS2MUSIC.SDB sound id of the rendered OotF track; ids it lacks fall back to the palette. */
     trackIds?: ReadonlyMap<number, number>;
+    /** Database bits of the sound refs (default 0: the class's own database, PS2MUSIC.SDB, like Surdana's music objects). */
+    soundDb?: number;
 }
 
-export interface ApplyMusicResult {
-    /** Converted trigger objects switched to the music class (first slot). */
-    replaced: number;
-    /** Second-slot objects added (the overlay), linked from the same detectors. */
-    added: number;
-    /** Triggers with both slots 0 (a "stop music" trigger; no PS2 equivalent placed). */
-    silent: number;
-    /** Track ids used: id -> times. */
+export interface LevelMusicResult {
+    /** PC music id -> object id of its Triggered Music Loop. */
+    loops: Map<number, number>;
+    /** PC music id -> PS2 track id. */
     tracks: Map<number, number>;
+    /** Detector objects written (the converted trigger objects reused plus the added ones). */
+    detectors: number;
+    /** Triggers whose converted object was missing (placed from the PC transform). */
+    missing: number;
+    /** Triggers dropped (no detector class). */
+    dropped: number;
+    warnings: string[];
 }
 
-function specsFor(
+type Values = readonly (readonly [RegExp, number | number[]])[];
+
+function specsOf(fields: readonly ClassFieldDef[], values: Values): ParamSpec[] {
+    const out: ParamSpec[] = [];
+    for (const [re, value] of values) {
+        const i = fields.findIndex((f) => re.test(f.name.trim()));
+        if (i < 0) continue;
+        const f = fields[i]!;
+        out.push({ fieldIndex: i, type: f.type, name: f.name, value });
+    }
+    return out;
+}
+
+function loopSpecs(
     fields: readonly ClassFieldDef[],
     track: number,
     soundDb: number,
-    overlay: boolean,
-    fadeIn: number,
-    fadeOut: number,
-    startOn = false,
+    fade: { fadeIn: number; fadeOut: number },
+    on: boolean,
+    onMessage?: number,
 ): ParamSpec[] {
-    const out: ParamSpec[] = [];
-    const add = (re: RegExp, value: number | number[]): void => {
-        const i = fields.findIndex((f) => re.test(f.name.trim()));
-        if (i < 0) return;
-        const f = fields[i]!;
-        out.push({ fieldIndex: i, type: f.type, name: f.name, value });
-    };
-    add(/^sounds$/i, [((soundDb << 16) | track) >>> 0]);
-    add(/^plays overlay music/i, overlay ? 1 : 0);
-    add(/^fade out time when stopped/i, fadeOut);
-    add(/^fade in time when started/i, fadeIn);
-    if (startOn) add(/^start state for triggered/i, 1);
-    return out;
+    const v: [RegExp, number | number[]][] = [
+        [/^sounds$/i, [((soundDb << 16) | track) >>> 0]],
+        [/^plays overlay music/i, 0],
+        [/^fade out time when stopped/i, fade.fadeOut],
+        [/^fade in time when started/i, fade.fadeIn],
+    ];
+    if (onMessage !== undefined) {
+        v.push([/^message to send to trigger on$/i, onMessage]);
+        v.push([/^message to send to trigger off$/i, MUSIC_OFF_MESSAGE]);
+    }
+    if (on) v.push([/^start state for triggered/i, 1]);
+    return specsOf(fields, v);
 }
 
 function retarget(o: LvlObject, c: MusicClassRef): void {
     o.classId = c.classId;
     o.dbIndex = c.dbIndex;
-    o.flags &= ~FLAG_SCALED;
-    o.scale = null;
     o.radius = null;
     o.flags &= ~0x10;
+    o.flags &= ~FLAG_SCALED;
+    o.scale = null;
+}
+
+const nextId = (list: LvlObjectList): number => list.objects.reduce((m, o) => Math.max(m, o.id), 0) + 1;
+
+/** World direction of a box's local +z (its front) for LVL rotation degrees; yaw only (pitch and roll are ignored). */
+export function boxFront(rot: readonly number[]): Vec3 {
+    const r = ((rot[1] ?? 0) * Math.PI) / 180;
+    return [Math.cos(r), 0, Math.sin(r)];
+}
+
+/** The two half boxes of a trigger box: centre and scale (model units) of the front half and of the back half. */
+export function triggerHalves(
+    pos: readonly number[],
+    rot: readonly number[],
+    scale: readonly number[] | null,
+): { front: { pos: Vec3; scale: Vec3 }; back: { pos: Vec3; scale: Vec3 } } {
+    const s = scale ?? [1, 1, 1];
+    const half = Math.max(s[2]! / 2, MIN_HALF);
+    const n = boxFront(rot);
+    const at = (sign: number): Vec3 => [0, 1, 2].map((k) => pos[k]! + (sign * n[k]! * half * MODEL_UNIT) / 2) as Vec3;
+    const sc: Vec3 = [s[0]!, s[1]!, half];
+    return { front: { pos: at(1), scale: [...sc] }, back: { pos: at(-1), scale: [...sc] } };
 }
 
 /**
- * Turn the converted trigger objects into PS2 music objects. The converter must have kept the objects (map the trigger classes
- * with `musicTriggerClassNames` to the music class in `ConvertOptions.classOverrides`, so ids and detector links survive);
- * a trigger whose object is missing is added at its position without links. Slot 1 reuses the object, slot 2 becomes a new
- * object that every object linking to the trigger also links to.
+ * Give a converted level its music: one Triggered Music Loop per PC music id (the start music on from the start) and the
+ * PC Music Trigger boxes as Trigger Detectors that switch them (see the comment above). The converted trigger object (kept
+ * by the class resolver) is reused for the first detector; a trigger without one uses its PC transform.
  */
-export function applyMusicTriggers(
+export function applyLevelMusic(
     list: LvlObjectList,
     triggers: readonly MusicTrigger[],
-    levelPath: string,
-    opt: ApplyMusicOptions,
-): ApplyMusicResult {
-    const res: ApplyMusicResult = { replaced: 0, added: 0, silent: 0, tracks: new Map() };
+    opt: LevelMusicOptions,
+): LevelMusicResult {
+    const res: LevelMusicResult = {
+        loops: new Map(),
+        tracks: new Map(),
+        detectors: 0,
+        missing: 0,
+        dropped: 0,
+        warnings: [],
+    };
     const soundDb = opt.soundDb ?? 0;
-    const use = (t: number): number => (res.tracks.set(t, (res.tracks.get(t) ?? 0) + 1), t);
-    for (const t of triggers) {
-        const slots: { slot: 1 | 2; id: number; fadeIn: number; fadeOut: number }[] = [];
-        if (t.music1 > 0) slots.push({ slot: 1, id: t.music1, fadeIn: t.fadeIn1, fadeOut: t.fadeOut1 });
-        if (t.music2 > 0) slots.push({ slot: 2, id: t.music2, fadeIn: t.fadeIn2, fadeOut: t.fadeOut2 });
-        if (!slots.length) {
-            res.silent++;
+    const dc = opt.detectorClass;
+    const live = dc ? triggers : [];
+    if (!dc && triggers.length) {
+        res.dropped = triggers.length;
+        res.warnings.push(`${triggers.length} music trigger(s) dropped: the template has no Trigger Detector class`);
+    }
+    // PC ids in order of first use (start music first), with the fades of the first slot that plays them.
+    const ids = new Map<number, { slot: 1 | 2; fadeIn: number; fadeOut: number }>();
+    // The start music only plays a rendered track (without Music.rrc the level keeps no start music, as before).
+    if (opt.initialPcId > 0 && opt.trackIds?.has(opt.initialPcId))
+        ids.set(opt.initialPcId, { slot: 1, fadeIn: 3, fadeOut: 3 });
+    for (const t of live) {
+        if (t.music1 > 0 && !ids.has(t.music1)) ids.set(t.music1, { slot: 1, fadeIn: t.fadeIn1, fadeOut: t.fadeOut1 });
+        if (t.music2 > 0 && !ids.has(t.music2)) ids.set(t.music2, { slot: 2, fadeIn: t.fadeIn2, fadeOut: t.fadeOut2 });
+    }
+    const onMessage = new Map<number, number>();
+    for (const [pcId, s] of ids) {
+        const k = onMessage.size;
+        if (k >= MUSIC_ON_MESSAGES.length) {
+            res.warnings.push(
+                `music ${pcId}: more than ${MUSIC_ON_MESSAGES.length} music ids in one level; not placed`,
+            );
             continue;
         }
-        let first = list.objects.find((o) => o.id === t.objectId);
-        slots.forEach((s, k) => {
-            const track = use(opt.trackIds?.get(s.id) ?? trackFor(levelPath, s.slot, s.id));
-            const specs = specsFor(
-                opt.musicClass.fields,
-                track,
-                soundDb,
-                s.slot === 2,
-                s.fadeIn,
-                s.fadeOut,
-                opt.startOn,
-            );
-            let obj: LvlObject;
-            if (k === 0 && first) {
-                obj = first;
-                retarget(obj, opt.musicClass);
-                res.replaced++;
-            } else {
-                const maxId = list.objects.reduce((m, o) => Math.max(m, o.id), 0);
-                obj = addObject(list, {
-                    classId: opt.musicClass.classId,
-                    dbIndex: opt.musicClass.dbIndex,
-                    pos: t.pos,
-                    rot: t.rot,
-                    id: maxId + 1,
-                }).object;
-                retarget(obj, opt.musicClass);
-                if (k === 0) first = obj;
-                else {
-                    for (const src of list.objects) {
-                        if (src !== obj && src.links.includes(t.objectId))
-                            setObjectLinks(list, src.id, [...src.links, obj.id]);
-                    }
+        const track = opt.trackIds?.get(pcId) ?? trackFor(opt.levelPath, s.slot, pcId);
+        const obj = addObject(list, {
+            classId: opt.musicClass.classId,
+            dbIndex: opt.musicClass.dbIndex,
+            pos: opt.loopPos,
+            rot: [0, 0, 0],
+            id: nextId(list),
+        }).object;
+        retarget(obj, opt.musicClass);
+        const msg = MUSIC_ON_MESSAGES[k]!;
+        onMessage.set(pcId, msg);
+        // Without triggers the loop needs no messages (the level start music alone keeps the class defaults).
+        const specs = loopSpecs(
+            opt.musicClass.fields,
+            track,
+            soundDb,
+            s,
+            pcId === opt.initialPcId,
+            live.length ? msg : undefined,
+        );
+        setObjectParams(list, obj.id, specs);
+        res.loops.set(pcId, obj.id);
+        res.tracks.set(pcId, track);
+    }
+    if (!dc) return res;
+    const allLoops = [...res.loops.values()];
+    for (const t of live) {
+        const box = list.objects.find((o) => o.id === t.objectId);
+        if (!box) res.missing++;
+        const pos = box ? box.pos : t.pos;
+        const rot = box ? box.rot : t.rot;
+        const halves = triggerHalves(pos, rot, box ? box.scale : null);
+        let reuse = box;
+        for (const [side, pcId] of [
+            ['front', t.music1],
+            ['back', t.music2],
+        ] as const) {
+            const loop = pcId > 0 ? res.loops.get(pcId) : undefined;
+            const parts: { links: number[]; message: number }[] = [
+                { links: allLoops.filter((id) => id !== loop), message: MUSIC_OFF_MESSAGE },
+            ];
+            if (loop !== undefined) parts.push({ links: [loop], message: onMessage.get(pcId)! });
+            for (const p of parts) {
+                if (!p.links.length) continue;
+                const h = halves[side];
+                let obj: LvlObject;
+                if (reuse) {
+                    obj = reuse;
+                    reuse = undefined;
+                    obj.classId = dc.classId;
+                    obj.dbIndex = dc.dbIndex;
+                    obj.pos = [...h.pos];
+                } else {
+                    obj = addObject(list, {
+                        classId: dc.classId,
+                        dbIndex: dc.dbIndex,
+                        pos: h.pos,
+                        rot,
+                        id: nextId(list),
+                    }).object;
                 }
-                res.added++;
+                obj.rot = [...rot] as Vec3;
+                obj.flags = (obj.flags | FLAG_SCALED | 0x01) & ~0x10;
+                obj.radius = null;
+                obj.scale = [...h.scale];
+                setObjectLinks(list, obj.id, p.links);
+                setObjectParams(
+                    list,
+                    obj.id,
+                    specsOf(dc.fields, [
+                        [/^task$/i, 6],
+                        [/^trigger message$/i, p.message],
+                        [/^detect only once\?$/i, 0],
+                    ]),
+                );
+                res.detectors++;
             }
-            setObjectParams(list, obj.id, specs);
-        });
+        }
+        if (reuse) {
+            // Nothing to switch (a 0 / 0 trigger in a level without music): the converted object goes.
+            list.objects.splice(list.objects.indexOf(reuse), 1);
+        }
     }
     return res;
 }
@@ -364,19 +495,14 @@ export function addLevelStartMusic(
     pos: Vec3,
     opt: { musicClass: MusicClassRef; trackIds: ReadonlyMap<number, number>; soundDb?: number },
 ): number | null {
-    const track = pcId > 0 ? opt.trackIds.get(pcId) : undefined;
-    if (track === undefined) return null;
-    const maxId = list.objects.reduce((m, o) => Math.max(m, o.id), 0);
-    const obj = addObject(list, {
-        classId: opt.musicClass.classId,
-        dbIndex: opt.musicClass.dbIndex,
-        pos,
-        rot: [0, 0, 0],
-        id: maxId + 1,
-    }).object;
-    retarget(obj, opt.musicClass);
-    setObjectParams(list, obj.id, specsFor(opt.musicClass.fields, track, opt.soundDb ?? 0, false, 3, 3, true));
-    return obj.id;
+    const r = applyLevelMusic(list, [], {
+        ...opt,
+        detectorClass: null,
+        levelPath: '',
+        initialPcId: pcId,
+        loopPos: pos,
+    });
+    return r.loops.get(pcId) ?? null;
 }
 
 /** Round-trip helper for tests: the f32 seconds of a stored fade dword. */

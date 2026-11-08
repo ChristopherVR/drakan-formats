@@ -74,8 +74,7 @@ import {
     type CampaignPlan,
 } from './ootfcampaign.ts';
 import {
-    addLevelStartMusic,
-    applyMusicTriggers,
+    applyLevelMusic,
     findMusicTriggers,
     musicTriggerClassNames,
     pcInitialMusicId,
@@ -235,8 +234,6 @@ export interface OotfPipelineOptions {
      * triggers; ootfdmusic.ts). Default true; false (or no Music.rrc) keeps the palette of disc tracks.
      */
     ootfMusic?: boolean;
-    /** Test aid: music objects start playing at level start (Start State = 1). */
-    musicStartOn?: boolean;
     /** Rewrite text defaults / parameters to new XDB strings (default true). */
     texts?: boolean;
     sounds?: boolean;
@@ -1067,17 +1064,17 @@ export async function convertOotfLevels(
     const exitClass = findPs2Class((c) => c.rflClass === 55 && transitionFieldIndex(c.fields) >= 0);
     const detectorClass = findPs2Class((c) => c.rflClass === 61 && /^trigger detector$/i.test(c.name.trim()));
     const timerClass = findPs2Class((c) => c.rflClass === 62 && /^timer$/i.test(c.name.trim()) && !!c.fields);
-    // Audit: music triggers never go through the class plan (the resolver below maps them to the Triggered Music Loop class and
-    // `applyMusicTriggers` rewrites them), and multiplayer pads / crystals have no PS2 object at all (the editor exports them as
+    // Audit: music triggers never go through the class plan (the resolver below maps them to the Trigger Detector class and
+    // `applyLevelMusic` rewrites them), and multiplayer pads / crystals have no PS2 object at all (the editor exports them as
     // arena spawns and markers: `ootfArenaFromPc`). Say so instead of reporting them as unsupported.
     for (const row of res.classAudit) {
         if (row.outcome !== 'unsupported') continue;
         const pc = pcs.find((p) => p.path === row.pcPath);
-        if (opt.music !== false && musicClass && pc && musicTriggerClassNames(pc).includes(row.name)) {
+        if (opt.music !== false && musicClass && detectorClass && pc && musicTriggerClassNames(pc).includes(row.name)) {
             row.outcome = 'name-mapped';
-            row.ps2Name = musicClass.cls.name;
+            row.ps2Name = detectorClass.cls.name;
             row.reason = undefined;
-            row.detail = 'music trigger: rewritten to the Triggered Music Loop class';
+            row.detail = 'music trigger: rewritten to Trigger Detectors that switch Triggered Music Loops';
         } else if (row.objects > 0 && pc) {
             const cls = pc.classes.get(Number(row.key.split(':')[0]))?.get(Number(row.key.split(':')[1]));
             const omit = cls
@@ -1095,10 +1092,10 @@ export async function convertOotfLevels(
     }
     const resolverFor = (pc: PcLevel): ((db: number, id: number) => ClassTarget | null) | undefined => {
         if (!plan) return undefined;
-        const music = opt.music !== false && musicClass ? new Set(musicTriggerClassNames(pc)) : null;
+        const music = opt.music !== false && musicClass && detectorClass ? new Set(musicTriggerClassNames(pc)) : null;
         return (db, id) => {
             const cls = pc.classes.get(db)?.get(id);
-            if (cls && music?.has(cls.name)) return musicClass!.t;
+            if (cls && music?.has(cls.name)) return detectorClass!.t;
             const k = cls ? planKey.get(sig(cls)) : undefined;
             return k ? plan!.resolve(k.db, k.id) : null;
         };
@@ -1511,21 +1508,28 @@ export async function convertOotfLevels(
                     classId: musicClass.t.classId,
                     fields: musicClass.cls.fields!,
                 };
-                applyMusicTriggers(lvl.objects, findMusicTriggers(pc), ootfLevelKey(pc), {
-                    startOn: opt.musicStartOn,
+                const rynn = lvl.objects.objects.find((o) => classes.get(o.dbIndex)?.get(o.classId)?.rflClass === 9);
+                const dc = detectorClass?.cls.fields
+                    ? {
+                          dbIndex: detectorClass.t.dbIndex,
+                          classId: detectorClass.t.classId,
+                          fields: detectorClass.cls.fields,
+                      }
+                    : null;
+                // The level's start music (PC Level Properties `Initial Music ID`) and the Music Trigger boxes.
+                const r = applyLevelMusic(lvl.objects, findMusicTriggers(pc), {
                     musicClass: mc,
+                    detectorClass: dc,
+                    levelPath: ootfLevelKey(pc),
+                    initialPcId: res.music ? pcInitialMusicId(pc) : 0,
+                    loopPos: rynn ? [...rynn.pos] : [0, 0, 0],
                     trackIds: res.music?.ids,
                 });
-                // The level's own start music (PC Level Properties `Initial Music ID`), on from the start, at Rynn.
-                if (res.music) {
-                    const rynn = lvl.objects.objects.find(
-                        (o) => classes.get(o.dbIndex)?.get(o.classId)?.rflClass === 9,
+                for (const w of r.warnings) res.warnings.push(`${title}: music: ${w}`);
+                if (r.loops.size)
+                    log(
+                        `${title}: music: ${r.loops.size} loop(s) (${[...r.tracks].map(([k, t]) => `${k}->${t}`).join(', ')}), ${r.detectors} detector(s)`,
                     );
-                    addLevelStartMusic(lvl.objects, pcInitialMusicId(pc), rynn ? [...rynn.pos] : [0, 0, 0], {
-                        musicClass: mc,
-                        trackIds: res.music.ids,
-                    });
-                }
             });
         }
         if (dbgEnv0['OOTF_NO_PUZZLE'] !== '1') {

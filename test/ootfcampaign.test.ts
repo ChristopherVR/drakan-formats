@@ -9,7 +9,11 @@ import {
     SrscReader,
     TextPlan,
     applyCampaignExits,
-    applyMusicTriggers,
+    applyLevelMusic,
+    MIN_HALF,
+    boxFront,
+    triggerHalves,
+    MUSIC_ON_MESSAGES,
     isOotfArenaPath,
     exitBoxes,
     exitDetectorParams,
@@ -624,33 +628,146 @@ describe('music', () => {
         expect(trackFor('Unknown/x/x.lvl', 1, 1)).toBe(88);
     });
 
-    it('replaces slot 1, adds slot 2 with the same detector links and skips silent triggers', () => {
+    const LOOP_FIELDS: ClassFieldDef[] = [
+        ...MUSIC_FIELDS,
+        { name: 'Message To Send To Trigger On', type: 7 },
+        { name: 'Message To Send To Trigger Off', type: 7 },
+        { name: 'Start State For Triggered Sounds', type: 7 },
+    ];
+    const loopClass = { dbIndex: 14, classId: 20, fields: LOOP_FIELDS };
+    const detectorClass = {
+        dbIndex: 4,
+        classId: 9695,
+        fields: [
+            { name: 'Task', type: 7 },
+            { name: 'Trigger Message', type: 7 },
+            { name: 'Detect Only Once?', type: 7 },
+        ] as ClassFieldDef[],
+    };
+    const val = (o: LvlObject, name: string): unknown => {
+        const i = o.params.findIndex((p) => p.name === name);
+        return i < 0 ? undefined : decodeFieldValue(o.params[i]!.type, o.data[i]!, o.data);
+    };
+
+    it('splits a trigger box into front and back halves along its local +z', () => {
+        expect(boxFront([0, 0, 0])).toEqual([1, 0, 0]);
+        const f90 = boxFront([0, 90, 0]);
+        expect([f90[0], f90[2]].map((v) => Math.round(v * 1e6) / 1e6)).toEqual([0, 1]);
+        const h = triggerHalves([1000, 50, 2000], [0, 0, 0], [2, 1, 1]);
+        // half thickness 0.5 model units = 1024, centres a quarter box (512) either side of the plane
+        expect(h.front).toEqual({ pos: [1512, 50, 2000], scale: [2, 1, 0.5] });
+        expect(h.back).toEqual({ pos: [488, 50, 2000], scale: [2, 1, 0.5] });
+        // a thin box keeps halves of at least MIN_HALF
+        expect(triggerHalves([0, 0, 0], [0, 0, 0], [1, 1, 0.2]).front.scale[2]).toBe(MIN_HALF);
+    });
+
+    it('turns the trigger boxes into detectors that switch one loop per music id', () => {
         const pc = pcWithMusic();
+        // 50: front 3 / back 5, 51: front 0 (stop) / back 8, 52: 0 / 0
         const triggers = findMusicTriggers(pc);
-        const detector = obj(60, 61, { links: [50, 51] });
-        const list: LvlObjectList = { objects: [obj(50, 99), obj(51, 99), obj(52, 99), detector], warnings: [] };
-        const r = applyMusicTriggers(list, triggers, pc.path, { musicClass });
-        expect(r).toMatchObject({ replaced: 2, added: 1, silent: 1 });
-        const o50 = list.objects.find((o) => o.id === 50)!;
-        expect([o50.classId, o50.dbIndex]).toEqual([20, 14]);
-        // slot 1 = track 3 -> bed list [116, 98, 115][2] = 115, Sounds is one element
-        expect(decodeFieldValue(0x1005, o50.data[o50.params.findIndex((p) => p.name === 'Sounds')]!, o50.data)).toEqual(
-            [115],
+        const boxes = [50, 51, 52].map((id) =>
+            obj(id, 99, { flags: FLAG_VISIBLE | 0x100, scale: [2, 1, 1], rot: [0, 90, 0] }),
         );
-        const ov = list.objects.filter((o) => o.id > 60);
-        expect(ov).toHaveLength(1);
-        const ov50 = ov[0]!;
-        expect(
-            decodeFieldValue(0x1005, ov50.data[ov50.params.findIndex((p) => p.name === 'Sounds')]!, ov50.data),
-        ).toEqual([113]);
-        const ovFlag = ov50.params.findIndex((p) => p.name.startsWith('Plays overlay'));
-        expect(ov50.data[ovFlag]).toBe(1);
-        // the detector now links to the added overlay object of trigger 50 as well
-        expect(detector.links).toHaveLength(3);
-        expect(detector.links).toContain(ov50.id);
-        // the untouched silent trigger stays as converted
-        expect(list.objects.find((o) => o.id === 52)!.classId).toBe(99);
-        expect(r.tracks.get(115)).toBe(1);
+        const list: LvlObjectList = { objects: [...boxes, obj(60, 9)], warnings: [] };
+        const posOf = (id: number) => [id * 10, 5, id * 20];
+        const r = applyLevelMusic(list, triggers, {
+            musicClass: loopClass,
+            detectorClass,
+            levelPath: pc.path,
+            initialPcId: 3,
+            loopPos: [1, 2, 3],
+            trackIds: new Map([
+                [3, 40],
+                [5, 41],
+            ]),
+        });
+        // loops: the start music first, then in order of use; 8 is not rendered and takes the palette (slot 2 list -> 120)
+        expect([...r.tracks]).toEqual([
+            [3, 40],
+            [5, 41],
+            [8, 120],
+        ]);
+        const loop = (pcId: number) => list.objects.find((o) => o.id === r.loops.get(pcId))!;
+        expect([loop(3).classId, loop(3).dbIndex, ...loop(3).pos]).toEqual([20, 14, 1, 2, 3]);
+        expect(val(loop(3), 'Sounds')).toEqual([40]);
+        expect(val(loop(3), 'Start State For Triggered Sounds')).toBe(1);
+        expect(val(loop(5), 'Start State For Triggered Sounds')).toBeUndefined();
+        expect([3, 5, 8].map((id) => val(loop(id), 'Message To Send To Trigger On'))).toEqual(
+            MUSIC_ON_MESSAGES.slice(0, 3),
+        );
+        expect([3, 5, 8].map((id) => val(loop(id), 'Message To Send To Trigger Off'))).toEqual([0, 0, 0]);
+        const [l3, l5, l8] = [3, 5, 8].map((id) => r.loops.get(id)!) as [number, number, number];
+        const [m3, m5, m8] = MUSIC_ON_MESSAGES as [number, number, number];
+        const det = list.objects.filter((o) => o.classId === 9695);
+        for (const o of det) {
+            expect([o.dbIndex, o.flags & 0x101, o.scale, o.rot]).toEqual([4, 0x101, [2, 1, 0.5], [0, 90, 0]]);
+            expect(val(o, 'Task')).toBe(6);
+            expect(val(o, 'Detect Only Once?')).toBe(0);
+        }
+        // rot 90: front = +z; the halves sit 512 units either side of the trigger
+        const of = (box: number, side: 1 | -1) => {
+            const [x, y, z] = posOf(box);
+            return det
+                .filter(
+                    (o) =>
+                        Math.abs(o.pos[0] - x!) < 1e-6 &&
+                        o.pos[1] === y &&
+                        Math.abs(o.pos[2] - (z! + side * 512)) < 1e-6,
+                )
+                .map((o) => [val(o, 'Trigger Message'), [...o.links].sort()]);
+        };
+        const sorted = (...x: number[]) => x.sort();
+        expect(of(50, 1)).toEqual([
+            [0, sorted(l5, l8)],
+            [m3, [l3]],
+        ]);
+        expect(of(50, -1)).toEqual([
+            [0, sorted(l3, l8)],
+            [m5, [l5]],
+        ]);
+        expect(of(51, 1)).toEqual([[0, sorted(l3, l5, l8)]]); // front 0: every loop off
+        expect(of(51, -1)).toEqual([
+            [0, sorted(l3, l5)],
+            [m8, [l8]],
+        ]);
+        expect(of(52, 1)).toEqual([[0, sorted(l3, l5, l8)]]);
+        expect(of(52, -1)).toEqual([[0, sorted(l3, l5, l8)]]);
+        // the converted trigger objects are reused (first detector of each), nothing else is linked
+        expect(list.objects.filter((o) => [50, 51, 52].includes(o.id)).every((o) => o.classId === 9695)).toBe(true);
+        expect(r).toMatchObject({ detectors: 9, missing: 0, dropped: 0 });
+        expect(list.objects.find((o) => o.id === 60)!.links).toEqual([]);
+    });
+
+    it('places a missing box from the PC transform and drops the triggers without a detector class', () => {
+        const triggers = findMusicTriggers(pcWithMusic()).slice(0, 1);
+        const list: LvlObjectList = { objects: [obj(60, 9)], warnings: [] };
+        const r = applyLevelMusic(list, triggers, {
+            musicClass: loopClass,
+            detectorClass,
+            levelPath: 'x',
+            initialPcId: 0,
+            loopPos: [0, 0, 0],
+            trackIds: new Map([
+                [3, 40],
+                [5, 41],
+            ]),
+        });
+        expect(r).toMatchObject({ missing: 1, detectors: 4 });
+        const none: LvlObjectList = { objects: [], warnings: [] };
+        const d = applyLevelMusic(none, triggers, {
+            musicClass: loopClass,
+            detectorClass: null,
+            levelPath: 'x',
+            initialPcId: 3,
+            loopPos: [0, 0, 0],
+            trackIds: new Map([[3, 40]]),
+        });
+        expect(d.dropped).toBe(1);
+        expect(d.warnings).toHaveLength(1);
+        // the start music alone keeps the class's message defaults
+        expect(none.objects).toHaveLength(1);
+        expect(val(none.objects[0]!, 'Message To Send To Trigger On')).toBeUndefined();
+        expect(val(none.objects[0]!, 'Start State For Triggered Sounds')).toBe(1);
     });
 });
 
