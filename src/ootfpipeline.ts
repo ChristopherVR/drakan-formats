@@ -2522,8 +2522,9 @@ function playerClipBuilder(ps2: OotfPs2Context) {
         skeleton = best;
         return skeleton;
     };
-    // The finger joints the PC Rynn lacks take the grip of a native armed clip (first key), so a scene sword is held.
-    const GRIP_CLIPS = ['a_randomidle', 'a_1handedrmub', 'ncidle2magic_sword'];
+    // The finger joints the PC Rynn lacks take the grip of a native two-handed clip (first key, made for the PS2 long
+    // sword), so a scene sword is held with both hands.
+    const GRIP_CLIPS = ['2h_randomidle', '2h_walk', 'a_randomidle'];
     let held: Map<number, [number, number, number, number]> | undefined;
     const firstKeys = async (
         sk: Skeleton,
