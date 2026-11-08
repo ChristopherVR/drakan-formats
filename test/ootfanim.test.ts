@@ -5,6 +5,8 @@ import {
     jointParents,
     parsePs2Anim,
     parseSkeleton,
+    ps2AnimFlags,
+    withPs2AnimFlags,
     writePs2Anim,
     writePs2Skeleton,
 } from '../src/ootfanim.ts';
@@ -96,6 +98,12 @@ describe('ootfanim ps2 animation', () => {
         };
         const { info, data } = writePs2Anim(a);
         expect(parsePs2Anim(info, data)).toEqual(a);
+        // the play-once flag (death clips) is read and rewritten in place
+        expect(ps2AnimFlags(info)).toBe(a.flags);
+        const once = withPs2AnimFlags(info, 1);
+        expect(ps2AnimFlags(once)).toBe(1);
+        expect(parsePs2Anim(once, data)).toEqual({ ...a, flags: 1 });
+        expect(ps2AnimFlags(info)).toBe(a.flags); // the input is not changed
     });
 });
 

@@ -291,9 +291,90 @@ export function retargetPs2Anim(
     };
 }
 
+type PcKey = PcAnim['keys'][number];
+
+function slerpQuat(a: Quat4, b: Quat4, f: number): Quat4 {
+    let d = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+    const sign = d < 0 ? -1 : 1;
+    d *= sign;
+    let s0 = 1 - f;
+    let s1 = f * sign;
+    if (d < 0.9995) {
+        const th = Math.acos(Math.min(1, d));
+        const sn = Math.sin(th);
+        s0 = Math.sin((1 - f) * th) / sn;
+        s1 = (Math.sin(f * th) / sn) * sign;
+    }
+    const q: Quat4 = [s0 * a[0] + s1 * b[0], s0 * a[1] + s1 * b[1], s0 * a[2] + s1 * b[2], s0 * a[3] + s1 * b[3]];
+    const l = Math.hypot(...q) || 1;
+    return [q[0] / l, q[1] / l, q[2] / l, q[3] / l];
+}
+type Quat4 = [number, number, number, number];
+
+/** A PC track's transform at time `t` (rotation slerped, translation lerped between the neighbouring keys). */
+function sampleKey(keys: readonly PcKey[], t: number): number[] {
+    let i = 0;
+    while (i + 1 < keys.length && keys[i + 1]!.time <= t) i++;
+    const a = keys[i]!;
+    const b = keys[i + 1];
+    if (!b || b.time <= a.time || t <= a.time) return [...a.xform];
+    const f = Math.min(1, (t - a.time) / (b.time - a.time));
+    const q = slerpQuat(mat12ToQuat(a.xform), mat12ToQuat(b.xform), f);
+    const pos = [9, 10, 11].map((k) => a.xform[k]! + (b.xform[k]! - a.xform[k]!) * f);
+    return [...quatToMat12(q, pos)];
+}
+
+/**
+ * Fold the keys of an unmatched source joint into its matched parent when it is that parent's only child and sits on the
+ * parent's bind pivot: a pass-through node such as the PC orc's `root` under `hueges` (the PS2 rig has no such joint and
+ * hangs the legs and spine straight on `hueges`). Dropping it lost its motion for the whole body: the sitting clips lower
+ * the body there (0.135 of a 0.46 rig), so retargeted sitting orcs hovered. A PC key is a model-space delta transform (its
+ * rotation is the model-axes delta of `ootfcreature.ts`, its translation the pivot term plus any real travel), and the
+ * deltas of a chain compose child first, so the parent's new key is `M_child * M_parent`, translation included.
+ */
+function foldPassThroughJoints(pc: PcAnim, src: Rig, match: JointMatch): PcAnim {
+    const matched = new Set(match.map.filter((s) => s >= 0));
+    const bind = bindPositions(src);
+    const size = rigSize(src);
+    const folds: { parent: number; child: number }[] = [];
+    for (let s = 0; s < src.jointCount; s++) {
+        const p = src.parents[s]!;
+        if (matched.has(s) || p < 0 || !matched.has(p)) continue;
+        if (src.parents.filter((x) => x === p).length !== 1) continue;
+        if (Math.hypot(...[0, 1, 2].map((c) => bind[s * 3 + c]! - bind[p * 3 + c]!)) > 1e-3 * size) continue;
+        const l = pc.lookup[s];
+        if (!l || l.count === 0) continue;
+        folds.push({ parent: p, child: s });
+    }
+    if (!folds.length) return pc;
+    const replaced = new Map<number, PcKey[]>();
+    for (const { parent, child } of folds) {
+        const pl = pc.lookup[parent]!;
+        const cl = pc.lookup[child]!;
+        const pk = replaced.get(parent) ?? pc.keys.slice(pl.first, pl.first + pl.count);
+        const ck = pc.keys.slice(cl.first, cl.first + cl.count);
+        if (!pk.length) continue;
+        const times = [...new Set([...pk, ...ck].map((k) => k.time))].sort((a, b) => a - b);
+        replaced.set(
+            parent,
+            times.map((time) => {
+                return { time, xform: [...mulMat12(sampleKey(ck, time), sampleKey(pk, time))] };
+            }),
+        );
+    }
+    const keys: PcKey[] = [];
+    const lookup: PcAnim['lookup'] = [];
+    pc.lookup.forEach((l, j) => {
+        const first = keys.length;
+        keys.push(...(replaced.get(j) ?? pc.keys.slice(l.first, l.first + l.count)));
+        lookup.push({ first, count: keys.length - first });
+    });
+    return { ...pc, keys, lookup };
+}
+
 /**
  * PC animation of the `src` rig -> PS2 animation of the `dst` rig. Unmatched target joints stay at their bind pose,
- * source joints without a partner are dropped.
+ * source joints without a partner are dropped (a pass-through joint is first folded into its parent).
  */
 export function retargetPcAnim(
     pc: PcAnim,
@@ -304,6 +385,7 @@ export function retargetPcAnim(
 ): Ps2Anim {
     if (pc.lookup.length !== srcRig.jointCount)
         throw new Error(`animation has ${pc.lookup.length} tracks, source rig ${srcRig.jointCount} joints`);
+    pc = foldPassThroughJoints(pc, srcRig, match);
     const srcSize = rigSize(srcRig);
     const scale = opt.scale ?? (srcSize > 1e-9 ? rigSize(dstRig) / srcSize : 1);
     const keys: PcAnim['keys'] = [];

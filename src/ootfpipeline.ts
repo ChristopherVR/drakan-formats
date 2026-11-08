@@ -33,7 +33,7 @@ import {
     type OdbClass,
 } from './odb.ts';
 import { resourceKind, type ResourceContext, type ResourceKind } from './convert.ts';
-import { FIELD_MODEL, FIELD_SOUND, decodeFieldValue, fieldBase, fieldIsIndirect } from './fields.ts';
+import { FIELD_ANIMATION, FIELD_MODEL, FIELD_SOUND, decodeFieldValue, fieldBase, fieldIsIndirect } from './fields.ts';
 import {
     convertPcSounds,
     soundIdAllocator,
@@ -129,7 +129,7 @@ import {
 } from './ootfclassrefs.ts';
 import { CELL_SIZE, LVL_TYPE_LAYERS, parsePs2Terrain, terrainHeightAt } from './terrain.ts';
 import { odbStemForDependency } from './odb.ts';
-import { animName, parseSkeleton, writePs2Anim, type PcAnim, type Skeleton } from './ootfanim.ts';
+import { animName, parseSkeleton, ps2AnimFlags, writePs2Anim, type PcAnim, type Skeleton } from './ootfanim.ts';
 import { buildRig } from './skeleton.ts';
 import { MOD_CHARACTER } from './model.ts';
 import { SSD_SEQUENCE } from './resources.ts';
@@ -1034,8 +1034,11 @@ export async function convertOotfLevels(
                         const k = `${t.ps2Stem}|${id}`;
                         if (id === undefined || done.has(k)) continue;
                         done.add(k);
-                        const w = writePs2Anim(a.anim);
                         const e1 = adb.find(0x0501, id)!;
+                        // PC clips carry no loop flag (0 on 1626 of 1722 install clips; the PC engine decides by use), the
+                        // PS2 engine reads it from the clip: a death clip written looping replays from its standing first
+                        // frame, so a killed creature ended upright. The replaced disc clip's flags say how it is used.
+                        const w = writePs2Anim({ ...a.anim, flags: ps2AnimFlags(await adb.readRaw(e1)) });
                         const e2 = adb.find(0x0502, id);
                         if (!e2) continue;
                         res.files[`overrides/${t.ps2Stem}.ADB/0501_${id}_${e1.sub}.bin`] = w.info;
@@ -1987,6 +1990,7 @@ export async function convertOotfLevels(
                       })
                     : found;
             let n = 0;
+            const pulled = new Set<number>();
             const slotOf = (o: LvlObject): number => (pullArr ? pullArr.indexOf(o.id) : n - 1);
             // DRAKAN_DBG_PULLDIST=<d>,<dy>: ring distance (default 1200) and height offset (default 0) of the pulled objects.
             const [pd, pdy] = (dbgEnv['DRAKAN_DBG_PULLDIST'] ?? '1200,0').split(',').map(Number);
@@ -1998,6 +2002,7 @@ export async function convertOotfLevels(
                         re.test(dbgName(o)) &&
                         pullIdOk(o) &&
                         (n++,
+                        pulled.add(o.id),
                         console.warn(
                             `pull ${dbgName(o)} obj ${o.id} rot=${o.rot.map(Math.round)} from ${o.pos.map(Math.round)}${dbgEnv['DRAKAN_DBG_PULLP'] ? ` r=${o.radius} flags=${o.flags.toString(16)} links=${o.links} ` + o.params.map((p, i) => `${p.name}=${o.data[i]}`).join(' ') : ''}`,
                         ),
@@ -2021,6 +2026,24 @@ export async function convertOotfLevels(
                             : o,
                     ),
                 };
+            // DRAKAN_DBG_PULLSET=<field>=<int>;... sets fields of the pulled objects (added when the object leaves the field at
+            // its class default), e.g. "Initial Health=1" so the harness can kill a creature with one blow and watch it die.
+            const sets = (dbgEnv['DRAKAN_DBG_PULLSET'] ?? '').split(';').flatMap((kv) => {
+                const at = kv.lastIndexOf('=');
+                return at > 0 ? [{ name: kv.slice(0, at), value: Number(kv.slice(at + 1)) }] : [];
+            });
+            for (const o of sets.length ? parts.objects.objects : []) {
+                if (!pulled.has(o.id)) continue;
+                const fields = classes.get(o.dbIndex)?.get(o.classId)?.fields;
+                const specs = objectParamSpecs(o);
+                for (const { name, value } of sets) {
+                    const have = specs.find((sp) => sp.name === name);
+                    const i = fields?.findIndex((f) => f.name === name) ?? -1;
+                    if (have) have.value = value;
+                    else if (i >= 0) specs.push({ fieldIndex: i, type: fields![i]!.type, name, value });
+                }
+                setObjectParams({ objects: [o], warnings: [] }, o.id, specs);
+            }
         }
         if (dbgEnv['DRAKAN_DBG_LINKADD']) {
             // Test aid: DRAKAN_DBG_LINKADD=<from>><to>,... adds link-target ids (object ids as DRAKAN_DBG_LINKS prints them), e.g. a switch to a door.
@@ -2112,6 +2135,10 @@ export async function convertOotfLevels(
             const add = builder.entries(hostGroup);
             if (!add.models.length && !add.textures.length) return;
             const dir = `files/${hostDir}`;
+            // Death clips of converted creatures must hold their last frame (see `holdLastFrame`).
+            const oneShot = new Set(plan?.synthesized.flatMap((s) => deathClipIds(s.cls)) ?? []);
+            const held = builder.holdLastFrame(oneShot);
+            if (held) res.warnings.push(`creature clips: ${held} death clip(s) set to play once and hold`);
             const clips = builder.animEntries();
             if (clips.length) {
                 // The clips ship to the host ADB and to the ADB of every ODB that got a cloned creature class (ids are free in all of them).
@@ -2438,6 +2465,22 @@ export function morphModelRefs(cls: OdbClass): number[] {
         if (fieldBase(f.type) !== FIELD_MODEL || dword === undefined) return;
         const refs = fieldIsIndirect(f.type) ? (decodeFieldValue(f.type, dword, cls.data ?? []) as number[]) : [dword];
         for (const r of refs) if (r && !out.includes(r)) out.push(r);
+    });
+    return out;
+}
+
+/** Class fields that start a creature's death; the clip they name ends lying down and must not loop. */
+const DEATH_FIELDS: ReadonlySet<string> = new Set(['death', 'forward death', 'sleep death']);
+
+/** Animation ids named by a class's death fields (`DEATH_FIELDS`). */
+export function deathClipIds(cls: Pick<OdbClass, 'fields' | 'data'>): number[] {
+    const out: number[] = [];
+    cls.fields?.forEach((f, i) => {
+        const dword = cls.data?.[i];
+        if (dword === undefined || fieldBase(f.type) !== FIELD_ANIMATION) return;
+        if (!DEATH_FIELDS.has(f.name.trim().toLowerCase())) return;
+        const ids = fieldIsIndirect(f.type) ? (decodeFieldValue(f.type, dword, cls.data ?? []) as number[]) : [dword];
+        for (const id of ids) if (id) out.push(id & 0xffff);
     });
     return out;
 }

@@ -20,10 +20,17 @@ const rotZ = (a: number): Rot => [Math.cos(a), Math.sin(a), 0, -Math.sin(a), Mat
 const I3: Rot = [1, 0, 0, 0, 1, 0, 0, 0, 1];
 
 /** Skeleton with named joints, bind rotations and a local translation of `len` along +y below each root. */
-function skeleton(names: string[], parents: number[], binds: Rot[], len = 1, animIds: number[] = []): Skeleton {
+function skeleton(
+    names: string[],
+    parents: number[],
+    binds: Rot[],
+    len = 1,
+    animIds: number[] = [],
+    lens?: number[],
+): Skeleton {
     const world: Float32Array[] = [];
     const joints: SkelJoint[] = names.map((_, j) => {
-        const local = Float32Array.from([...binds[j]!, 0, parents[j]! < 0 ? 0 : len, 0]);
+        const local = Float32Array.from([...binds[j]!, 0, parents[j]! < 0 ? 0 : (lens?.[j] ?? len), 0]);
         const w = parents[j]! < 0 ? local : mulMat12(local, world[parents[j]!]!);
         world.push(w);
         return { xform: Array.from(invertMat12(w)), mesh: 0, firstChild: -1, nextSibling: -1, weights: [[]] };
@@ -150,9 +157,44 @@ describe('retargetPcAnim', () => {
         // twist has no partner: a single key at the bind rotation (identity)
         expect(a.tracks[2]!.keys).toHaveLength(1);
         expect(quatAngle(a.tracks[2]!.keys[0]!.q, [0, 0, 0, 1])).toBeCloseTo(0, 5);
-        // root travel of 1 unit in the source is scaled by the size ratio
+        // root travel of 1 unit in the source is scaled by the size ratio (positions are absolute, so is the start)
+        const s = rigSize(dst) / rigSize(src);
         expect(a.tracks[0]!.hasPos).toBe(true);
-        expect(a.tracks[0]!.keys[1]!.pos![1]).toBeCloseTo(rigSize(dst) / rigSize(src), 5);
+        expect(a.tracks[0]!.keys[0]!.pos![1]).toBeCloseTo(s, 5);
+        expect(a.tracks[0]!.keys[1]!.pos![1]! - a.tracks[0]!.keys[0]!.pos![1]!).toBeCloseTo(s, 5);
+    });
+
+    it('folds a pass-through source joint into its parent (the PC orc root under hueges)', () => {
+        // PC: top -> root (on the same pivot) -> leg; the PS2 rig hangs the leg straight on top
+        const s3 = skeleton(['top', 'root', 'leg'], [-1, 0, 1], [I3, I3, I3], 1, [], [0, 0, 1]);
+        const d2 = skeleton(['top', 'leg'], [-1, 0], [I3, I3], 1);
+        const sr = buildRig(s3, 0);
+        const dr = buildRig(d2, 0);
+        const mm = matchJoints(sr, dr);
+        expect(mm.map).toEqual([0, 2]);
+        const R = rotZ(0.4);
+        // sitting: the pass-through joint lowers the body 0.3 and leans; the top joint is still
+        const sit = pcAnim([
+            [{ t: 0, rot: I3 }],
+            [
+                { t: 0, rot: R, pos: [0, -0.3, 0] },
+                { t: 1, rot: R, pos: [0, -0.3, 0] },
+            ],
+            [{ t: 0, rot: I3 }],
+        ]);
+        const a = retargetPcAnim(sit, sr, dr, mm, { scale: 1 });
+        const top = a.tracks[0]!;
+        expect(top.hasPos).toBe(true);
+        expect(top.keys[0]!.pos![1]).toBeCloseTo(-0.3, 5);
+        const local = quatToMat12(top.keys[0]!.q, [0, 0, 0]);
+        for (let i = 0; i < 9; i++) expect(local[i]).toBeCloseTo(R[i]!, 5);
+        // a rig whose pass-through joint has a partner folds nothing: the top keeps its own (still) key
+        const plain = retargetPcAnim(sit, sr, sr, matchJoints(sr, sr), { scale: 1 });
+        expect(plain.tracks[0]!.keys[0]!.pos![1]).toBeCloseTo(0, 5);
+        // a joint off its parent's pivot is a real bone, not a pass-through: nothing is folded
+        const offPivot = buildRig(skeleton(['top', 'root', 'leg'], [-1, 0, 1], [I3, I3, I3], 1), 0);
+        const kept = retargetPcAnim(sit, offPivot, dr, matchJoints(offPivot, dr), { scale: 1 });
+        expect(kept.tracks[0]!.keys[0]!.pos![1]).toBeCloseTo(0, 5);
     });
 
     it('rejects an animation of another rig size', () => {

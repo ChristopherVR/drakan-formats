@@ -188,13 +188,21 @@ export function convertPcAnimToPs2(pc: PcAnim, bind: BindBasis, opt: ConvertAnim
         if (qs.length === 0) qs = [{ time: 0, q: toQuat(bind.local[j]!) }];
         const k0 = src[0];
         if (root && k0) {
-            // Root: rotation and translation are both kept; a root key carries every PC key (pos varies per key).
+            // Root: rotation and translation are both kept; a root key carries every PC key (pos varies per key). A PS2 key
+            // position is the joint's absolute local translation and the track base is its first key (all 1228 root and
+            // 2820 other moving tracks of NPCS.ADB). The PC root key is absolute too, so a clip that starts away from
+            // the bind (a sitting or crouching idle) keeps that offset; rebasing on the first key lifted such bodies off
+            // the ground.
             const posKeys: Ps2Key[] = src.map((k, i) => ({
                 time: k.time,
                 q: qs[i]!.q,
-                pos: [k.xform[9]! - k0.xform[9]!, k.xform[10]! - k0.xform[10]!, k.xform[11]! - k0.xform[11]!],
+                pos: [k.xform[9]!, k.xform[10]!, k.xform[11]!],
             }));
-            tracks.push({ base: bind.translation[j]!, hasPos: true, keys: reduceRootKeys(posKeys, tol) });
+            tracks.push({
+                base: [k0.xform[9]!, k0.xform[10]!, k0.xform[11]!],
+                hasPos: true,
+                keys: reduceRootKeys(posKeys, tol),
+            });
             continue;
         }
         const reduced = reduceQuatKeys(qs, tol);

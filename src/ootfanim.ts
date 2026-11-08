@@ -556,3 +556,19 @@ export function buildAnimMap(pc: NamedAnim[], ps2: NamedAnim[]): Map<number, num
 export function animName(info: Uint8Array): string {
     return new Rd(info).pstr();
 }
+
+/** Flags word of a PS2 0x0501 record (`pstr name, f32 duration, u32 flags`; 1 = plays once and holds its last frame). */
+export function ps2AnimFlags(info: Uint8Array): number {
+    const r = new Rd(info);
+    r.pstr();
+    r.f32();
+    return r.u32();
+}
+
+/** Copy of a PS2 0x0501 record with another flags word. */
+export function withPs2AnimFlags(info: Uint8Array, flags: number): Uint8Array {
+    const out = info.slice();
+    const at = 2 + view(out).getUint16(0, true) + 4;
+    view(out).setUint32(at, flags >>> 0, true);
+    return out;
+}

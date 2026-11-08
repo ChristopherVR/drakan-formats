@@ -1,6 +1,6 @@
 // Synthetic stage outputs: no game assets. Exercise the pipeline's final object retention policy.
 import { describe, expect, it, vi } from 'vitest';
-import { convertOotfLevels } from '../src/ootfpipeline.ts';
+import { convertOotfLevels, deathClipIds } from '../src/ootfpipeline.ts';
 import { OotfSourceError } from '../src/ootfsource.ts';
 import { loadPcLevel, type PcLevel } from '../src/pc.ts';
 import { convertPcLevel, ps2ClassTables, writePs2Terrain } from '../src/convert.ts';
@@ -268,5 +268,25 @@ describe('localized source checks (issue #3)', () => {
         });
         await expect(run).rejects.toThrow(OotfSourceError);
         await expect(run).rejects.toThrow(/bad magic[\s\S]*folder of the installed game[\s\S]*issue #3/);
+    });
+});
+
+describe('deathClipIds', () => {
+    it('lists the clips of the death fields (arrays and plain), not the idle death or other clips', () => {
+        const anim = 0x0009;
+        const animArray = 0x1009;
+        const cls = {
+            fields: [
+                { name: 'Death', type: animArray },
+                { name: 'Forward Death ', type: animArray },
+                { name: 'Sleep Death', type: anim },
+                { name: 'Idle Death', type: animArray },
+                { name: 'Attack Animations', type: animArray },
+                { name: 'Death', type: 0x0001 },
+            ],
+            // arrays: (count << 16) | offset of the ids in the data area
+            data: [(2 << 16) | 6, (1 << 16) | 8, 7003, (1 << 16) | 9, (1 << 16) | 10, 5, 7001, 7002, 7004, 7005, 7006],
+        };
+        expect(deathClipIds(cls)).toEqual([7001, 7002, 7004, 7003]);
     });
 });

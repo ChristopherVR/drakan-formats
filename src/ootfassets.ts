@@ -1,6 +1,14 @@
 import { strToU8 } from 'fflate';
 import { type ModelTextureRef, ModelError, MOD_BOUNDS, MOD_CHARACTER } from './model.ts';
-import { type Skeleton, type PcAnim, parseSkeleton, parsePcAnim, writePs2Skeleton } from './ootfanim.ts';
+import {
+    type Skeleton,
+    type PcAnim,
+    parseSkeleton,
+    parsePcAnim,
+    ps2AnimFlags,
+    withPs2AnimFlags,
+    writePs2Skeleton,
+} from './ootfanim.ts';
 import { convertCreatureAssets } from './ootfcreature.ts';
 import { remapSkeletonVertices, withDisplayList } from './ootfdisplaylist.ts';
 import { buildDbText, parseDbText } from './ootfcontainer.ts';
@@ -723,6 +731,20 @@ export class OotfAssetBuilder {
     mapAnimRef(pcDb: number, pcId: number, owner: string): Map<number, number> | null {
         const c = this.resolveContainer(owner, pcDb);
         return c ? (this.animMaps.get(`${lower(c)}#${pcId}`) ?? null) : null;
+    }
+
+    /**
+     * Make converted clips play once and hold their last frame (PS2 0x0501 flag 1). PC clips carry no such flag, so every
+     * converted clip looped, and a death clip replayed from its standing first frame. Returns how many clips changed.
+     */
+    holdLastFrame(ids: ReadonlySet<number>): number {
+        let n = 0;
+        for (const a of this.anims) {
+            if (!ids.has(a.id) || ps2AnimFlags(a.info) & 1) continue;
+            a.info = withPs2AnimFlags(a.info, ps2AnimFlags(a.info) | 1);
+            n++;
+        }
+        return n;
     }
 
     /** Converted clips as ADB entries (0x0501 info, 0x0502 keys) for the host ADB; empty when there are no creatures. */

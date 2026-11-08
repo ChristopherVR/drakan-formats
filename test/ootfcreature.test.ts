@@ -131,11 +131,14 @@ describe('convertPcAnimToPs2', () => {
         ],
     ]);
 
-    it('keeps root position relative to the first key, drops others, collapses constants', () => {
+    it('keeps the absolute root position with the first key as base, drops others, collapses constants', () => {
         const a = convertPcAnimToPs2(pc, basis, { channels: 4 });
         expect(a.tracks[0]!.hasPos).toBe(true);
         expect(a.tracks[0]!.keys).toHaveLength(2); // linear: middle key removed
-        expect(a.tracks[0]!.keys[1]!.pos![1]).toBeCloseTo(0.4, 6);
+        // a clip that starts off the bind (sitting, crouching) keeps that offset: PS2 positions are absolute, base = key 0
+        expect(a.tracks[0]!.base).toEqual([0.5, 0.5, 0.5]);
+        expect(a.tracks[0]!.keys[0]!.pos).toEqual([0.5, 0.5, 0.5]);
+        expect(a.tracks[0]!.keys[1]!.pos![1]).toBeCloseTo(0.9, 6);
         expect(a.tracks[1]!.hasPos).toBe(false);
         expect(a.tracks[1]!.keys).toHaveLength(1);
         expect(a.channels).toBe(4);
