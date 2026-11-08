@@ -32,6 +32,10 @@ export interface Ps2TextureSubstitution {
 }
 
 const WORLDCON = 'WORLDCON/WORLDCON/WORLDCON.TXD';
+/** The falling water of Surdana's falls (`SurdanaFalls02`, `SurdanaFalls_05LU`): 64 x 64, 30 frames at 30 fps, blended. */
+const FALLS = `${WORLDCON}#652`;
+const WATERFALL_WHY =
+    'Both are the animated sheet of a waterfall model (30 frames, square, alpha blended); this one is the Drakan 2 Surdana falls.';
 
 /**
  * The curated pairs. Every row: same kind of surface, same aspect ratio, a UV layout that works on the OotF model (tiling bark
@@ -79,6 +83,36 @@ export const DEFAULT_PS2_TEXTURE_SUBSTITUTIONS: readonly Ps2TextureSubstitution[
         ps2: 'LEVELS/LEVEL2RE/LEVEL2RE.TXD#545',
         label: 'Oak trunk bark (Intro)',
         why: 'The same bark picture as the Ruined Village old tree; same Drakan 2 broadleaf bark.',
+    },
+    {
+        ootf: 'Mountain World/Intro Level/Intro Objects#5024',
+        ps2: FALLS,
+        label: 'Waterfall (Intro)',
+        why: WATERFALL_WHY,
+    },
+    {
+        ootf: 'Mountain World/Ruined Village/Ruined Village#5024',
+        ps2: FALLS,
+        label: 'Waterfall (Ruined Village)',
+        why: WATERFALL_WHY,
+    },
+    {
+        ootf: 'Mountain World/Wartok Canyons/Wartok Canyons#5064',
+        ps2: FALLS,
+        label: 'Waterfall (Wartok Canyons)',
+        why: WATERFALL_WHY,
+    },
+    {
+        ootf: 'Islands World/Tropical World Common/Tropical Common#5663',
+        ps2: FALLS,
+        label: 'Waterfall (Islands)',
+        why: WATERFALL_WHY,
+    },
+    {
+        ootf: 'Islands World/Alwarren/Alwarren#5732',
+        ps2: FALLS,
+        label: 'Waterfall (Alwarren)',
+        why: WATERFALL_WHY,
     },
 ];
 
