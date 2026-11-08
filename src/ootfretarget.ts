@@ -408,7 +408,30 @@ export function retargetPcAnim(
         }
         lookup.push({ first, count: keys.length - first });
     }
-    return convertPcAnimToPs2({ ...pc, nodes: dstRig.jointCount, keys, lookup }, bindBasis(dstRig), opt);
+    const out = convertPcAnimToPs2({ ...pc, nodes: dstRig.jointCount, keys, lookup }, bindBasis(dstRig), opt);
+    if (!opt.worldJoints?.length) return out;
+    // Attachment frames take the source joint's orientation (as retargetPs2Anim does): every matched ancestor follows
+    // world = bindWorld * delta on both rigs, so pre-multiplying the local key by sourceBindWorld * inverse(targetBindWorld)
+    // gives the source joint's animated world orientation. The PC Rynn's `Rweapon` sits about 104 degrees from the PS2
+    // Rynn's, and the PC items held there (the opening's sword) were authored on the PC frame.
+    const sb = bindBasis(srcRig);
+    const tb = bindBasis(dstRig);
+    const rotation = (r: ArrayLike<number>) => Float32Array.from([...Array.from(r).slice(0, 9), 0, 0, 0]);
+    for (const d of opt.worldJoints) {
+        const s = match.map[d] ?? -1;
+        const track = out.tracks[d];
+        if (s < 0 || !track) continue;
+        const world = mulMat12(
+            mulMat12(rotation(sb.local[s]!), rotation(sb.parentWorld[s]!)),
+            invertMat12(mulMat12(rotation(tb.local[d]!), rotation(tb.parentWorld[d]!))),
+        );
+        track.keys = track.keys.map((k) => {
+            const q = mat12ToQuat(mulMat12(world, quatToMat12(k.q, [0, 0, 0])));
+            const length = Math.hypot(...q);
+            return { ...k, q: q.map((v) => v / length) as [number, number, number, number] };
+        });
+    }
+    return out;
 }
 
 export interface RetargetResult {

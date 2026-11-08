@@ -48,6 +48,7 @@ import { convertStompPlayers, pcStompPlayer } from './ootfstomp.ts';
 import {
     convertPcSequences,
     parsePcSequence,
+    type RefLookup,
     pcLevelFov,
     skeletonChannelMap,
     sequenceSoundRefs,
@@ -1379,6 +1380,8 @@ export async function convertOotfLevels(
     const seqIds = new Map<string, number>();
     /** PC level path -> object id of the synthetic player its converted scenes hold (cinematic-only levels). */
     const heldPlayer = new Map<string, number>();
+    /** PC level path -> the Rynn prop its scenes no longer play and the synthetic player that takes its place. */
+    const rynnPropSwap = new Map<string, { prop: number; player: number }>();
     const mapResource = (kind: ResourceKind, ref: number, ctx: ResourceContext): number | null => {
         const ow = owner(ctx.pc, ctx.ownerDb);
         if (!ow) return null;
@@ -1515,12 +1518,27 @@ export async function convertOotfLevels(
                             : undefined;
                     if (syntheticPlayer !== undefined) heldPlayer.set(pc.path, syntheticPlayer);
                     const ssdReader = await SrscReader.fromBytes(bytes);
+                    // A level without a PC player can show Rynn as a prop of her model (the Intro's "Rynn", engine class 17,
+                    // the PC Rynn model): its scenes play the synthetic PS2 player instead, which takes the prop's place.
+                    const rynnProp =
+                        syntheticPlayer === undefined
+                            ? undefined
+                            : pc.list.objects.find((o) => {
+                                  const c = pc.classes.get(o.dbIndex)?.get(o.classId);
+                                  return !!c?.model && c.rflClass !== 9 && /^w?rynn$/i.test(c.name.trim());
+                              });
+                    const propTarget = rynnProp && first.objectIdMap.get(rynnProp.id);
+                    if (rynnProp && propTarget !== undefined && syntheticPlayer !== undefined)
+                        rynnPropSwap.set(pc.path, { prop: propTarget, player: syntheticPlayer });
+                    const sceneObjectIds: RefLookup = {
+                        get: (id) => (rynnProp && id === rynnProp.id ? syntheticPlayer : first.objectIdMap.get(id)),
+                    };
                     // The player's scene clips, retargeted onto the PS2 player rig (new clips of its ADB), and its channel map.
-                    const playerId = actorId(9);
+                    const playerId = actorId(9) ?? (rynnProp ? syntheticPlayer : undefined);
                     const playerScene = await (async () => {
-                        const object = pc.list.objects.find(
-                            (o) => pc.classes.get(o.dbIndex)?.get(o.classId)?.rflClass === 9,
-                        );
+                        const object =
+                            pc.list.objects.find((o) => pc.classes.get(o.dbIndex)?.get(o.classId)?.rflClass === 9) ??
+                            rynnProp;
                         const cls = object && pc.classes.get(object.dbIndex)?.get(object.classId);
                         const ow = cls && ownerOf.get(cls);
                         if (playerId === undefined || !cls?.model || !ow || !player.rig) return null;
@@ -1534,7 +1552,7 @@ export async function convertOotfLevels(
                                 continue;
                             }
                             for (const a of seq.actors) {
-                                const mapped = a.actorType === 1 ? first.objectIdMap.get(a.objectId) : undefined;
+                                const mapped = a.actorType === 1 ? sceneObjectIds.get(a.objectId) : undefined;
                                 if (mapped !== playerId && !(mapped === undefined && /^w?rynn$/i.test(a.name.trim())))
                                     continue;
                                 for (const x of a.actions) {
@@ -1553,7 +1571,7 @@ export async function convertOotfLevels(
                     })();
                     const conv = await convertPcSequences(ssdReader, {
                         maps: {
-                            objectIdMap: first.objectIdMap,
+                            objectIdMap: sceneObjectIds,
                             channelMapForActor: (_actor, targetId) =>
                                 targetId === playerId ? playerScene?.channels : undefined,
                             // The PS2 Rynn class has a Jaw Channel: her speech gets the lip-sync bit (tracks: ootfsound.ts).
@@ -1607,7 +1625,7 @@ export async function convertOotfLevels(
                                 },
                             },
                         },
-                        playerObjectId: actorId(9),
+                        playerObjectId: playerId,
                         dragonObjectId: actorId(28),
                         cameraObjectId: actorId(27),
                         cameraFov: pcLevelFov(pc),
@@ -1635,6 +1653,17 @@ export async function convertOotfLevels(
         if (opt.singletons !== false) {
             await stage(`singletons ${pc.path}`, async () => {
                 ensureSingletons(parts, pc, tplList.objects, classes);
+                const swap = rynnPropSwap.get(pc.path);
+                const objs = parts.objects.objects;
+                const prop = swap && objs.find((o) => o.id === swap.prop);
+                const synthetic = swap && objs.find((o) => o.id === swap.player);
+                if (prop && synthetic) {
+                    // The PS2 Rynn stands where the PC prop stood; the prop goes (its scenes now play her).
+                    synthetic.pos = [...prop.pos];
+                    synthetic.rot = [...prop.rot];
+                    parts.objects.objects = objs.filter((o) => o !== prop);
+                    for (const o of parts.objects.objects) o.links = o.links.filter((l) => l !== prop.id);
+                }
                 const held = heldPlayer.get(pc.path);
                 const rynn = parts.objects.objects.find((o) => classes.get(o.dbIndex)?.get(o.classId)?.rflClass === 9);
                 if (held !== undefined && rynn?.id !== held)
@@ -1904,23 +1933,6 @@ export async function convertOotfLevels(
                 }),
             };
             if (shown) res.warnings.push(`${pc.path}: ${shown} hidden creature(s) nothing links to made visible`);
-        }
-        {
-            // PC levels place a few creatures already dead (Ruined Village's grunt with Initial Health -50, dead slaves with 0) and the
-            // PC draws them as corpses. The PS2 engine spawns such a creature dead without playing any death clip, so it stood in its
-            // idle (the disc never places one). Its idle becomes its death pose: the class's Idle Death clip, else its Death clip,
-            // which plays once and holds the last frame.
-            let laid = 0;
-            for (const o of parts.objects.objects) {
-                const cls =
-                    classes.get(o.dbIndex)?.get(o.classId) ??
-                    plan?.synthesized.find((x) => x.dbIndex === o.dbIndex && x.classId === o.classId)?.cls;
-                const pose = cls && placedCorpsePose(o, cls);
-                if (!pose) continue;
-                setObjectParams({ objects: [o], warnings: [] }, o.id, pose);
-                laid++;
-            }
-            if (laid) res.warnings.push(`${pc.path}: ${laid} creature(s) placed dead start in their death pose`);
         }
         if (dbgEnv['DRAKAN_DBG_DROP']) {
             // Test aid: remove every object whose class name matches the regex (bisecting a crash to a class).
@@ -2365,7 +2377,10 @@ function playerClipBuilder(ps2: OotfPs2Context) {
                 else warnings.push(`clip 0x${id.toString(16)} is not a clip of the PC player model`);
             }
             if (!todo.size) return { map, warnings };
-            const r = retargetCreature(source.skeleton, sk, todo);
+            // Held items keep the PC hand frames (the PS2 Rynn's Rweapon is turned about 104 degrees from the PC one).
+            const names = buildRig(sk, 0).names;
+            const worldJoints = names.flatMap((n, d) => (/^[lr]weapon$/i.test(n) ? [d] : []));
+            const r = retargetCreature(source.skeleton, sk, todo, { worldJoints });
             for (const a of r.anims) {
                 const id = nextId++;
                 const w = writePs2Anim(a.anim);
@@ -2551,37 +2566,4 @@ export function deathClipIds(cls: Pick<OdbClass, 'fields' | 'data'>): number[] {
         for (const id of ids) if (id) out.push(id & 0xffff);
     });
     return out;
-}
-
-/**
- * Parameters that lay a creature placed dead (an `Initial Health` parameter of 0 or less) in its death pose: `Base Idle` = the
- * class's `Idle Death` clip, else its `Death` clip, and no spontaneous idles. Null when the object is not a placed corpse or the
- * class names no such clip.
- */
-export function placedCorpsePose(
-    o: Pick<LvlObject, 'params' | 'data'> & Partial<LvlObject>,
-    cls: Pick<OdbClass, 'fields' | 'data'>,
-): ParamSpec[] | null {
-    const hp = o.params.findIndex((p) => p.name.trim() === 'Initial Health');
-    if (hp < 0 || (o.data[hp]! | 0) > 0 || !cls.fields || !cls.data) return null;
-    const clipOf = (name: string): number => {
-        const i = cls.fields!.findIndex((f) => f.name.trim() === name && fieldBase(f.type) === FIELD_ANIMATION);
-        if (i < 0) return 0;
-        const f = cls.fields![i]!;
-        const v = fieldIsIndirect(f.type)
-            ? (decodeFieldValue(f.type, cls.data![i]!, cls.data!) as number[])[0]
-            : cls.data![i];
-        return v ?? 0;
-    };
-    const clip = clipOf('Idle Death') || clipOf('Death');
-    const idle = cls.fields.findIndex((f) => f.name.trim() === 'Base Idle' && fieldBase(f.type) === FIELD_ANIMATION);
-    if (!clip || idle < 0) return null;
-    const specs = objectParamSpecs(o as LvlObject).filter(
-        (sp) => sp.name.trim() !== 'Base Idle' && sp.name.trim() !== 'Spontaneous Idle Anims',
-    );
-    specs.push({ fieldIndex: idle, type: cls.fields[idle]!.type, name: cls.fields[idle]!.name, value: clip });
-    const spont = cls.fields.findIndex((f) => f.name.trim() === 'Spontaneous Idle Anims');
-    if (spont >= 0 && fieldIsIndirect(cls.fields[spont]!.type))
-        specs.push({ fieldIndex: spont, type: cls.fields[spont]!.type, name: cls.fields[spont]!.name, value: [] });
-    return specs;
 }

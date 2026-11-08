@@ -33,6 +33,8 @@ export interface PuzzleClassRef {
 }
 
 export interface PuzzleEnv {
+    /** Where a world position falls on the level's map texture (pixels); absent when the level keeps the template's map. */
+    mapPixel?: (x: number, z: number) => [number, number];
     pc: PcLevel;
     /** The converted PS2 object list (object ids = PC object ids). */
     list: LvlObjectList;
@@ -314,13 +316,16 @@ function markers(env: PuzzleEnv, rep: PuzzleReport): void {
         }
         const x = pcFieldNumber(pc, m, 'Map X Coordinate') ?? 0;
         const y = pcFieldNumber(pc, m, 'Map Y Coordinate') ?? 0;
+        // The PC markers carry no map coordinates (0 / 0 in every level): the object's place in the world is the position, put
+        // through the level's map calibration; the label shows on the map as well as in the journal (type 2 = both).
+        const at = env.mapPixel ? env.mapPixel(m.pos[0], m.pos[2]) : null;
         const set: [string, number][] = [
-            ['Type', isQuest ? 1 : 0],
+            ['Type', at ? (isQuest ? 2 : 0) : isQuest ? 1 : 0],
             ['SubQuest?', 0],
             ['Journal Entry', isQuest ? text : 0],
-            ['Map Text', isQuest ? 0 : text],
-            ['Map X Coordinate', Math.max(0, Math.min(255, Math.round(x * 0.4)))],
-            ['Map Y Coordinate', Math.max(0, Math.min(255, Math.round(y * 0.4)))],
+            ['Map Text', at || !isQuest ? text : 0],
+            ['Map X Coordinate', at ? at[0] : Math.max(0, Math.min(255, Math.round(x * 0.4)))],
+            ['Map Y Coordinate', at ? at[1] : Math.max(0, Math.min(255, Math.round(y * 0.4)))],
         ];
         for (const [name, value] of set) setNamedParam(list, dst, fields, name, value);
         // The quest table keys a quest by its class and draws its text and type from the class record.

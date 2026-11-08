@@ -18,7 +18,7 @@ import { decodeFieldValue } from './fields.ts';
 import type { PcLevel } from './pc.ts';
 import type { SrscReader } from './srsc.ts';
 import type { Skeleton } from './ootfanim.ts';
-import { joinActions } from './story/ssdactions.ts';
+import { joinActions, parseActions } from './story/ssdactions.ts';
 import { writeSequence, type SsdActor, type SsdSequence } from './story/ssd.ts';
 
 import { SSD_SEQUENCE } from './resources.ts';
@@ -369,7 +369,19 @@ export function convertSequence(seq: PcSequence, opts: SequenceConvertOptions, r
         } else bump(report.droppedActors, a.name);
     }
     const hold = opts.holdPlayerObjectId;
-    if (hold !== undefined && !actors.some((a) => a.ref === hold)) {
+    const held = hold === undefined ? undefined : actors.find((a) => a.ref === hold);
+    if (held && !(parseActions(held) ?? []).some((x) => x.type === 5)) {
+        // The held player also plays a PC actor here (the Intro's Rynn, see OotfPs2Context.playerMod): it still has to be
+        // held for the whole scene, or the HUD shows and the player takes control in the middle of it.
+        const run = pcBytes(5, 0, 4);
+        const actions = new Uint8Array(run.length + held.actions.length);
+        actions.set(run, 0);
+        actions.set(held.actions, run.length);
+        held.actions = actions;
+        held.actionCount += 1;
+        report.actionsOut++;
+    }
+    if (hold !== undefined && !held) {
         const run = pcBytes(5, 0, 4); // run/stop AI 0: held for the whole scene (the level ends before it would be released)
         const j = joinActions([run]);
         actors.push({

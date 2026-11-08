@@ -358,6 +358,30 @@ describe('ootfseq', () => {
         expect(words(seq.actors[1]!)).toEqual([[1, 4]]);
     });
 
+    it('keeps holding a synthetic player that also plays a PC actor', async () => {
+        const bytes = w(
+            str('Intro 3'),
+            u32(126),
+            u32(0),
+            u32(2),
+            u32(1),
+            actor('Rynn', 2, 2853, [act(1, 0, [...u32(0), ...u32(7), ...f32(0), ...f32(0.85), ...f32(1), ...u32(0)])]),
+        );
+        const result = await convertPcSequences(stub(bytes), {
+            maps: { objectIdMap: new Map([[2853, 77]]), animMapForActor: () => new Map([[7, 2400]]) },
+            playerObjectId: 77,
+            holdPlayerObjectId: 77,
+            usedIds: new Set(),
+        });
+        const entry = result.entries.find((e) => e.type === 0x311)!;
+        const seq = parseSequence(entry.id, entry.sub, entry.data)!;
+        expect(seq.actors.map((a) => [a.ref, a.mode])).toEqual([[77, 1]]);
+        expect(parseActions(seq.actors[0]!)!.map((x) => [x.type, x.time])).toEqual([
+            [5, 0],
+            [1, 0],
+        ]);
+    });
+
     it('sets the lip-sync bit on the speech of lip-synced actors only', async () => {
         const speech = act(3, 1, [...u32(0x13f), ...f32(6.2), ...u16(10000), ...u16(0x10)]);
         const step = act(3, 2, [...u32(0x7d), ...f32(0.3), ...u16(6000), ...u16(0)]);

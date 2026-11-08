@@ -328,7 +328,10 @@ export interface Ps2Sound {
  * 2500 samples ahead and interpolates; the last entry is past the end (0, the mouth closes), and n is at least 2.
  * docs/journal/2026-11-08/ootf-rynn-scenes.md.
  */
-export function encodeLipSync(pcm: ArrayLike<number>, rate: number): Uint8Array {
+/** 90th percentile mouth opening of a disc speech track (SYSTEM.SDB 29226, LEVEL1ON.SDB 30935). */
+const LIP_P90 = 30000;
+
+export function encodeLipSync(pcm: ArrayLike<number>, rate: number, normalize = true): Uint8Array {
     const step = Math.max(1, Math.round(rate / 25));
     const n = Math.max(2, Math.ceil(pcm.length / step) + 1);
     const out = new Uint8Array(20 + 2 * n);
@@ -339,11 +342,18 @@ export function encodeLipSync(pcm: ArrayLike<number>, rate: number): Uint8Array 
     dv.setUint32(12, 95, true);
     dv.setUint32(16, n, true);
     const half = Math.max(1, step >> 1);
+    const peaks: number[] = [];
     for (let i = 0; i < n; i++) {
         let peak = 0;
         for (let k = i * step; k < Math.min(pcm.length, i * step + half); k++) peak = Math.max(peak, Math.abs(pcm[k]!));
-        dv.setUint16(20 + 2 * i, Math.min(32767, peak), true);
+        peaks.push(peak);
     }
+    // The disc's speech is mastered loud: the 90th percentile value of a track is about 30000 (median of 741 tracks), while
+    // the OotF voices sit near 16700, so their mouths opened half as far. Scale each track to the disc's level (at most 4x).
+    const sorted = [...peaks].sort((a, b) => a - b);
+    const p90 = sorted[Math.floor(sorted.length * 0.9)] ?? 0;
+    const gain = normalize && p90 > 0 ? Math.min(4, LIP_P90 / p90) : 1;
+    peaks.forEach((p, i) => dv.setUint16(20 + 2 * i, Math.min(32767, Math.round(p * gain)), true));
     return out;
 }
 

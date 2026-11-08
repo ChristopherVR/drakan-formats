@@ -337,7 +337,10 @@ describe('id map', () => {
         const t = encodeLipSync(pcm, 22050);
         const dv = new DataView(t.buffer);
         expect([0, 4, 8, 12, 16].map((o) => dv.getUint32(o, true))).toEqual([0, 22050, 882, 95, 4]);
-        expect([0, 1, 2, 3].map((i) => dv.getUint16(20 + 2 * i, true))).toEqual([20000, 1234, 0, 0]);
+        // scaled so the 90th percentile value (20000) reaches the disc speech level 30000
+        expect([0, 1, 2, 3].map((i) => dv.getUint16(20 + 2 * i, true))).toEqual([30000, 1851, 0, 0]);
+        const raw = new DataView(encodeLipSync(pcm, 22050, false).buffer);
+        expect([0, 1].map((i) => raw.getUint16(20 + 2 * i, true))).toEqual([20000, 1234]);
         expect(t.length).toBe(28);
         expect(new DataView(encodeLipSync(new Int16Array(0), 22050).buffer).getUint32(16, true)).toBe(2);
         const recs = ps2SoundEntries([

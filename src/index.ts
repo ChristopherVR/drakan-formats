@@ -43,6 +43,7 @@ export * from './ootfsource.ts';
 export * from './ootfmusic.ts';
 export * from './ootfdmusic.ts';
 export * from './ootfpuzzle.ts';
+export * from './ootfmap.ts';
 export * from './ootfshell.ts';
 export * from './ootfstomp.ts';
 export * from './packbuild.ts';
