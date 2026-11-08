@@ -66,7 +66,15 @@ import {
     exitDetectorParams,
     type CampaignPlan,
 } from './ootfcampaign.ts';
-import { applyMusicTriggers, findMusicTriggers, musicTriggerClassNames } from './ootfmusic.ts';
+import {
+    addLevelStartMusic,
+    applyMusicTriggers,
+    findMusicTriggers,
+    musicTriggerClassNames,
+    pcInitialMusicId,
+    pcInterfaceMusic,
+} from './ootfmusic.ts';
+import { buildOotfMusicPack, type OotfMusicPack } from './ootfdmusic.ts';
 import { applyPuzzleLogic, relayDetectorSequences } from './ootfpuzzle.ts';
 import type { Ps2TextureOptions, TextureMode } from './ootftex.ts';
 import { TextPlan, isTextField, parseRrcStrings, rewriteClassTextDefaults, rewriteObjectTexts } from './ootftext.ts';
@@ -160,6 +168,8 @@ export interface OotfPs2Context {
     hostAdb?: SrscReader;
     /** The host ODB's SDB (RESOURES.SDB): converted sounds are added to it as `new/<HOST>.SDB/` entries with free ids. */
     hostSdb?: SrscReader;
+    /** The disc's PS2MUSIC.SDB: the rendered OotF music is added to it with free ids (without it the PAL id layout is assumed). */
+    musicSdb?: SrscReader;
     /**
      * PS2 MOD / ADB containers by upper-case stem (`NPCS`) beyond the host's: they tell which templates of ODBs that list the host are
      * skinned (clones go into those ODBs, model refs use the host's `db` there) and which PS2 rig and clips a name-mapped creature has.
@@ -213,6 +223,11 @@ export interface OotfPipelineOptions {
     /** Plan the campaign (titles, exits, strings) when more than one level is converted (default true). */
     campaign?: boolean;
     music?: boolean;
+    /**
+     * Render the PC DirectMusic segments of the install's `Music.rrc` into PS2MUSIC.SDB tracks (title menu, level start, music
+     * triggers; ootfdmusic.ts). Default true; false (or no Music.rrc) keeps the palette of disc tracks.
+     */
+    ootfMusic?: boolean;
     /** Test aid: music objects start playing at level start (Start State = 1). */
     musicStartOn?: boolean;
     /** Rewrite text defaults / parameters to new XDB strings (default true). */
@@ -277,6 +292,8 @@ export interface OotfPipelineResult {
     warnings: string[];
     /** Language of the PC install and the source checks (ootfsource.ts); null when no level loaded. */
     source: OotfSourceProfile | null;
+    /** The rendered OotF music (PC id -> PS2MUSIC.SDB id, title track); null when not rendered. */
+    music: OotfMusicPack | null;
 }
 
 const hex4 = (n: number): string => n.toString(16).padStart(4, '0');
@@ -356,6 +373,7 @@ export async function convertOotfLevels(
         classPlan: null,
         warnings: [],
         source: null,
+        music: null,
     };
     const stage = async <T>(name: string, fn: () => Promise<T>): Promise<T | null> => {
         try {
@@ -1016,6 +1034,26 @@ export async function convertOotfLevels(
         return null;
     };
     const musicClass = findPs2Class((c) => /^triggered music loop$/i.test(c.name.trim()) && !!c.fields);
+    if (opt.music !== false && opt.ootfMusic !== false && pcs.length) {
+        res.music = await stage('music tracks', async () => {
+            const rrc = await src.read('Music.rrc');
+            if (!rrc) {
+                res.warnings.push('music: no Music.rrc in the install; the levels use disc tracks');
+                return null;
+            }
+            const iface = await src.read('Common/Interface/Interface.odb');
+            const interfaceMusic = iface
+                ? pcInterfaceMusic(await parsePcOdbClasses(await SrscReader.fromBytes(iface)))
+                : { background: 0, credits: 0 };
+            const m = await buildOotfMusicPack(rrc, { hostSdb: ps2.musicSdb, interfaceMusic });
+            for (const w of m.warnings) res.warnings.push(`music: ${w}`);
+            Object.assign(res.files, m.files);
+            log(
+                `music: ${m.tracks.length} tracks (${m.tracks.map((t) => `${t.pcId}->${t.ps2Id} ${t.name} ${t.seconds.toFixed(0)}s`).join(', ')}), title ${m.title}`,
+            );
+            return m;
+        });
+    }
     const exitClass = findPs2Class((c) => c.rflClass === 55 && transitionFieldIndex(c.fields) >= 0);
     const detectorClass = findPs2Class((c) => c.rflClass === 61 && /^trigger detector$/i.test(c.name.trim()));
     const timerClass = findPs2Class((c) => c.rflClass === 62 && /^timer$/i.test(c.name.trim()) && !!c.fields);
@@ -1392,6 +1430,15 @@ export async function convertOotfLevels(
                                     return db === null || id === null ? undefined : ((db << 16) | id) >>> 0;
                                 },
                             },
+                            // cut scene music (PC action 8): the rendered OotF track, through the SSD stem's `.DB` entry
+                            // for PS2 Music (LEVEL1ON.DB: 8)
+                            musicMap: {
+                                get: (pcId) => {
+                                    const id = res.music?.ids.get(pcId);
+                                    const db = dbIndexIn(g.stem, 'PS2MUSIC');
+                                    return id === undefined || db === null ? undefined : ((db << 16) | id) >>> 0;
+                                },
+                            },
                         },
                         playerObjectId: actorId(9),
                         dragonObjectId: actorId(28),
@@ -1427,14 +1474,26 @@ export async function convertOotfLevels(
         };
         if (opt.music !== false && musicClass) {
             await stage(`music ${pc.path}`, async () => {
+                const mc = {
+                    dbIndex: musicClass.t.dbIndex,
+                    classId: musicClass.t.classId,
+                    fields: musicClass.cls.fields!,
+                };
                 applyMusicTriggers(lvl.objects, findMusicTriggers(pc), ootfLevelKey(pc), {
                     startOn: opt.musicStartOn,
-                    musicClass: {
-                        dbIndex: musicClass.t.dbIndex,
-                        classId: musicClass.t.classId,
-                        fields: musicClass.cls.fields!,
-                    },
+                    musicClass: mc,
+                    trackIds: res.music?.ids,
                 });
+                // The level's own start music (PC Level Properties `Initial Music ID`), on from the start, at Rynn.
+                if (res.music) {
+                    const rynn = lvl.objects.objects.find(
+                        (o) => classes.get(o.dbIndex)?.get(o.classId)?.rflClass === 9,
+                    );
+                    addLevelStartMusic(lvl.objects, pcInitialMusicId(pc), rynn ? [...rynn.pos] : [0, 0, 0], {
+                        musicClass: mc,
+                        trackIds: res.music.ids,
+                    });
+                }
             });
         }
         if (dbgEnv0['OOTF_NO_PUZZLE'] !== '1') {

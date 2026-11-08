@@ -4,17 +4,21 @@
 //   * PC: music is placed as "Music Trigger" objects (engine class 129, 37 objects, plus differently named copies such as
 //     "LairMusic"). A trigger has two slots, `Music 1 ID` and `Music 2 ID` (0 = none), each with a fade in / out time (f32 seconds),
 //     and is switched by messages from linked detectors. The ids 1..11 are the DirectMusic segments (RIFF DMSG, type 0x401) of
-//     `Music.rrc`; the same file holds the DLS wave banks (ids 256..266, RIFF DLS: colh/ins/rgn/wsmp), so the segments CAN be
-//     rendered offline (the DLS banks are in the install; ootf-sound.md assumed they were not). The PC level class has no
-//     "Initial Music File" field in this install; level start music comes from triggers near the start.
+//     `Music.rrc`; the same file holds the DLS wave banks (ids 256..266, RIFF DLS: colh/ins/rgn/wsmp), so the segments are
+//     rendered offline (`ootfdmusic.ts`). The level class "Level Properties" (engine 54, never placed: the engine reads the
+//     defaults of the level ODB's first class of that engine) has `Initial Music ID`, the music the level starts with
+//     (Ruined Village 8, Wartok 1, Grotto 1, Mines 9, Succubus Lair 10, ...; the Intro 0), and the interface class
+//     "User Interface Properties" of `Common/Interface/Interface.odb` has `Background Music ID` 4 (the title menu) and
+//     `Credits Music ID` 7.
 //   * PS2: music is `PS2MUSIC.SDB` (38 mono 22050 Hz tracks, group ids 2..6 / 27 / 44) played by objects of the "Triggered
 //     Music Loop" class (PS2MUSIC.ODB class 20, engine class 6, runtime 0x10006): fields `Sounds` (array of sound ids of the
 //     class's own database), `Plays overlay music (Triggered only) ?`, `Fade Out Time When Stopped`, `Fade In Time When
 //     Started`, `Message To Send To Trigger On` (1) / `Off` (0) and `Start State For Triggered Sounds`. Surdana places its
 //     music objects the same way (sound ids as plain numbers, switched by linked detectors).
 //
-// This module picks the PS2 track of each (level, PC music id) and rewrites the converted trigger objects. Rendering the real
-// DirectMusic segments is phase 2 (see the journal note); the palette below is the concrete, shippable result today.
+// This module maps each (level, PC music id) to a PS2 track and rewrites the converted trigger objects. With the rendered
+// OotF tracks (`OotfMusicIds`, docs/journal/2026-11-08/ootf-main-music.md) a PC id maps to its own track; the palette of
+// disc tracks below is the fallback when the install's `Music.rrc` is not available.
 
 import { floatBits, bitsFloat, decodeFieldValue, type ClassFieldDef } from './fields.ts';
 import {
@@ -197,6 +201,8 @@ export interface ApplyMusicOptions {
     soundDb?: number;
     /** Set `Start State For Triggered Sounds` to 1 so the track plays as soon as the level is up (in-game test aid; PC music is started by detectors). */
     startOn?: boolean;
+    /** PC music id -> PS2MUSIC.SDB sound id of the rendered OotF track; ids it lacks fall back to the palette. */
+    trackIds?: ReadonlyMap<number, number>;
 }
 
 export interface ApplyMusicResult {
@@ -268,7 +274,7 @@ export function applyMusicTriggers(
         }
         let first = list.objects.find((o) => o.id === t.objectId);
         slots.forEach((s, k) => {
-            const track = use(trackFor(levelPath, s.slot, s.id));
+            const track = use(opt.trackIds?.get(s.id) ?? trackFor(levelPath, s.slot, s.id));
             const specs = specsFor(
                 opt.musicClass.fields,
                 track,
@@ -306,6 +312,71 @@ export function applyMusicTriggers(
         });
     }
     return res;
+}
+
+// ---------------------------------------------------------------- level start and interface music
+
+const F_INITIAL = /^initial music id/i;
+
+/** A class default as a number (0 when the field is missing). */
+function classNumber(
+    c: { fields?: readonly ClassFieldDef[] | null; data?: readonly number[] | null },
+    re: RegExp,
+): number {
+    const i = c.fields?.findIndex((f) => re.test(f.name.trim())) ?? -1;
+    if (i < 0 || !c.data) return 0;
+    return Number(decodeFieldValue(c.fields![i]!.type, c.data[i] ?? 0, c.data)) || 0;
+}
+
+/**
+ * The PC music id a level starts with: `Initial Music ID` of its Level Properties class (engine 54), the first such class in
+ * dependency order, the same class `ensureSingletons` copies the other level properties from. 0 = none.
+ */
+export function pcInitialMusicId(pc: PcLevel): number {
+    for (const table of [...pc.classes].sort((a, b) => a[0] - b[0]).map((x) => x[1]))
+        for (const c of table.values()) if (c.rflClass === 54) return classNumber(c, F_INITIAL);
+    return 0;
+}
+
+/** `Background Music ID` (title menu) and `Credits Music ID` of the PC `User Interface Properties` class, 0 when absent. */
+export function pcInterfaceMusic(
+    classes: ReadonlyMap<number, { fields?: readonly ClassFieldDef[] | null; data?: readonly number[] | null }>,
+): {
+    background: number;
+    credits: number;
+} {
+    for (const c of classes.values()) {
+        const background = classNumber(c, /^background music id/i);
+        const credits = classNumber(c, /^credits music id/i);
+        if (background || credits) return { background, credits };
+    }
+    return { background: 0, credits: 0 };
+}
+
+/**
+ * Add a Triggered Music Loop that is on from the start (Start State 1) playing the level's initial music. On the PC the level
+ * property starts it; the PS2 class has no level-wide field the engine reads (every disc level leaves `Initial Music File` 0
+ * and places music objects), so the object carries it. Returns the new object id or null (no music / no track).
+ */
+export function addLevelStartMusic(
+    list: LvlObjectList,
+    pcId: number,
+    pos: Vec3,
+    opt: { musicClass: MusicClassRef; trackIds: ReadonlyMap<number, number>; soundDb?: number },
+): number | null {
+    const track = pcId > 0 ? opt.trackIds.get(pcId) : undefined;
+    if (track === undefined) return null;
+    const maxId = list.objects.reduce((m, o) => Math.max(m, o.id), 0);
+    const obj = addObject(list, {
+        classId: opt.musicClass.classId,
+        dbIndex: opt.musicClass.dbIndex,
+        pos,
+        rot: [0, 0, 0],
+        id: maxId + 1,
+    }).object;
+    retarget(obj, opt.musicClass);
+    setObjectParams(list, obj.id, specsFor(opt.musicClass.fields, track, opt.soundDb ?? 0, false, 3, 3, true));
+    return obj.id;
 }
 
 /** Round-trip helper for tests: the f32 seconds of a stored fade dword. */
