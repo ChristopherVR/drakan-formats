@@ -1905,6 +1905,23 @@ export async function convertOotfLevels(
             };
             if (shown) res.warnings.push(`${pc.path}: ${shown} hidden creature(s) nothing links to made visible`);
         }
+        {
+            // PC levels place a few creatures already dead (Ruined Village's grunt with Initial Health -50, dead slaves with 0) and the
+            // PC draws them as corpses. The PS2 engine spawns such a creature dead without playing any death clip, so it stood in its
+            // idle (the disc never places one). Its idle becomes its death pose: the class's Idle Death clip, else its Death clip,
+            // which plays once and holds the last frame.
+            let laid = 0;
+            for (const o of parts.objects.objects) {
+                const cls =
+                    classes.get(o.dbIndex)?.get(o.classId) ??
+                    plan?.synthesized.find((x) => x.dbIndex === o.dbIndex && x.classId === o.classId)?.cls;
+                const pose = cls && placedCorpsePose(o, cls);
+                if (!pose) continue;
+                setObjectParams({ objects: [o], warnings: [] }, o.id, pose);
+                laid++;
+            }
+            if (laid) res.warnings.push(`${pc.path}: ${laid} creature(s) placed dead start in their death pose`);
+        }
         if (dbgEnv['DRAKAN_DBG_DROP']) {
             // Test aid: remove every object whose class name matches the regex (bisecting a crash to a class).
             const re = new RegExp(dbgEnv['DRAKAN_DBG_DROP'], 'i');
@@ -2534,4 +2551,37 @@ export function deathClipIds(cls: Pick<OdbClass, 'fields' | 'data'>): number[] {
         for (const id of ids) if (id) out.push(id & 0xffff);
     });
     return out;
+}
+
+/**
+ * Parameters that lay a creature placed dead (an `Initial Health` parameter of 0 or less) in its death pose: `Base Idle` = the
+ * class's `Idle Death` clip, else its `Death` clip, and no spontaneous idles. Null when the object is not a placed corpse or the
+ * class names no such clip.
+ */
+export function placedCorpsePose(
+    o: Pick<LvlObject, 'params' | 'data'> & Partial<LvlObject>,
+    cls: Pick<OdbClass, 'fields' | 'data'>,
+): ParamSpec[] | null {
+    const hp = o.params.findIndex((p) => p.name.trim() === 'Initial Health');
+    if (hp < 0 || (o.data[hp]! | 0) > 0 || !cls.fields || !cls.data) return null;
+    const clipOf = (name: string): number => {
+        const i = cls.fields!.findIndex((f) => f.name.trim() === name && fieldBase(f.type) === FIELD_ANIMATION);
+        if (i < 0) return 0;
+        const f = cls.fields![i]!;
+        const v = fieldIsIndirect(f.type)
+            ? (decodeFieldValue(f.type, cls.data![i]!, cls.data!) as number[])[0]
+            : cls.data![i];
+        return v ?? 0;
+    };
+    const clip = clipOf('Idle Death') || clipOf('Death');
+    const idle = cls.fields.findIndex((f) => f.name.trim() === 'Base Idle' && fieldBase(f.type) === FIELD_ANIMATION);
+    if (!clip || idle < 0) return null;
+    const specs = objectParamSpecs(o as LvlObject).filter(
+        (sp) => sp.name.trim() !== 'Base Idle' && sp.name.trim() !== 'Spontaneous Idle Anims',
+    );
+    specs.push({ fieldIndex: idle, type: cls.fields[idle]!.type, name: cls.fields[idle]!.name, value: clip });
+    const spont = cls.fields.findIndex((f) => f.name.trim() === 'Spontaneous Idle Anims');
+    if (spont >= 0 && fieldIsIndirect(cls.fields[spont]!.type))
+        specs.push({ fieldIndex: spont, type: cls.fields[spont]!.type, name: cls.fields[spont]!.name, value: [] });
+    return specs;
 }

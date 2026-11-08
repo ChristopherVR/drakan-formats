@@ -1,6 +1,6 @@
 // Synthetic stage outputs: no game assets. Exercise the pipeline's final object retention policy.
 import { describe, expect, it, vi } from 'vitest';
-import { convertOotfLevels, deathClipIds } from '../src/ootfpipeline.ts';
+import { convertOotfLevels, deathClipIds, placedCorpsePose } from '../src/ootfpipeline.ts';
 import { OotfSourceError } from '../src/ootfsource.ts';
 import { loadPcLevel, type PcLevel } from '../src/pc.ts';
 import { convertPcLevel, ps2ClassTables, writePs2Terrain } from '../src/convert.ts';
@@ -288,5 +288,39 @@ describe('deathClipIds', () => {
             data: [(2 << 16) | 6, (1 << 16) | 8, 7003, (1 << 16) | 9, (1 << 16) | 10, 5, 7001, 7002, 7004, 7005, 7006],
         };
         expect(deathClipIds(cls)).toEqual([7001, 7002, 7004, 7003]);
+    });
+});
+
+describe('placedCorpsePose', () => {
+    const cls = {
+        fields: [
+            { name: 'Initial Health', type: 0x0001 },
+            { name: 'Base Idle', type: 0x0009 },
+            { name: 'Spontaneous Idle Anims', type: 0x1009 },
+            { name: 'Death', type: 0x1009 },
+            { name: 'Idle Death', type: 0x1009 },
+        ],
+        data: [35, 900, (1 << 16) | 5, (1 << 16) | 6, 0, 901, 950],
+    };
+    const param = (fieldIndex: number, name: string, type: number) => ({
+        fieldIndex,
+        name,
+        type,
+        nameRaw: new Uint8Array(0),
+    });
+    const obj = (hp: number) => ({ params: [param(0, 'Initial Health', 0x0001)], data: [hp >>> 0] });
+
+    it('lays a creature placed dead in its death clip, without spontaneous idles', () => {
+        const specs = placedCorpsePose(obj(-50), cls)!;
+        expect(specs.find((s) => s.name === 'Base Idle')?.value).toBe(950); // no Idle Death: the Death clip
+        expect(specs.find((s) => s.name === 'Spontaneous Idle Anims')?.value).toEqual([]);
+        expect(specs.find((s) => s.name === 'Initial Health')?.value).toBe(-50);
+        const withIdleDeath = { ...cls, data: [35, 900, (1 << 16) | 5, (1 << 16) | 6, (1 << 16) | 6, 901, 777] };
+        expect(placedCorpsePose(obj(0), withIdleDeath)!.find((s) => s.name === 'Base Idle')?.value).toBe(777);
+    });
+
+    it('leaves living creatures and objects without a health parameter alone', () => {
+        expect(placedCorpsePose(obj(1), cls)).toBeNull();
+        expect(placedCorpsePose({ params: [], data: [] }, cls)).toBeNull();
     });
 });
