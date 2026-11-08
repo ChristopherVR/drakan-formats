@@ -136,7 +136,7 @@ import {
 } from './ootfclassrefs.ts';
 import { CELL_SIZE, LVL_TYPE_LAYERS, parsePs2Terrain, terrainHeightAt } from './terrain.ts';
 import { odbStemForDependency } from './odb.ts';
-import { animName, parseSkeleton, ps2AnimFlags, writePs2Anim, type PcAnim, type Skeleton } from './ootfanim.ts';
+import { animName, parsePs2Anim, parseSkeleton, ps2AnimFlags, writePs2Anim, type PcAnim, type Skeleton } from './ootfanim.ts';
 import { buildRig } from './skeleton.ts';
 import { MOD_CHARACTER } from './model.ts';
 import { SSD_SEQUENCE } from './resources.ts';
@@ -2542,6 +2542,35 @@ function playerClipBuilder(ps2: OotfPs2Context) {
         ): Promise<{ map: Map<number, number>; warnings: string[] }> {
             const map = new Map<number, number>();
             const warnings: string[] = [];
+    // The finger joints the PC Rynn lacks take the grip of a native armed clip (first key), so a scene sword is held.
+    const GRIP_CLIPS = ['a_randomidle', 'a_1handedrmub', 'ncidle2magic_sword'];
+    let grip: Map<number, [number, number, number, number]> | undefined;
+    const fingerGripPose = async (sk: Skeleton, names: readonly string[]) => {
+        if (grip) return grip;
+        grip = new Map();
+        if (!adb) return grip;
+        const fingers = names.flatMap((n, d) => (/^[lr]_(th|point|middle|ring)/i.test(n) ? [d] : []));
+        for (const want of GRIP_CLIPS) {
+            for (const id of sk.animIds) {
+                const info = adb.find(0x0501, id);
+                const data = adb.find(0x0502, id);
+                if (!info || !data) continue;
+                const raw = await adb.readRaw(info);
+                if (animName(raw).toLowerCase() !== want) continue;
+                try {
+                    const a = parsePs2Anim(raw, await adb.readRaw(data));
+                    for (const d of fingers) {
+                        const k = a.tracks[d]?.keys[0];
+                        if (k) grip.set(d, [k.q[0], k.q[1], k.q[2], k.q[3]]);
+                    }
+                } catch {
+                    // not a clip of this rig
+                }
+                if (grip.size) return grip;
+            }
+        }
+        return grip;
+    };
             const sk = await ps2Rig();
             if (!sk || !adb) return { map, warnings: ['no PS2 player rig'] };
             const todo = new Map<number, PcAnim>();
@@ -2556,7 +2585,8 @@ function playerClipBuilder(ps2: OotfPs2Context) {
             // Held items keep the PC hand frames (the PS2 Rynn's Rweapon is turned about 104 degrees from the PC one).
             const names = buildRig(sk, 0).names;
             const worldJoints = names.flatMap((n, d) => (/^[lr]weapon$/i.test(n) ? [d] : []));
-            const r = retargetCreature(source.skeleton, sk, todo, { worldJoints });
+            const holdPose = await fingerGripPose(sk, names);
+            const r = retargetCreature(source.skeleton, sk, todo, { worldJoints, holdPose });
             for (const a of r.anims) {
                 const id = nextId++;
                 const w = writePs2Anim(a.anim);

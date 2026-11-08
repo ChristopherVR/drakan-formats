@@ -230,6 +230,12 @@ export interface RetargetAnimOptions extends ConvertAnimOptions {
      * the change is not propagated to children.
      */
     worldJoints?: readonly number[];
+    /**
+     * Rotation (parent-relative quaternion) for target joints with no source partner, instead of the bind pose. The PS2
+     * Rynn's finger joints have no PC partner and her bind hand is open, so a retargeted scene clip left her sword hand
+     * open; the native armed clips curl the fingers.
+     */
+    holdPose?: ReadonlyMap<number, readonly [number, number, number, number]>;
 }
 
 /** PS2 absolute parent-relative tracks -> another PS2 bind skeleton, preserving each source key and timing. */
@@ -409,6 +415,10 @@ export function retargetPcAnim(
         lookup.push({ first, count: keys.length - first });
     }
     const out = convertPcAnimToPs2({ ...pc, nodes: dstRig.jointCount, keys, lookup }, bindBasis(dstRig), opt);
+    for (const [d, q] of opt.holdPose ?? []) {
+        const track = out.tracks[d];
+        if (track && (match.map[d] ?? -1) < 0) track.keys = [{ time: 0, q: [q[0], q[1], q[2], q[3]], pos: null }];
+    }
     if (!opt.worldJoints?.length) return out;
     // Attachment frames take the source joint's orientation (as retargetPs2Anim does): every matched ancestor follows
     // world = bindWorld * delta on both rigs, so pre-multiplying the local key by sourceBindWorld * inverse(targetBindWorld)

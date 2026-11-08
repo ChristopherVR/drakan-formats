@@ -347,4 +347,15 @@ describe('PS2 character motion retargeting', () => {
             expect(quatAngle(held.tracks[1]!.keys[k]!.q, plain.tracks[1]!.keys[k]!.q)).toBeLessThan(0.001);
         }
     });
+    it('holds a given pose on target joints without a source partner (a grip) and leaves matched joints alone', () => {
+        const match = matchJoints(source, target);
+        const plain = retargetPcAnim(pc, source, target, match, { scale: 2 });
+        const grip = [0, 0.7071068, 0, 0.7071068] as const;
+        const held = retargetPcAnim(pc, source, target, match, { scale: 2, holdPose: new Map([[3, grip], [1, grip]]) });
+        expect(held.tracks[3]!.keys).toHaveLength(1);
+        expect(quatAngle(held.tracks[3]!.keys[0]!.q, [...grip])).toBeLessThan(1e-6);
+        expect(quatAngle(plain.tracks[3]!.keys[0]!.q, [...grip])).toBeGreaterThan(0.1);
+        // joint 1 has a partner: the hold pose does not apply
+        expect(quatAngle(held.tracks[1]!.keys[1]!.q, plain.tracks[1]!.keys[1]!.q)).toBeLessThan(1e-6);
+    });
 });
