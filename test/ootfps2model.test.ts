@@ -29,8 +29,11 @@ describe('Drakan 2 model table', () => {
     it('turns categories, rows and default-off rows on and off', () => {
         const all = effectiveModelSubstitutions();
         expect(all.some((r) => r.ootf === 'Troll Leather')).toBe(true);
-        expect(all.some((r) => r.ootf === 'Scavenger')).toBe(false); // off by default
-        expect(effectiveModelSubstitutions({ on: ['scavenger'] }).some((r) => r.ootf === 'Scavenger')).toBe(true);
+        expect(all.some((r) => r.ootf === 'Scavenger')).toBe(true);
+        expect(effectiveModelSubstitutions({ off: ['scavenger'] }).some((r) => r.ootf === 'Scavenger')).toBe(false);
+        const table = [{ category: 'enemies' as const, ootf: 'Demo', ps2: 'Demo', label: 'Demo', why: 'a default-off row', defaultOff: true }];
+        expect(effectiveModelSubstitutions({ table }).length).toBe(0); // default-off rows stay off
+        expect(effectiveModelSubstitutions({ table, on: ['demo'] }).length).toBe(1);
         expect(effectiveModelSubstitutions({ enabled: false })).toEqual([]);
         expect(effectiveModelSubstitutions({ categoriesOff: ['weapons'] }).every((r) => r.category === 'enemies')).toBe(
             true,
@@ -55,11 +58,12 @@ describe('Drakan 2 model table', () => {
     });
 
     it('reads user edits', () => {
+        const demo = [{ category: 'enemies' as const, ootf: 'Scavenger', ps2: 'Scavenger', label: 'S', why: 'default-off demo row', defaultOff: true }];
         const o = ps2ModelSwapFromEdits([
             { ootf: 'Mace', ps2: null },
             { ootf: 'Scavenger', ps2: 'Scavenger' },
             { ootf: 'Flame Sword', ps2: 'Fire Blade', label: 'Flame sword' },
-        ]);
+        ], { table: demo });
         expect(o.off).toEqual(['Mace']);
         expect(o.on).toEqual(['Scavenger']);
         expect(o.extra).toEqual([
