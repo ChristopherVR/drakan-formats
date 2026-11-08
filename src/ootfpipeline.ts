@@ -2522,6 +2522,43 @@ function playerClipBuilder(ps2: OotfPs2Context) {
         skeleton = best;
         return skeleton;
     };
+    // The finger joints the PC Rynn lacks take the grip of a native armed clip (first key), so a scene sword is held.
+    const GRIP_CLIPS = ['a_randomidle', 'a_1handedrmub', 'ncidle2magic_sword'];
+    let held: Map<number, [number, number, number, number]> | undefined;
+    const firstKeys = async (
+        sk: Skeleton,
+        clips: readonly string[],
+        joints: readonly number[],
+        into: Map<number, [number, number, number, number]>,
+    ): Promise<void> => {
+        if (!adb) return;
+        for (const want of clips) {
+            for (const id of sk.animIds) {
+                const info = adb.find(0x0501, id);
+                const data = adb.find(0x0502, id);
+                if (!info || !data) continue;
+                const raw = await adb.readRaw(info);
+                if (animName(raw).toLowerCase() !== want) continue;
+                try {
+                    const a = parsePs2Anim(raw, await adb.readRaw(data));
+                    for (const d of joints) {
+                        const k = a.tracks[d]?.keys[0];
+                        if (k) into.set(d, [k.q[0], k.q[1], k.q[2], k.q[3]]);
+                    }
+                } catch {
+                    // not a clip of this rig
+                }
+                if (joints.every((d) => into.has(d))) return;
+            }
+        }
+    };
+    const fingerGripPose = async (sk: Skeleton, names: readonly string[]) => {
+        if (held) return held;
+        held = new Map();
+        const fingers = names.flatMap((n, d) => (/^[lr]_(th|point|middle|ring)/i.test(n) ? [d] : []));
+        await firstKeys(sk, GRIP_CLIPS, fingers, held);
+        return held;
+    };
     let nextId = (adb?.entries ?? []).reduce((m, e) => (e.type === 0x0501 ? Math.max(m, e.id) : m), 0) + 1;
     const done = new Map<string, number>();
     const entries: { id: number; info: Uint8Array; data: Uint8Array }[] = [];
@@ -2542,35 +2579,6 @@ function playerClipBuilder(ps2: OotfPs2Context) {
         ): Promise<{ map: Map<number, number>; warnings: string[] }> {
             const map = new Map<number, number>();
             const warnings: string[] = [];
-    // The finger joints the PC Rynn lacks take the grip of a native armed clip (first key), so a scene sword is held.
-    const GRIP_CLIPS = ['a_randomidle', 'a_1handedrmub', 'ncidle2magic_sword'];
-    let grip: Map<number, [number, number, number, number]> | undefined;
-    const fingerGripPose = async (sk: Skeleton, names: readonly string[]) => {
-        if (grip) return grip;
-        grip = new Map();
-        if (!adb) return grip;
-        const fingers = names.flatMap((n, d) => (/^[lr]_(th|point|middle|ring)/i.test(n) ? [d] : []));
-        for (const want of GRIP_CLIPS) {
-            for (const id of sk.animIds) {
-                const info = adb.find(0x0501, id);
-                const data = adb.find(0x0502, id);
-                if (!info || !data) continue;
-                const raw = await adb.readRaw(info);
-                if (animName(raw).toLowerCase() !== want) continue;
-                try {
-                    const a = parsePs2Anim(raw, await adb.readRaw(data));
-                    for (const d of fingers) {
-                        const k = a.tracks[d]?.keys[0];
-                        if (k) grip.set(d, [k.q[0], k.q[1], k.q[2], k.q[3]]);
-                    }
-                } catch {
-                    // not a clip of this rig
-                }
-                if (grip.size) return grip;
-            }
-        }
-        return grip;
-    };
             const sk = await ps2Rig();
             if (!sk || !adb) return { map, warnings: ['no PS2 player rig'] };
             const todo = new Map<number, PcAnim>();
