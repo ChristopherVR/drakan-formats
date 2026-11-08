@@ -149,6 +149,7 @@ import {
 import { buildRig, invertMat12, localToWorld, mat12ToQuat, mulMat12 } from './skeleton.ts';
 import { bindBasis, convertPcAnimToPs2 } from './ootfcreature.ts';
 import { sampleClip } from './anim.ts';
+import { hangingHairOverrides } from './ootfhair.ts';
 import { MOD_CHARACTER } from './model.ts';
 import { SSD_SEQUENCE } from './resources.ts';
 import {
@@ -2695,7 +2696,18 @@ export async function convertOotfLevels(
         for (const w of textPlan.warnings.slice(0, 5)) res.warnings.push(`text: ${w}`);
     });
     Object.assign(res.files, ssdFiles);
-    Object.assign(res.files, await player.files());
+    const playerFiles = await player.files();
+    Object.assign(res.files, playerFiles);
+    if (ps2.playerMod && ps2.playerAdb && Object.keys(playerFiles).length > 0) {
+        // The ponytail at rest hangs (the engine leaves the hair at its bind pose in converted scenes).
+        const hair = await hangingHairOverrides(
+            ps2.playerMod,
+            ps2.playerAdb,
+            (ps2.playerStem ?? 'SYSTEM').toUpperCase(),
+        );
+        Object.assign(res.files, hair.files);
+        for (const w of hair.warnings) res.warnings.push(`player hair: ${w}`);
+    }
     await sceneClips.files(res.files);
     return res;
 }
