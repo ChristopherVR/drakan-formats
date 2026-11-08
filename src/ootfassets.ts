@@ -418,7 +418,7 @@ export class OotfAssetBuilder {
                 // PC bounding spheres name their centre by a vertex numbered from the LOD's first vertex, and those vertices sit
                 // AFTER the LOD's own vertices (Scavenger: 165..174 of 180), so the sphere centres need the unsliced list.
                 skin = { sk, positions, sphereVerts: pc.positions.slice(L.firstVertex * 3) };
-                pc = { ...pc, positions, polygons: pc.polygons.slice(L.firstPoly, L.firstPoly + L.polyCount) };
+                pc = { ...pc, positions, polygons: skinnedLodPolygons(pc.polygons, sk) };
             } catch (e) {
                 return fail(`skeleton: ${e instanceof Error ? e.message : String(e)}`);
             }
@@ -949,4 +949,25 @@ export class OotfAssetBuilder {
         files[`${dir}/${S}.DB`] = strToU8(buildDbText([]));
         return { files, report: this.report };
     }
+}
+
+/**
+ * The polygons of a PC skinned model's first LOD. A PC LOD's `polyCount` leaves out the stump caps of its choppable channels
+ * (cap `{stumpFirst, stumpCount, firstPoly, polyCount, joint}`), yet the caps sit inside the LOD's polygon run, so the first
+ * `polyCount` polygons cut off its last parts: the converted Leather Wartok lost its right hand and part of a thigh, the
+ * Chain and Plate Wartoks a shin. The LOD runs to the next LOD's first polygon (or the last channel cap); its stump caps,
+ * which close the cut once a limb is chopped off, are left out.
+ */
+export function skinnedLodPolygons<P>(polygons: readonly P[], sk: Pick<Skeleton, 'lods' | 'channels'>): P[] {
+    const L = sk.lods[0]!;
+    const caps = sk.channels.map((c) => c.caps[0]?.values).filter((v): v is NonNullable<typeof v> => !!v);
+    let end =
+        sk.lods[1]?.firstPoly ??
+        Math.max(L.firstPoly + L.polyCount, ...caps.map((v) => Math.max(v[0] + v[1], v[2] + v[3])));
+    end = Math.min(Math.max(end, L.firstPoly + L.polyCount), polygons.length);
+    const stump = new Set<number>();
+    for (const v of caps) for (let i = v[0]; i < v[0] + v[1]; i++) if (v[1] > 0) stump.add(i);
+    const out: P[] = [];
+    for (let i = L.firstPoly; i < end; i++) if (!stump.has(i)) out.push(polygons[i]!);
+    return out;
 }
