@@ -29,6 +29,19 @@ export const PC_DEFAULT_VIEW_DISTANCE = 30 * MODEL_UNIT;
 /** PC engine id of the camera object (the actor cut scenes move). */
 const CAMERA_RFL = 27;
 
+/** PC engine id of the player (Rynn, Human Control). */
+const PLAYER_RFL = 9;
+
+/**
+ * Whether a level is a pure cinematic (the Intro): no PC player and not a multiplayer arena. Only such levels have no
+ * gameplay camera, so only their shells may lose walls: in a playable level the player camera can stand inside a shell
+ * (Succubus Lair's "sky" box) and needs the walls the cut-scene cameras never see.
+ */
+export function isCinematicLevel(pc: Pick<PcLevel, 'list' | 'classes' | 'path'>): boolean {
+    if (/(^|[\\/])multiplayer[\\/]/i.test(pc.path)) return false;
+    return !pc.list.objects.some((o) => pc.classes.get(o.dbIndex)?.get(o.classId)?.rflClass === PLAYER_RFL);
+}
+
 const sub = (a: Vec3, b: Vec3): Vec3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 const cross = (a: Vec3, b: Vec3): Vec3 => [
     a[1] * b[2] - a[2] * b[1],
@@ -192,6 +205,7 @@ export async function planShellTrims(
     const per = new Map<OdbClass, (Set<number> | null)[]>();
     const models = new Map<OdbClass, PcModel | null>();
     for (const pc of levels) {
+        if (!isCinematicLevel(pc)) continue;
         let cameras: Vec3[] | null = null;
         for (const o of pc.list.objects) {
             const cls = pc.classes.get(o.dbIndex)?.get(o.classId);

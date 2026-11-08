@@ -1,6 +1,13 @@
 // Inward shells seen from outside. Synthetic geometry only; no game bytes.
 import { describe, expect, it } from 'vitest';
-import { MODEL_UNIT, isInwardShell, mergeShellDrops, pcViewDistance, shellWallsHiddenFrom } from '../src/ootfshell.ts';
+import {
+    MODEL_UNIT,
+    isCinematicLevel,
+    isInwardShell,
+    mergeShellDrops,
+    pcViewDistance,
+    shellWallsHiddenFrom,
+} from '../src/ootfshell.ts';
 import type { PcPolygon } from '../src/ootfmodel.ts';
 
 /** A unit-cell cube (+-1) as 12 triangles; `inward` gives every face the PC front side toward the centre. */
@@ -93,5 +100,20 @@ describe('inward shells', () => {
         };
         expect(pcViewDistance({ classes: new Map([[0, new Map([[1, props]])]]) })).toBe(20 * MODEL_UNIT);
         expect(pcViewDistance({ classes: new Map() })).toBe(30 * MODEL_UNIT);
+    });
+});
+
+describe('cinematic levels', () => {
+    const level = (path: string, rfls: number[]): Parameters<typeof isCinematicLevel>[0] => ({
+        path,
+        list: { objects: rfls.map((_, i) => ({ id: i + 1, dbIndex: 0, classId: i + 1 })) } as never,
+        classes: new Map([[0, new Map(rfls.map((rflClass, i) => [i + 1, { rflClass } as never]))]]),
+    });
+
+    it('trims shells only in a level with no player that is not an arena', () => {
+        expect(isCinematicLevel(level('Mountain World/Intro Level/Intro.lvl', [17, 27]))).toBe(true);
+        // Succubus Lair: Rynn plays inside its "sky" shell
+        expect(isCinematicLevel(level('Islands World/Succubus Lair/Succubus Lair.lvl', [17, 9, 27]))).toBe(false);
+        expect(isCinematicLevel(level('Multiplayer/Air/Nemesis/Nemesis.lvl', [17, 18]))).toBe(false);
     });
 });
