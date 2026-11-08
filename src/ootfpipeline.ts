@@ -59,6 +59,7 @@ import {
     limitVisibleEntries,
     ps2CellFlags,
     TerrainTextureBuilder,
+    buildTerrainPoolTxd,
     convertTerrainTextures,
     findSplatDbIndex,
     findTerrainDbIndex,
@@ -1955,7 +1956,13 @@ export async function convertOotfLevels(
             title,
             arena: isOotfArenaLevel(pc),
             parts,
-            splats: tex ? { TXD: tex.txd } : {},
+            // The level's own far textures (one per terrain group); the template's drew Surdana's colours and its magenta
+            // filler on distant converted terrain (journal 2026-11-08/ootf-pink-textures.md).
+            splats: tex
+                ? { TXD: tex.txd }
+                : terrBuilder
+                  ? { TXD: buildTerrainPoolTxd(parts.terrain, (r) => terrBuilder.meanOfRef(r)) }
+                  : {},
         });
     }
     // The pack lists the levels in this order (mod.toml `levels`, whose first entry is the campaign start): play order,

@@ -3,7 +3,14 @@ import { describe, expect, it } from 'vitest';
 import { SrscReader, decodeTxd } from '../src/index.ts';
 import { writePs2Srsc } from '../src/ootfcontainer.ts';
 import { buildPs2Txd, encodePs2Texture } from '../src/ootftex.ts';
-import { convertTerrainTextures, findSplatDbIndex } from '../src/ootfterrain.ts';
+import {
+    TerrainTextureBuilder,
+    buildTerrainPoolTxd,
+    convertTerrainTextures,
+    findSplatDbIndex,
+} from '../src/ootfterrain.ts';
+import { planTerrainSlots } from '../src/terrainblob.ts';
+import type { TerrainLayer } from '../src/terrain.ts';
 import type { PcFileSource, PcLevel } from '../src/pc.ts';
 
 const u32 = (n: number): number[] => [n & 255, (n >>> 8) & 255, (n >>> 16) & 255, (n >>> 24) & 255];
@@ -96,5 +103,65 @@ describe('terrain textures', () => {
 
     it('finds the splat dependency', () => {
         expect(findSplatDbIndex(pc.header)).toBe(24);
+    });
+});
+
+describe('terrain far textures (the level splat TXD)', () => {
+    const layer = (index: number, width: number, height: number, originX: number, cells: number[]): TerrainLayer =>
+        ({
+            index,
+            width,
+            height,
+            originX,
+            originZ: 0,
+            cellTexLeft: Uint32Array.from(cells),
+        }) as unknown as TerrainLayer;
+    const colors = new Map<number, [number, number, number]>([
+        [(9 << 16) | 1001, [200, 40, 40]],
+        [(9 << 16) | 1002, [40, 200, 40]],
+    ]);
+    const A = (9 << 16) | 1001;
+    const B = (9 << 16) | 1002;
+    // 3 x 2 cells with a hole, and a 2 x 1 layer beside it: one group, slots shelf-packed side by side.
+    const layers = [layer(0, 3, 2, 0, [A, B, A, B, 0xffffffff, A]), layer(1, 2, 1, 3, [B, 0xfffffffe])];
+
+    it('writes one pool texture per group at the blob slots, 4 texels per cell, holes and spare texels in the group mean', async () => {
+        const plan = planTerrainSlots(layers);
+        const r = await SrscReader.fromBytes(buildTerrainPoolTxd(layers, (ref) => colors.get(ref) ?? null));
+        const texs = r.entries.filter((e) => e.type === 0x40);
+        expect(texs.map((e) => e.id)).toEqual([...new Set([...plan.values()].map((s) => s.seq))].sort((a, b) => a - b));
+        expect(texs.length).toBe(1);
+        const body = await r.readRaw(texs[0]!);
+        const dv = new DataView(body.buffer, body.byteOffset, body.byteLength);
+        const img = decodeTxd(body, { upright: false });
+        const pool = plan.get(0)!.pool;
+        expect([img.width, img.height, img.bpp]).toEqual([pool, pool, 8]);
+        // disc far-texture header: opaque (flags 0), no family number at +40, 256.0 at +44
+        expect([dv.getUint32(16, true), dv.getUint32(40, true), dv.getFloat32(44, true)]).toEqual([0, 0, 256]);
+        const at = (x: number, z: number): number[] =>
+            Array.from(img.rgba.subarray((z * pool + x) * 4, (z * pool + x) * 4 + 3));
+        const s0 = plan.get(0)!;
+        const s1 = plan.get(1)!;
+        // cell (cx, cz) of layer 0 covers texels xLo + 4cx .. +3, zLo + 4cz .. +3 (stored row order)
+        expect(at(s0.xLo + 0, s0.zLo + 0)).toEqual([200, 40, 40]);
+        expect(at(s0.xLo + 4 + 3, s0.zLo + 3)).toEqual([40, 200, 40]);
+        expect(at(s0.xLo + 4 * 2 + 1, s0.zLo + 4 + 2)).toEqual([200, 40, 40]);
+        expect(at(s1.xLo + 2, s1.zLo + 1)).toEqual([40, 200, 40]);
+        // the hole (layer 0 cell 1,1), the invisible cell (layer 1 cell 1,0) and the unused pool corner: group mean of 6 cells
+        const mean = [Math.round((3 * 200 + 3 * 40) / 6), Math.round((3 * 40 + 3 * 200) / 6), 40];
+        expect(at(s0.xLo + 4 + 1, s0.zLo + 4 + 1)).toEqual(mean);
+        expect(at(s1.xLo + 4 + 1, s1.zLo + 1)).toEqual(mean);
+        expect(at(pool - 1, pool - 1)).toEqual(mean);
+        for (let i = 0; i < pool * pool; i++) expect(img.rgba[i * 4 + 1]).not.toBe(100); // never the disc's magenta filler
+    });
+
+    it('gives the mean colour of converted and template terrain textures by cell ref', async () => {
+        const red = new Uint8Array(8 * 8 * 4);
+        for (let i = 0; i < 64; i++) red.set([180, 20, 30, 255], i * 4);
+        const base = buildPs2Txd([{ id: 3, body: encodePs2Texture({ width: 8, height: 8, rgba: red }).body }]);
+        const src: PcFileSource = { read: async () => null, list: async () => [] };
+        const b = await TerrainTextureBuilder.create(src, base, 9);
+        expect(b.meanOfRef((9 << 16) | 3)).toEqual([180, 20, 30]);
+        expect(b.meanOfRef((9 << 16) | 4)).toBeNull();
     });
 });

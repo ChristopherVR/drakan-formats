@@ -7,10 +7,12 @@ import {
     isSkip,
     readPcTexture,
 } from './ootftex.ts';
+import { view } from './bytes.ts';
 import { type PcFileSource, type PcLevel, resolvePcPath } from './pc.ts';
 import { SrscReader } from './srsc.ts';
 import { TEX_HOLE, TEX_INVISIBLE, type TerrainLayer } from './terrain.ts';
-import { TXD_ENTRY_TYPE } from './txd.ts';
+import { TXD_ENTRY_TYPE, decodeTxd } from './txd.ts';
+import { planTerrainSlots } from './terrainblob.ts';
 import type { LvlHeader } from './lvl.ts';
 
 /**
@@ -263,6 +265,26 @@ export class TerrainTextureBuilder {
         return t.image;
     }
 
+    /**
+     * Mean RGB of a texture in the target TXD (a cell ref `db << 16 | id` or a bare id): the converted ones from their
+     * source pixels, the template's own entries (the fallback ground) decoded once. Null when the id is not in the TXD.
+     */
+    meanOfRef(ref: number): [number, number, number] | null {
+        const id = ref & 0xffff;
+        const known = this.means.get(id);
+        if (known) return known;
+        const e = this.entries.find((x) => x.type === TXD_ENTRY_TYPE && x.id === id);
+        if (!e) return null;
+        let mean: [number, number, number];
+        try {
+            mean = meanColor(decodeTxd(e.data).rgba);
+        } catch {
+            return null;
+        }
+        this.means.set(id, mean);
+        return mean;
+    }
+
     /** The target TXD: the base entries followed by every converted texture. Ship it at `TERRAIN_TXD_PATH`. */
     build(): Uint8Array {
         return writePs2Srsc(this.entries);
@@ -364,4 +386,81 @@ export function limitVisibleEntries(
                       .map((x) => x.v),
               },
     );
+}
+
+/** Texels per cell edge in a terrain group's far texture (disc: `x_hi = 4w - 1`, journal 2026-11-08/ootf-pink-textures.md). */
+export const TERRAIN_POOL_TEXELS_PER_CELL = 4;
+/** Header +44 (f32) of the disc's far textures (every `LEVEL*TS.TXD` entry); terrain textures carry 4. */
+const POOL_HEADER_SCALE = 256;
+
+/**
+ * The level's own `_splats` TXD (`<level>TS.TXD`): texture `n` is the far texture of terrain group `seq` n. The engine draws
+ * distant terrain with it instead of the cell textures: each layer samples the `pool x pool` texture at its slot rectangle
+ * (`x_lo..x_hi`, `z_lo..z_hi` of the inline blob), 4 texels per cell, rows in stored order, the cell's texture shrunk to
+ * its mean colour (LEVEL1NA against LEVEL1TS: chroma error 0.035 for this placement, 0.12 and more for flipped ones;
+ * brightness ratio 0.97..1.01, so no lighting is baked in). Packs used to ship the template's file, so far terrain showed
+ * Surdana's colours and, wherever a converted slot fell into the template's unused pool area, its magenta (248, 100, 248)
+ * filler: the pink cliffs of Wartok Canyons. `colorOf` gives a cell ref's mean RGB (`TerrainTextureBuilder.meanOfRef`);
+ * texels no drawn cell covers take the group's mean colour, so filtering at a slot border never reaches a foreign colour.
+ * The slots come from `planTerrainSlots` over the same layer list, exactly as `ps2BlobBuilder` places them.
+ */
+export function buildTerrainPoolTxd(
+    layers: readonly TerrainLayer[],
+    colorOf: (ref: number) => readonly [number, number, number] | null,
+): Uint8Array {
+    const plan = planTerrainSlots(layers);
+    const groups = new Map<number, { pool: number; layers: TerrainLayer[] }>();
+    for (const L of layers) {
+        const s = plan.get(L.index);
+        if (!s) continue;
+        const g = groups.get(s.seq) ?? { pool: s.pool, layers: [] };
+        g.pool = Math.max(g.pool, s.pool);
+        g.layers.push(L);
+        groups.set(s.seq, g);
+    }
+    const n = TERRAIN_POOL_TEXELS_PER_CELL;
+    const entries: Ps2Entry[] = [];
+    for (const seq of [...groups.keys()].sort((a, b) => a - b)) {
+        const { pool, layers: members } = groups.get(seq)!;
+        const cellColor = (L: TerrainLayer, c: number): readonly [number, number, number] | null => {
+            const ref = L.cellTexLeft[c]!;
+            return ref === TEX_HOLE || ref === TEX_INVISIBLE ? null : colorOf(ref);
+        };
+        const sum = [0, 0, 0];
+        let count = 0;
+        for (const L of members)
+            for (let c = 0; c < L.cellTexLeft.length; c++) {
+                const m = cellColor(L, c);
+                if (!m) continue;
+                for (let k = 0; k < 3; k++) sum[k]! += m[k]!;
+                count++;
+            }
+        const fill = count ? sum.map((v) => Math.round(v / count)) : [128, 128, 128];
+        const rgba = new Uint8Array(pool * pool * 4);
+        for (let i = 0; i < pool * pool; i++) rgba.set([fill[0]!, fill[1]!, fill[2]!, 255], i * 4);
+        for (const L of members) {
+            const s = plan.get(L.index)!;
+            for (let cz = 0; cz < L.height; cz++)
+                for (let cx = 0; cx < L.width; cx++) {
+                    const m = cellColor(L, cz * L.width + cx);
+                    if (!m) continue;
+                    const px = [Math.round(m[0]), Math.round(m[1]), Math.round(m[2]), 255];
+                    for (let dz = 0; dz < n; dz++) {
+                        const z = s.zLo + cz * n + dz;
+                        if (z >= pool) continue;
+                        for (let dx = 0; dx < n; dx++) {
+                            const x = s.xLo + cx * n + dx;
+                            if (x < pool) rgba.set(px, (z * pool + x) * 4);
+                        }
+                    }
+                }
+        }
+        const tex = encodePs2Texture(
+            { width: pool, height: pool, rgba },
+            { mode: 'indexed', maxSize: pool, fps: 10, slot: 0, deferExact: true },
+        );
+        view(tex.body).setFloat32(44, POOL_HEADER_SCALE, true);
+        entries.push({ type: TXD_ENTRY_TYPE, id: seq, sub: 0, data: tex.body });
+    }
+    return writePs2Srsc(entries);
 }
