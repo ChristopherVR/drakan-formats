@@ -43,14 +43,24 @@ export const TERRAIN_TEXTURE_SLOT = 45;
  * is the Drakan 1 liquid material (RFL class 0x72: "Water", "blended water", "Lava FX", ...) is drawn by the PS2 engine's
  * water path only when the cell names a Proc Textures entry with a PS2 liquid material (header +40: PROCTEES classes of
  * engine class 0x100d1, which carry the scrolling textures, flow, alpha by distance, waves and specular). The disc's own
- * entries are placeholders (a "T" or an arrow) that are never shown. So liquid textures are not converted: water maps to
- * PROCTEES 0x10e, whose material 1 "Water" is the PS2 port of the same PC "Water" material (same textures 388 / 389 and
- * water effect 134117; Surdana, Kragmor, Ravenshold, Valley and Stratos use it), lava (damage above 0) to 0x1d7 ("Lava
- * (Base)", Andrellian Isles, Northern Tundra). Journal 2026-11-08/ootf-water.md.
+ * entries are placeholders (a "T" or an arrow) that are never shown. So liquid textures are not converted: water maps to a
+ * Drakan 2 water (`nativeWaterTextures`; PROCTEES 0x10e, material 1 "Water", is the PS2 port of the same PC "Water"
+ * material and the fallback), lava (damage above 0) to 0x1d7 ("Lava (Base)", Andrellian Isles, Northern Tundra). Journal 2026-11-08/ootf-water.md.
  */
 export const PC_LIQUID_MATERIAL_CLASS = 0x72;
 export const PS2_WATER_TEXTURE = 0x10e;
 export const PS2_LAVA_TEXTURE = 0x1d7;
+/** PROCTEES 0x471d: material 240 "Surdana Water" (Surdana, Ravenshold, Valley, Stratos), the look of mountain water. */
+export const PS2_SURDANA_WATER_TEXTURE = 0x471d;
+/**
+ * Native water entries for a PC water texture of `container` (an install path without extension), best first. Mountain water
+ * (Ruined Village, Wartok, the Intro, the mines, Volcano) takes Surdana's water; the Islands world keeps the plain "Water"
+ * material: its seas carry the 60% shallow vertex kind (0x71), and with Surdana Water they drew pale sand coloured, with
+ * PROCTEES 0x467f ("Stormy Water_Level 3a") grey gravel (journal 2026-11-08/ootf-water.md).
+ */
+export function nativeWaterTextures(container: string): number[] {
+    return /^islands world\//i.test(container) ? [PS2_WATER_TEXTURE] : [PS2_SURDANA_WATER_TEXTURE, PS2_WATER_TEXTURE];
+}
 
 export interface TerrainTextureOptions {
     texture?: Ps2TextureOptions;
@@ -200,8 +210,9 @@ export class TerrainTextureBuilder {
         for (const ref of waterUses.keys()) {
             const c = containerOf(pc, ref >>> 16);
             const liquid = c ? await this.liquidOf(c, ref & 0xffff) : null;
-            const native = liquid === 'water' ? PS2_WATER_TEXTURE : liquid === 'lava' ? PS2_LAVA_TEXTURE : undefined;
-            if (native !== undefined && this.hasEntry(native)) liquids.set(ref, ((this.db << 16) | native) >>> 0);
+            const options = liquid === 'water' ? nativeWaterTextures(c!) : liquid === 'lava' ? [PS2_LAVA_TEXTURE] : [];
+            const native = options.find((id) => this.hasEntry(id));
+            if (native !== undefined) liquids.set(ref, ((this.db << 16) | native) >>> 0);
         }
         this.report.liquids = (this.report.liquids ?? 0) + liquids.size;
         for (const [r, n] of waterUses) if (!liquids.has(r)) uses.set(r, (uses.get(r) ?? 0) + n);

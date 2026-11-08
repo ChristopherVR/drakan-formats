@@ -16,8 +16,10 @@ import {
     parsePcObjectList,
     parsePs2Terrain,
     pcDependencyKey,
+    WATER_HOLE_SINK,
     ps2BlobFor,
     readPs2Blob,
+    waterHoleHeights,
     splitPs2Terrain,
     ps2ClassTables,
     ps2VertexMask,
@@ -562,6 +564,26 @@ describe('PC -> PS2 conversion', () => {
         // Water layers carry no chunk draw data (the disc's empty form); the engine's water pass draws them.
         const blobs = splitPs2Terrain(payload).layers.map((s) => readPs2Blob(payload.subarray(s.defEnd, s.blobEnd)));
         expect(blobs.map((b) => b.empty)).toEqual([false, true]);
+    });
+
+    it('keeps water hole vertices inside the bank and leaves water cells alone', () => {
+        // 3 x 1 cells: water, hole, hole. PC hole vertices are lifted to 5000 (into a bank at 3000) and 500.
+        const L = {
+            width: 3,
+            height: 1,
+            originX: 0,
+            originZ: 0,
+            heights: Float32Array.from([1000, 1000, 5000, 500, 1000, 1000, 5000, 500]),
+        };
+        const tex = [7, TEX_HOLE, TEX_HOLE];
+        const bank = (x: number): number => (x >= 2 * 2048 ? 3000 : 800);
+        const out = waterHoleHeights(L, tex, (x) => bank(x));
+        expect([...out.slice(0, 4)]).toEqual([1000, 1000, 1000, 500]); // never above the water it borders
+        // a dip next to the water: the hole vertex goes under its ground
+        expect([...waterHoleHeights(L, tex, () => 800).slice(0, 4)]).toEqual([1000, 1000, 800 - WATER_HOLE_SINK, 500]);
+        // with no ground the hole vertices take the nearest water height; a far lower floor stops a cell below the surface
+        expect([...waterHoleHeights(L, tex).slice(0, 4)]).toEqual([1000, 1000, 1000, 500]);
+        expect([...waterHoleHeights(L, tex, () => -90000).slice(0, 4)]).toEqual([1000, 1000, 1000 - 2048, 500 - 2048]);
     });
 
     it('writes terrain that the PS2 reader decodes (two layers)', async () => {

@@ -464,7 +464,9 @@ export function convertPcLevel(pc: PcLevel, opt: ConvertOptions): Ps2LevelParts 
     report.objectsOut = out.length;
 
     // ---- terrain
-    const terrain = pc.terrain.map((L) => convertLayer(L, pc, opt, report));
+    const floors = pc.terrain.filter((L) => L.type === 0);
+    const groundAt = (x: number, z: number, y: number): number => terrainGroundBelow(floors, x, z, y);
+    const terrain = pc.terrain.map((L) => convertLayer(L, pc, opt, report, groundAt));
 
     // ---- header
     const name = opt.name ?? pcLevelName(pc.header);
@@ -496,7 +498,13 @@ export function convertPcLevel(pc: PcLevel, opt: ConvertOptions): Ps2LevelParts 
     return { header, objects: list, terrain, report, objectIdMap: idMap };
 }
 
-function convertLayer(L: TerrainLayer, pc: PcLevel, opt: ConvertOptions, report: ConversionReport): TerrainLayer {
+function convertLayer(
+    L: TerrainLayer,
+    pc: PcLevel,
+    opt: ConvertOptions,
+    report: ConversionReport,
+    groundAt?: (x: number, z: number, y: number) => number,
+): TerrainLayer {
     const nc = L.width * L.height;
     const cellTexLeft = new Uint32Array(nc);
     const cache = new Map<number, number>();
@@ -529,6 +537,7 @@ function convertLayer(L: TerrainLayer, pc: PcLevel, opt: ConvertOptions, report:
     const cellFlags = L.cellFlags.map((flags, c) => (flags & ~0xc0) | (cellTexLeft[c] === TEX_HOLE ? 0xc0 : 0));
     return {
         ...L,
+        heights: L.type === LAYER_TYPE_WATER ? waterHoleHeights(L, cellTexLeft, groundAt) : L.heights,
         cellFlags,
         cellTexLeft,
         cellTexRight: cellTexLeft,
@@ -566,6 +575,81 @@ export function ps2VertexTypes(L: Pick<TerrainLayer, 'type' | 'vertexFlags' | 'h
     }
     return out;
 }
+
+/**
+ * Water layer heights for the vertices that no water cell uses. The PS2 water pass also draws a water layer's hole cells (the disc
+ * keeps their vertices at the surface height, where the bank covers them); the PC lifts those vertices up the bank, in places
+ * far above it (Ruined Village "Copy of Ocean 01": surface 11000, hole vertices up to 16494), and converted they stood as sheets
+ * of water in the air. Such a vertex is lowered to the height of the nearest water vertex (breadth first over the grid) and
+ * below the ground under it (`groundAt`, the highest floor surface, minus `WATER_HOLE_SINK`), but no more than 2048 under that
+ * water height; a PC height lower still is kept. Vertices of water cells are untouched, so sloped rivers keep their slope.
+ * Journal 2026-11-08/ootf-water.md.
+ */
+export function waterHoleHeights(
+    L: Pick<TerrainLayer, 'width' | 'height' | 'heights' | 'originX' | 'originZ'>,
+    cellTex: ArrayLike<number>,
+    groundAt?: (x: number, z: number, y: number) => number,
+): Float32Array {
+    const w = L.width;
+    const h = L.height;
+    const sw = w + 1;
+    const out = Float32Array.from(L.heights);
+    const water = new Uint8Array(out.length);
+    const near = Float32Array.from(L.heights);
+    const done = new Uint8Array(out.length);
+    let queue: number[] = [];
+    for (let z = 0; z < h; z++) {
+        for (let x = 0; x < w; x++) {
+            const t = cellTex[z * w + x]!;
+            if (t === TEX_HOLE || t === TEX_INVISIBLE) continue;
+            for (const v of [z * sw + x, z * sw + x + 1, (z + 1) * sw + x, (z + 1) * sw + x + 1]) {
+                if (!done[v]) {
+                    done[v] = water[v] = 1;
+                    queue.push(v);
+                }
+            }
+        }
+    }
+    if (!queue.length) return out;
+    while (queue.length) {
+        const next: number[] = [];
+        for (const v of queue) {
+            const x = v % sw;
+            const z = (v / sw) | 0;
+            for (const [dx, dz] of [
+                [1, 0],
+                [-1, 0],
+                [0, 1],
+                [0, -1],
+            ] as const) {
+                const nx = x + dx;
+                const nz = z + dz;
+                if (nx < 0 || nz < 0 || nx > w || nz > h) continue;
+                const n = nz * sw + nx;
+                if (done[n]) continue;
+                done[n] = 1;
+                near[n] = near[v]!;
+                next.push(n);
+            }
+        }
+        queue = next;
+    }
+    for (let v = 0; v < out.length; v++) {
+        if (water[v]) continue;
+        const pcHeight = out[v]!;
+        const x = (L.originX + (v % sw)) * 2048;
+        const z = (L.originZ + Math.floor(v / sw)) * 2048;
+        const ground = groundAt ? groundAt(x, z, Math.max(pcHeight, near[v]!)) : NaN;
+        // Never above the water it borders, never above the ground under it, never more than a cell's width below the surface
+        // (a far lower floor, a cliff foot, would make a wall of water).
+        const top = Math.min(pcHeight, near[v]!);
+        out[v] = Number.isFinite(ground) ? Math.max(Math.min(top, ground - WATER_HOLE_SINK), top - 2048) : top;
+    }
+    return out;
+}
+
+/** How far below the ground a water layer's hole vertex is kept (world units). */
+export const WATER_HOLE_SINK = 64;
 
 /** Default for `ConvertOptions.maxTexturesPerLayer`. */
 export const MAX_LAYER_TEXTURES = 0;

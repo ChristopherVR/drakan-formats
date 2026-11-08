@@ -5,10 +5,12 @@ import { writePs2Srsc } from '../src/ootfcontainer.ts';
 import { buildPs2Txd, encodePs2Texture } from '../src/ootftex.ts';
 import {
     PS2_LAVA_TEXTURE,
+    PS2_SURDANA_WATER_TEXTURE,
     PS2_WATER_TEXTURE,
     TerrainTextureBuilder,
     buildTerrainPoolTxd,
     convertTerrainTextures,
+    nativeWaterTextures,
     findSplatDbIndex,
 } from '../src/ootfterrain.ts';
 import { planTerrainSlots } from '../src/terrainblob.ts';
@@ -209,28 +211,41 @@ describe('liquid terrain textures', () => {
     const pc = { path: 'Lvl/Lvl.lvl', header: { dependencies: [] }, terrain: [water, floor] } as unknown as PcLevel;
     const opaque = { width: 8, height: 8, rgba: new Uint8Array(256).fill(255) };
     const base = buildPs2Txd(
-        [3, PS2_WATER_TEXTURE, PS2_LAVA_TEXTURE].map((id) => ({ id, body: encodePs2Texture(opaque).body })),
+        [3, PS2_WATER_TEXTURE, PS2_LAVA_TEXTURE, PS2_SURDANA_WATER_TEXTURE].map((id) => ({
+            id,
+            body: encodePs2Texture(opaque).body,
+        })),
     );
 
     it('maps liquid textures of water layers to the native water / lava entries and converts the rest', async () => {
         const t = await convertTerrainTextures(pc, src, base, 9, { minSize: 0 });
         expect(t.report.liquids).toBe(2);
-        expect(t.mapTexture(5, pc, water)).toBe((9 << 16) | PS2_WATER_TEXTURE);
+        expect(t.mapTexture(5, pc, water)).toBe((9 << 16) | PS2_SURDANA_WATER_TEXTURE);
         expect(t.mapTexture(6, pc, water)).toBe((9 << 16) | PS2_LAVA_TEXTURE);
         // a non-liquid texture on a water layer and a liquid texture painted on a floor are converted pictures
         const ground = t.mapTexture(7, pc, water)!;
         const floorWater = t.mapTexture(5, pc, floor)!;
         expect(ground).toBe(t.mapTexture(7, pc, floor));
         for (const r of [ground, floorWater])
-            expect([3, PS2_WATER_TEXTURE, PS2_LAVA_TEXTURE]).not.toContain(r & 0xffff);
+            expect([3, PS2_WATER_TEXTURE, PS2_LAVA_TEXTURE, PS2_SURDANA_WATER_TEXTURE]).not.toContain(r & 0xffff);
         expect(t.mapTexture(6, pc, floor)).toBeNull(); // lava only on the water layer: never converted
         expect(t.report.converted).toBe(2);
+    });
+
+    it('picks Surdana water for mountain water and the plain Water entry for the Islands', () => {
+        expect(nativeWaterTextures('Mountain World/Mountain World Common/Mountain World Common TD')).toEqual([
+            PS2_SURDANA_WATER_TEXTURE,
+            PS2_WATER_TEXTURE,
+        ]);
+        expect(nativeWaterTextures('Islands World/Tropical World Common/Tropical World TD')).toEqual([
+            PS2_WATER_TEXTURE,
+        ]);
     });
 
     it('keeps the picture when the template has no native liquid entry', async () => {
         const plain = buildPs2Txd([{ id: 3, body: encodePs2Texture(opaque).body }]);
         const t = await convertTerrainTextures(pc, src, plain, 9, { minSize: 0 });
         expect(t.report.liquids ?? 0).toBe(0);
-        expect(t.mapTexture(5, pc, water)! & 0xffff).not.toBe(PS2_WATER_TEXTURE);
+        expect(t.mapTexture(5, pc, water)! & 0xffff).not.toBe(PS2_SURDANA_WATER_TEXTURE);
     });
 });
