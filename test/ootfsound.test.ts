@@ -9,6 +9,7 @@ import {
     convertPcSounds,
     soundIdAllocator,
     decodeSdbSamples,
+    encodeLipSync,
     encodeSdbSamples,
     encodeVag,
     nextSdbIds,
@@ -201,8 +202,10 @@ describe('PS2 SDB writer', () => {
         expect(recs.map((r) => [r.type, r.id, r.sub])).toEqual([
             [0x302, 3, 94],
             [0x304, 3, 94],
+            [0x305, 3, 94], // lip-sync tracks of the non-looping sounds
             [0x302, 9, 94],
             [0x304, 9, 94],
+            [0x305, 9, 94],
         ]);
         // out of ids: the rest is skipped with a warning
         const few = convertPcSounds(new Map([[key, bank]]), { firstId: 1, groupId: 94, nextId: () => null });
@@ -216,7 +219,7 @@ describe('PS2 SDB writer', () => {
         const r = await SrscReader.fromBytes(bytes);
         expect(r.platform).toBe('ps2');
         expect(r.warnings).toEqual([]);
-        expect(r.entries.map((e) => e.type)).toEqual([0x300, 0x402, 0x307, 0x301, 0x302, 0x304, 0x302, 0x304]);
+        expect(r.entries.map((e) => e.type)).toEqual([0x300, 0x402, 0x307, 0x301, 0x302, 0x304, 0x302, 0x304, 0x305]);
         const d = r.find(0x302, 2000, 40)!;
         const desc = await r.readRaw(d);
         expect(parseSoundDescriptor(desc)).toMatchObject({ name: 'Wireloop_3', rate: 22050 });
@@ -267,7 +270,7 @@ describe('PS2 SDB writer', () => {
         const out = await appendToPs2Sdb(base, more.sounds, [more.group]);
         const r0 = await SrscReader.fromBytes(base);
         const r1 = await SrscReader.fromBytes(out);
-        expect(r1.entries.length).toBe(r0.entries.length + 3);
+        expect(r1.entries.length).toBe(r0.entries.length + 4); // 0x301 group, 0x302, 0x304, 0x305
         expect(r1.warnings).toEqual([]);
         for (const e of r0.entries) {
             const e1 = r1.find(e.type, e.id, e.sub)!;
@@ -324,5 +327,40 @@ describe('id map', () => {
     it('resamples by an integer ratio', () => {
         const out = resamplePcm(Int16Array.from([0, 100, 200, 300]), 44100, 22050);
         expect([...out]).toEqual([50, 250]);
+    });
+    it('writes a lip-sync track of first-half frame peaks for non-looping sounds', () => {
+        // 2.5 frames of 882 samples at 22050 Hz: loud first half of frame 0, quiet frame 1, silence after
+        const pcm = new Int16Array(2205);
+        pcm[100] = -20000;
+        pcm[600] = 30000; // second half of frame 0: not part of its value
+        pcm[882 + 10] = 1234;
+        const t = encodeLipSync(pcm, 22050);
+        const dv = new DataView(t.buffer);
+        expect([0, 4, 8, 12, 16].map((o) => dv.getUint32(o, true))).toEqual([0, 22050, 882, 95, 4]);
+        expect([0, 1, 2, 3].map((i) => dv.getUint16(20 + 2 * i, true))).toEqual([20000, 1234, 0, 0]);
+        expect(t.length).toBe(28);
+        expect(new DataView(encodeLipSync(new Int16Array(0), 22050).buffer).getUint32(16, true)).toBe(2);
+        const recs = ps2SoundEntries([
+            {
+                id: 7,
+                group: 1,
+                name: 'a',
+                flags: 2,
+                rate: 22050,
+                volume: 0,
+                dropoff: 15,
+                priority: 5,
+                pcm,
+                lipSync: true,
+            },
+            { id: 8, group: 1, name: 'b', flags: 0xa, rate: 22050, volume: 0, dropoff: 15, priority: 5, pcm },
+        ]);
+        expect(recs.map((r) => [r.type, r.id])).toEqual([
+            [0x302, 7],
+            [0x304, 7],
+            [0x305, 7],
+            [0x302, 8],
+            [0x304, 8],
+        ]);
     });
 });

@@ -316,6 +316,35 @@ export interface Ps2Sound {
     priority: number;
     /** Mono source samples. */
     pcm: Int16Array;
+    /** Also write the 0x0305 lip-sync track (`encodeLipSync`) so a speaking actor with a jaw channel moves its mouth. */
+    lipSync?: boolean;
+}
+
+/**
+ * The 0x0305 lip-sync track of a speech sample (PAL loader FUN_001b3f60): u32 0 (raw, not compressed), u32 rate, u32 step
+ * (rate / 25), u32 95 (skipped by the loader; the disc's value), u32 n, then n u16 mouth openings (25000 = the class's
+ * `Max Jaw Angle`, values above open further). Each value is the peak |sample| of the first half of its 1/25 s frame, which
+ * rebuilds the 757 disc tracks from their own samples within 1.9 % of full opening on average. The engine reads the track
+ * 2500 samples ahead and interpolates; the last entry is past the end (0, the mouth closes), and n is at least 2.
+ * docs/journal/2026-11-08/ootf-rynn-scenes.md.
+ */
+export function encodeLipSync(pcm: ArrayLike<number>, rate: number): Uint8Array {
+    const step = Math.max(1, Math.round(rate / 25));
+    const n = Math.max(2, Math.ceil(pcm.length / step) + 1);
+    const out = new Uint8Array(20 + 2 * n);
+    const dv = view(out);
+    dv.setUint32(0, 0, true);
+    dv.setUint32(4, rate, true);
+    dv.setUint32(8, step, true);
+    dv.setUint32(12, 95, true);
+    dv.setUint32(16, n, true);
+    const half = Math.max(1, step >> 1);
+    for (let i = 0; i < n; i++) {
+        let peak = 0;
+        for (let k = i * step; k < Math.min(pcm.length, i * step + half); k++) peak = Math.max(peak, Math.abs(pcm[k]!));
+        dv.setUint16(20 + 2 * i, Math.min(32767, peak), true);
+    }
+    return out;
 }
 
 export interface Ps2Group {
@@ -381,6 +410,7 @@ function soundRecords(sounds: readonly Ps2Sound[], groups: readonly Ps2Group[]):
         const adpcm = encodeSdbSamples(s.pcm);
         recs.push({ type: 0x302, id: s.id, sub: s.group, data: writePs2Descriptor(s, s.pcm.length * 2, adpcm.length) });
         recs.push({ type: 0x304, id: s.id, sub: s.group, data: adpcm });
+        if (s.lipSync) recs.push({ type: 0x305, id: s.id, sub: s.group, data: encodeLipSync(s.pcm, s.rate) });
     }
     return recs;
 }
@@ -639,6 +669,8 @@ export function convertPcSounds(
                 dropoff: Number.isFinite(pc.dropoff) ? pc.dropoff : 15,
                 priority: Math.min(10, pc.priority),
                 pcm,
+                // Speech is what the scenes and AI barks play on actors; a looped sound is never spoken.
+                lipSync: !loop,
             };
             sounds.push(sound);
             map.set(key, pc.id, next);

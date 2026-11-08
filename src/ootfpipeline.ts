@@ -47,7 +47,9 @@ import { planShellTrims } from './ootfshell.ts';
 import { convertStompPlayers, pcStompPlayer } from './ootfstomp.ts';
 import {
     convertPcSequences,
+    parsePcSequence,
     pcLevelFov,
+    skeletonChannelMap,
     sequenceSoundRefs,
     sequenceSsdStem,
     ssdPackFiles,
@@ -127,7 +129,10 @@ import {
 } from './ootfclassrefs.ts';
 import { CELL_SIZE, LVL_TYPE_LAYERS, parsePs2Terrain, terrainHeightAt } from './terrain.ts';
 import { odbStemForDependency } from './odb.ts';
-import { animName, parseSkeleton, writePs2Anim } from './ootfanim.ts';
+import { animName, parseSkeleton, writePs2Anim, type PcAnim, type Skeleton } from './ootfanim.ts';
+import { buildRig } from './skeleton.ts';
+import { MOD_CHARACTER } from './model.ts';
+import { SSD_SEQUENCE } from './resources.ts';
 import { chooseRetargetTarget, retargetCreature } from './ootfretarget.ts';
 
 /**
@@ -185,6 +190,15 @@ export interface OotfPs2Context {
      */
     mods?: ReadonlyMap<string, SrscReader>;
     adbs?: ReadonlyMap<string, SrscReader>;
+    /**
+     * The PS2 player's MOD / ADB (`SYSTEM.MOD` / `SYSTEM.ADB`, stem `playerStem`, default SYSTEM). Kept apart from `mods` / `adbs` so
+     * the player is never name-mapped or overridden; only the PC clips the converted scenes play on the player are retargeted onto
+     * its rig and added as NEW clips of its ADB (a sequence's animation ref resolves in the actor model's own ADB, and the PS2
+     * Rynn's is SYSTEM.ADB). Without them the player's scene clips cannot be resolved and Rynn slides through her scenes.
+     */
+    playerMod?: SrscReader;
+    playerAdb?: SrscReader;
+    playerStem?: string;
     /**
      * Own MOD / TXD of template ODBs that may host converted models (`LEVEL1ON`, `WORLDCON`, `FX`, `MOUNTAON`), by upper-case stem.
      * Classes cloned from those ODBs (doors, gates, switches, ladders, ropes, flames: no template with a model in the host ODB) get
@@ -537,6 +551,7 @@ export async function convertOotfLevels(
     const retargetNotes: string[] = [];
     // Planned class key -> source clips actually written for its compatible native target rig.
     const sequenceRetargetMaps = new Map<string, Map<number, number>>();
+    const player = playerClipBuilder(ps2);
     /** PC classes whose converted model is cloned instead of name-mapping them to a PS2 class with a foreign rig. */
     const convertOwn = new Set<OdbClass>();
 
@@ -1447,10 +1462,56 @@ export async function convertOotfLevels(
                             ? first.objects.objects.reduce((m, o) => Math.max(m, o.id), 0) + 1
                             : undefined;
                     if (syntheticPlayer !== undefined) heldPlayer.set(pc.path, syntheticPlayer);
-                    const conv = await convertPcSequences(await SrscReader.fromBytes(bytes), {
+                    const ssdReader = await SrscReader.fromBytes(bytes);
+                    // The player's scene clips, retargeted onto the PS2 player rig (new clips of its ADB), and its channel map.
+                    const playerId = actorId(9);
+                    const playerScene = await (async () => {
+                        const object = pc.list.objects.find(
+                            (o) => pc.classes.get(o.dbIndex)?.get(o.classId)?.rflClass === 9,
+                        );
+                        const cls = object && pc.classes.get(object.dbIndex)?.get(object.classId);
+                        const ow = cls && ownerOf.get(cls);
+                        if (playerId === undefined || !cls?.model || !ow || !player.rig) return null;
+                        const refs = new Set<number>();
+                        for (const e of ssdReader.entries) {
+                            if (e.type !== SSD_SEQUENCE || !g.ids.has(e.id)) continue;
+                            let seq;
+                            try {
+                                seq = parsePcSequence(e.id, e.sub, (await ssdReader.read(e)).data);
+                            } catch {
+                                continue;
+                            }
+                            for (const a of seq.actors) {
+                                const mapped = a.actorType === 1 ? first.objectIdMap.get(a.objectId) : undefined;
+                                if (mapped !== playerId && !(mapped === undefined && /^w?rynn$/i.test(a.name.trim())))
+                                    continue;
+                                for (const x of a.actions) {
+                                    if (x.type !== 1) continue;
+                                    const ref = new DataView(x.payload.buffer, x.payload.byteOffset).getUint32(4, true);
+                                    if (ref >>> 16 === 0) refs.add(ref);
+                                }
+                            }
+                        }
+                        const source = await builder.creatureSource(ow, cls.model.db, cls.model.id);
+                        const container = builder.resolveContainer(ow, cls.model.db);
+                        if (!source || !container) return null;
+                        const clips = await player.add(`${container}#${cls.model.id}`, source, refs);
+                        for (const w of clips.warnings) res.warnings.push(`sequences ${pc.path}: player clips: ${w}`);
+                        return { clips: clips.map, channels: player.channelMap(source.skeleton) };
+                    })();
+                    const conv = await convertPcSequences(ssdReader, {
                         maps: {
                             objectIdMap: first.objectIdMap,
+                            channelMapForActor: (_actor, targetId) =>
+                                targetId === playerId ? playerScene?.channels : undefined,
+                            // The PS2 Rynn class has a Jaw Channel: her speech gets the lip-sync bit (tracks: ootfsound.ts).
+                            lipSyncForActor: (_actor, targetId) => targetId === playerId,
                             animMapForActor: (actor, targetId) => {
+                                // The PS2 player is the PS2 Rynn whatever the PC class's model: its clips live in its own ADB.
+                                if (targetId === playerId && player.rig) {
+                                    const clips = playerScene?.clips;
+                                    return { get: (ref) => (ref >>> 16 === 0 ? clips?.get(ref & 0xffff) : undefined) };
+                                }
                                 // Prefer the explicit source identity, but only when it resolves to this target.
                                 // Assigned/current actors have no source object id; their fallback ids are supplied
                                 // by actorId() above and are actual mapped level object ids, not sentinel refs.
@@ -2146,7 +2207,101 @@ export async function convertOotfLevels(
         for (const w of textPlan.warnings.slice(0, 5)) res.warnings.push(`text: ${w}`);
     });
     Object.assign(res.files, ssdFiles);
+    Object.assign(res.files, await player.files());
     return res;
+}
+
+/**
+ * Retargets the PC clips converted scenes play on the player onto the PS2 player rig (`OotfPs2Context.playerMod`), as new
+ * clips of the player's ADB with fresh ids past its own (SYSTEM.ADB: 615 clips, ids up to 2306). The PC Rynn (33 joints) is a
+ * subset by name of the PS2 Rynn (65 joints: face, fingers and sheaths added), so every PC joint finds its PS2 joint; the
+ * extra joints keep their bind pose. A clip is converted once even when several levels play it.
+ */
+function playerClipBuilder(ps2: OotfPs2Context) {
+    const stem = (ps2.playerStem ?? 'SYSTEM').toUpperCase();
+    const mod = ps2.playerMod;
+    const adb = ps2.playerAdb;
+    let skeleton: Skeleton | null | undefined;
+    // The skeleton every Rynn of SYSTEM.MOD shares: the character record with root joint `wrynn` and the most joints.
+    const ps2Rig = async (): Promise<Skeleton | null> => {
+        if (skeleton !== undefined) return skeleton;
+        let best: Skeleton | null = null;
+        for (const e of mod?.entries ?? []) {
+            if (e.type !== MOD_CHARACTER) continue;
+            try {
+                const sk = parseSkeleton(await mod!.readRaw(e), 'ps2');
+                if (buildRig(sk, 0).names[0]?.toLowerCase() !== 'wrynn') continue;
+                if (!best || sk.joints.length > best.joints.length) best = sk;
+            } catch {
+                // not a character record of this layout
+            }
+        }
+        skeleton = best;
+        return skeleton;
+    };
+    let nextId = (adb?.entries ?? []).reduce((m, e) => (e.type === 0x0501 ? Math.max(m, e.id) : m), 0) + 1;
+    const done = new Map<string, number>();
+    const entries: { id: number; info: Uint8Array; data: Uint8Array }[] = [];
+    return {
+        get rig(): boolean {
+            return !!mod && !!adb;
+        },
+        /** PC channel -> PS2 channel by joint name (after `add`, which loads the PS2 rig). */
+        channelMap(pcSkeleton: Skeleton): Map<number, number> | undefined {
+            if (!skeleton) return undefined;
+            return skeletonChannelMap(pcSkeleton, buildRig(pcSkeleton, 0).names, skeleton, buildRig(skeleton, 0).names);
+        },
+        /** Convert (once per source model and clip) the given PC clip refs; returns PC clip id -> new player ADB id. */
+        async add(
+            sourceKey: string,
+            source: { skeleton: Skeleton; anims: Map<number, PcAnim> },
+            refs: ReadonlySet<number>,
+        ): Promise<{ map: Map<number, number>; warnings: string[] }> {
+            const map = new Map<number, number>();
+            const warnings: string[] = [];
+            const sk = await ps2Rig();
+            if (!sk || !adb) return { map, warnings: ['no PS2 player rig'] };
+            const todo = new Map<number, PcAnim>();
+            for (const ref of refs) {
+                const id = ref & 0xffff;
+                const have = done.get(`${sourceKey}|${id}`);
+                if (have !== undefined) map.set(id, have);
+                else if (source.anims.has(id)) todo.set(id, source.anims.get(id)!);
+                else warnings.push(`clip 0x${id.toString(16)} is not a clip of the PC player model`);
+            }
+            if (!todo.size) return { map, warnings };
+            const r = retargetCreature(source.skeleton, sk, todo);
+            for (const a of r.anims) {
+                const id = nextId++;
+                const w = writePs2Anim(a.anim);
+                entries.push({ id, info: w.info, data: w.data });
+                done.set(`${sourceKey}|${a.id}`, id);
+                map.set(a.id, id);
+            }
+            for (const x of r.skipped)
+                warnings.push(`clip 0x${x.id.toString(16)} (${x.name}) not retargeted: ${x.why}`);
+            return { map, warnings };
+        },
+        /** `new/<stem>.ADB/` clip entries and the ADB header override (clip count, highest id + 1). */
+        async files(): Promise<Record<string, Uint8Array>> {
+            const out: Record<string, Uint8Array> = {};
+            if (!adb || !entries.length) return out;
+            for (const e of entries) {
+                out[`new/${stem}.ADB/0501_${e.id}_0.bin`] = e.info;
+                out[`new/${stem}.ADB/0502_${e.id}_0.bin`] = e.data;
+            }
+            // 0x0500: u16 clip count, u16 ?, u16 highest id + 1 (SYSTEM.ADB 615 / 2307), as for the host ADB.
+            const hc = adb.entries.find((e) => e.type === 0x0500);
+            if (hc) {
+                const c = (await adb.readRaw(hc)).slice();
+                const dv = new DataView(c.buffer);
+                dv.setUint16(0, dv.getUint16(0, true) + entries.length, true);
+                dv.setUint16(4, Math.max(dv.getUint16(4, true), Math.max(...entries.map((e) => e.id)) + 1), true);
+                out[`overrides/${stem}.ADB/0500_${hc.id}_${hc.sub}.bin`] = c;
+            }
+            return out;
+        },
+    };
 }
 
 /** Make sure the level has Rynn, a Camera and Level Properties (the PC data lacks the last; MP maps may lack the others). */

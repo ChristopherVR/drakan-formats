@@ -17,6 +17,7 @@ import { latin1, view } from './bytes.ts';
 import { decodeFieldValue } from './fields.ts';
 import type { PcLevel } from './pc.ts';
 import type { SrscReader } from './srsc.ts';
+import type { Skeleton } from './ootfanim.ts';
 import { joinActions } from './story/ssdactions.ts';
 import { writeSequence, type SsdActor, type SsdSequence } from './story/ssd.ts';
 
@@ -134,6 +135,22 @@ export interface SequenceMaps {
     animMap?: RefLookup;
     /** Clip map verified for this actor's target rig. When supplied, no global animation map is used as fallback. */
     animMapForActor?: (actor: PcSeqActor, targetObjectId: number) => RefLookup | undefined;
+    /**
+     * PC skeleton channel -> PS2 skeleton channel of this actor's target rig (`skeletonChannelMap`), for actors whose PS2 model is
+     * another rig than the PC one (the player: the PS2 Rynn has 32 channels in another order than the PC Rynn's 20). The channel of
+     * an animation action (word 0) and the attach point of an attach action (word 1) index that list. Undefined keeps them.
+     */
+    channelMapForActor?: (actor: PcSeqActor, targetObjectId: number) => RefLookup | undefined;
+    /** Set per actor by convertActor from `channelMapForActor`. */
+    channelMap?: RefLookup;
+    /**
+     * Actors whose speech should move their jaw: their sound actions with the PC speech bit 0x10 get the PS2 lip-sync bit
+     * 0x20 (disc speech uses 0x38; FUN_001a4c50 sends message 0x31 to the actor, which binds the sample's 0x0305 track to
+     * its `Jaw Channel`). Only for actors whose PS2 class has a jaw channel (the player).
+     */
+    lipSyncForActor?: (actor: PcSeqActor, targetObjectId: number) => boolean;
+    /** Set per actor by convertActor from `lipSyncForActor`. */
+    lipSync?: boolean;
     /** PC sound ref `(db << 16) | id` -> final PS2 ref word (`(db << 16) | id` in the target SSD's `.DB` frame). */
     soundMap?: RefLookup;
     /** PC music id (first u32 of the music action; 0 = stop) -> PS2 music ref word (`(db << 16) | id`). */
@@ -414,9 +431,11 @@ function resolveObject(
 function convertActor(a: PcSeqActor, opts: SequenceConvertOptions, report: SequenceReport): ActorOutcome {
     const target = resolveObject(a, opts);
     if (!target) return { actor: null };
-    const actionOptions = opts.maps.animMapForActor
-        ? { ...opts, maps: { ...opts.maps, animMap: opts.maps.animMapForActor(a, target.ref) } }
-        : opts;
+    const maps = { ...opts.maps };
+    if (opts.maps.animMapForActor) maps.animMap = opts.maps.animMapForActor(a, target.ref);
+    maps.channelMap = opts.maps.channelMapForActor?.(a, target.ref);
+    maps.lipSync = opts.maps.lipSyncForActor?.(a, target.ref) ?? false;
+    const actionOptions = { ...opts, maps };
     const chunks: Uint8Array[] = [];
     const sorted = a.actions.map((x, i) => ({ x, i })).sort((p, q) => p.x.time - q.x.time || p.i - q.i);
     const isCamera = target.special === 'camera';
@@ -454,6 +473,45 @@ function convertActor(a: PcSeqActor, opts: SequenceConvertOptions, report: Seque
 
 const lookup = (m: RefLookup | undefined, k: number): number | undefined => m?.get(k >>> 0);
 
+/** Rewrite the channel word at `at` through the actor's channel map (kept, with a warning, when the map has no entry). */
+function remapChannel(out: Uint8Array, at: number, opts: SequenceConvertOptions, report: SequenceReport): void {
+    const m = opts.maps.channelMap;
+    if (!m) return;
+    const dv = view(out);
+    const pc = dv.getUint32(at, true);
+    const ps2 = m.get(pc);
+    if (ps2 !== undefined) dv.setUint32(at, ps2 >>> 0, true);
+    else {
+        const warning = `channel ${pc}: no channel on the same joint of the PS2 rig (kept)`;
+        if (!report.warnings.includes(warning)) report.warnings.push(warning);
+    }
+}
+
+/**
+ * PC channel index -> PS2 channel index of the channel on the joint of the same name. A skeleton's channels are its animation
+ * channels and attach points; sequences address them by index, and the two Rynns list them differently: PC channel 4 is
+ * `Rweapon` (the sword attach of the Ruined Village opening) but PS2 channel 4 is `head` (PS2 `Rweapon` is channel 21, the
+ * disc's sword attaches use 21), PC channel 2 (`neck`, the talk clips) is PS2 channel 3. Joints are compared case-insensitively.
+ */
+export function skeletonChannelMap(
+    from: Pick<Skeleton, 'channels'>,
+    fromJointNames: readonly string[],
+    to: Pick<Skeleton, 'channels'>,
+    toJointNames: readonly string[],
+): Map<number, number> {
+    const byName = new Map<string, number>();
+    to.channels.forEach((c, i) => {
+        const n = toJointNames[c.joint]?.toLowerCase();
+        if (n !== undefined && !byName.has(n)) byName.set(n, i);
+    });
+    const out = new Map<number, number>();
+    from.channels.forEach((c, i) => {
+        const j = byName.get(fromJointNames[c.joint]?.toLowerCase() ?? '');
+        if (j !== undefined) out.set(i, j);
+    });
+    return out;
+}
+
 /** One PC action -> PS2 bytes, or null when a referenced resource has no PS2 counterpart. */
 export function convertAction(x: PcAction, opts: SequenceConvertOptions, report: SequenceReport): Uint8Array | null {
     const p = view(x.payload);
@@ -479,6 +537,7 @@ export function convertAction(x: PcAction, opts: SequenceConvertOptions, report:
             const out = pcBytes(1, x.time, 24);
             out.set(x.payload, 6);
             view(out).setUint32(10, ref >>> 0, true);
+            remapChannel(out, 6, opts, report);
             return out;
         }
         case 3: {
@@ -489,12 +548,15 @@ export function convertAction(x: PcAction, opts: SequenceConvertOptions, report:
             const dv = view(out);
             dv.setUint32(6, ref >>> 0, true);
             dv.setUint16(10, p.getUint16(8, true), true);
-            dv.setUint16(12, p.getUint16(10, true), true);
+            const flags = p.getUint16(10, true);
+            dv.setUint16(12, opts.maps.lipSync && flags & 0x10 ? flags | 0x20 : flags, true);
             return out;
         }
         case 4: {
+            // attach (actor slot, attach point = channel of THIS actor's skeleton; slot 0 detaches)
             const out = pcBytes(4, x.time, 8);
             out.set(x.payload, 6);
+            remapChannel(out, 10, opts, report);
             return out;
         }
         case 5: {

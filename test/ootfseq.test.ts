@@ -11,6 +11,7 @@ import {
     pcLevelFov,
     PC_DEFAULT_FOV,
     remapSequenceRefs,
+    skeletonChannelMap,
     ssdEntryPath,
     sequenceSoundRefs,
     type PcSeqActor,
@@ -292,6 +293,100 @@ describe('ootfseq', () => {
                         .fields.find((f) => f.name === 'animation')!.value,
             ),
         ).toEqual([601, 602]);
+    });
+
+    it('maps skeleton channels by joint name', () => {
+        // PC Rynn order: wrynn, upperbody, neck, Lweapon, Rweapon; PS2 Rynn: wrynn, upperbody, torso, neck, head, ..., Rweapon.
+        const pc = { channels: [0, 1, 4, 13, 18].map((joint) => ({ joint, caps: [] })) };
+        const pcNames: string[] = [];
+        Object.assign(pcNames, { 0: 'wrynn', 1: 'upperbody', 4: 'neck', 13: 'Lweapon', 18: 'Rweapon' });
+        const ps2 = { channels: [0, 1, 2, 4, 5, 37].map((joint) => ({ joint, caps: [] })) };
+        const ps2Names: string[] = [];
+        Object.assign(ps2Names, { 0: 'wrynn', 1: 'upperbody', 2: 'torso', 4: 'neck', 5: 'head', 37: 'RWEAPON' });
+        expect([...skeletonChannelMap(pc, pcNames, ps2, ps2Names)]).toEqual([
+            [0, 0],
+            [1, 1],
+            [2, 3],
+            [4, 5],
+        ]);
+    });
+
+    it('remaps animation channels and attach points of an actor on another rig', async () => {
+        const bytes = w(
+            str('Draw'),
+            u32(126),
+            u32(0),
+            u32(3),
+            u32(2),
+            actor('Rynn', 1, 1740, [
+                act(1, 0, [...u32(2), ...u32(7), ...f32(0), ...f32(0.85), ...f32(1), ...u32(0)]),
+                act(4, 1, [...u32(2), ...u32(4)]),
+                act(4, 2, [...u32(0), ...u32(9)]),
+            ]),
+            actor('Delon', 2, 1841, [act(4, 1, [...u32(1), ...u32(4)])]),
+        );
+        const result = await convertPcSequences(stub(bytes), {
+            maps: {
+                objectIdMap: new Map([
+                    [1740, 42],
+                    [1841, 43],
+                ]),
+                animMapForActor: () => new Map([[7, 2400]]),
+                channelMapForActor: (_a, target) =>
+                    target === 42
+                        ? new Map([
+                              [2, 3],
+                              [4, 21],
+                          ])
+                        : undefined,
+            },
+            playerObjectId: 42,
+            usedIds: new Set(),
+        });
+        const entry = result.entries.find((e) => e.type === 0x311)!;
+        const seq = parseSequence(entry.id, entry.sub, entry.data)!;
+        const words = (a: (typeof seq.actors)[number]) =>
+            parseActions(a)!.map((x) => x.fields.slice(0, 2).map((f) => f.value));
+        // channel 2 -> 3 (neck), attach point 4 -> 21 (Rweapon); an unmapped channel is kept and reported
+        expect(words(seq.actors[0]!)).toEqual([
+            [3, 2400],
+            [2, 21],
+            [0, 9],
+        ]);
+        expect(result.report.warnings).toContain('channel 9: no channel on the same joint of the PS2 rig (kept)');
+        // an actor without a channel map (own converted rig) keeps the PC attach point
+        expect(words(seq.actors[1]!)).toEqual([[1, 4]]);
+    });
+
+    it('sets the lip-sync bit on the speech of lip-synced actors only', async () => {
+        const speech = act(3, 1, [...u32(0x13f), ...f32(6.2), ...u16(10000), ...u16(0x10)]);
+        const step = act(3, 2, [...u32(0x7d), ...f32(0.3), ...u16(6000), ...u16(0)]);
+        const bytes = w(
+            str('Talk'),
+            u32(126),
+            u32(0),
+            u32(3),
+            u32(2),
+            actor('Rynn', 1, 1740, [speech, step]),
+            actor('Delon', 2, 1841, [speech]),
+        );
+        const result = await convertPcSequences(stub(bytes), {
+            maps: {
+                objectIdMap: new Map([
+                    [1740, 42],
+                    [1841, 43],
+                ]),
+                soundMap: { get: (r) => r },
+                lipSyncForActor: (_a, target) => target === 42,
+            },
+            usedIds: new Set(),
+        });
+        const entry = result.entries.find((e) => e.type === 0x311)!;
+        const seq = parseSequence(entry.id, entry.sub, entry.data)!;
+        const flags = (a: (typeof seq.actors)[number]) =>
+            parseActions(a)!.map((x) => x.fields.find((f) => f.name === 'params')!.value >>> 16);
+        expect(flags(seq.actors[0]!)).toEqual([0x30, 0]);
+        expect(flags(seq.actors[1]!)).toEqual([0x10]);
     });
 
     it('allocates holes below the maximum first and builds pack paths', () => {
