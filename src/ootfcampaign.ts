@@ -102,11 +102,12 @@ export const CAMPAIGN_TITLE_MAX = 60;
  * after the last scene, which reads as a freeze before the next level loads.
  */
 export const INTRO_SECONDS = 41.4;
+/** The Book's backstory scene plays unless OOTF_BOOK_SCENE=0 (then the level is a 28 s empty stop). */
 const bookScene = (): boolean =>
-    (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_BOOK_SCENE'] === '1';
-/** Length of the Book's narration sequence ("The Book", 25.7 s) plus a short margin. */
+    (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_BOOK_SCENE'] !== '0';
+/** Length of the Book's narration sequence ("The Book", 25.7 s) plus a short margin (backstory off: OOTF_BOOK_SCENE=0). */
 export const BOOK_SECONDS = 28;
-/** Same with the backstory scene on (OOTF_BOOK_SCENE=1): its last fader message is at 250.5 s. */
+/** Length of the Book with its backstory scene (the default): its last fader message is at 250.5 s. */
 export const BOOK_SCENE_SECONDS = 250.7;
 
 export interface CampaignLevel {

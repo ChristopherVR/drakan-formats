@@ -1,7 +1,7 @@
 // Synthetic fixtures only (no game bytes): a localized (German) Order of the Flame install, issue #3.
 import { describe, expect, it } from 'vitest';
 import {
-    BOOK_SECONDS,
+    BOOK_SCENE_SECONDS,
     CAMPAIGN_TITLE_MAX,
     FIELD_INT,
     FIELD_STRING,
@@ -249,7 +249,7 @@ describe('planCampaign on a German install', () => {
     });
     it('finds the Book cut-scene and the first level by name id, not by English names', () => {
         const book = plan.levels.find((l) => l.nameStringId === 0x9001)!;
-        expect(book.exits.find((e) => e.reason === 'pc')!.autoSeconds).toBe(BOOK_SECONDS);
+        expect(book.exits.find((e) => e.reason === 'pc')!.autoSeconds).toBe(BOOK_SCENE_SECONDS);
         const intro = plan.levels[0]!;
         expect(intro.exits.find((e) => e.reason === 'intro-next')!.destTitle).toBe('OotF 01 - Ruinendorf');
     });

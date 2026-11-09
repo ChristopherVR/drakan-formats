@@ -188,12 +188,11 @@ import {
 /** Levels whose own sequence the PC engine plays at the load (the Ruined Village Book's "backstory"). */
 const AUTO_PLAY_LEVEL = /ruined village book\.lvl$/i;
 /**
- * Opt-in (OOTF_BOOK_SCENE=1): the Book's backstory plays and ends the level (BOOK_SCENE_SECONDS). The sequence runs and the
- * paintings change, but the game draws its 3D view into a thin strip at the bottom of the frame while it plays (the rest keeps the
- * dimmed frame of the previous level), so it stays off until that is understood (journal 2026-11-09/ootf-book-scene.md).
+ * The Book's backstory plays and ends the level (BOOK_SCENE_SECONDS); OOTF_BOOK_SCENE=0 leaves it out. The thin strip it once
+ * showed was the runtime's loading-screen hold, not the level (journal 2026-11-09/ootf-book-scene.md).
  */
 const bookSceneOn = (): boolean =>
-    (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_BOOK_SCENE'] === '1';
+    (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_BOOK_SCENE'] !== '0';
 export const OOTF_COMMON_STEM = 'OOTFCOM';
 const COMMON_DIR = 'files/ENGLISH/COMMON/OOTFCOM';
 const COMMON_DEP = 'Common\\OotFCom\\OotFCom';
@@ -1953,6 +1952,8 @@ export async function convertOotfLevels(
                         cameraObjectId: actorId(27),
                         cameraFov: pcLevelFov(pc),
                         holdPlayerObjectId: syntheticPlayer,
+                        // the Book's backstory holds Rynn and the camera to the level's end, then hands back to Ruined Village
+                        releaseHeldAtEnd: isAutoPlayLevel(pc),
                         playerGround,
                         rewrite: (seq) => carry(cull ? cull(seq) : seq),
                         usedIds: used,

@@ -442,6 +442,52 @@ describe('ootfseq', () => {
         expect((await attaches(undefined)).map((x) => x[1])).toEqual([2, 4, 0]);
     });
 
+    it('releases the actors a level-ending scene still holds when asked to', async () => {
+        // The Book's backstory: camera and Rynn held at t = 0, never released (the PC level ends there); a fader runs last.
+        const bytes = w(
+            str('backstory'),
+            u32(124),
+            u32(0),
+            u32(4),
+            u32(3),
+            actor('camera', 1, 2416, [act(5, 0, [...u32(0)])]),
+            actor('Rynn', 2, 2417, [act(5, 0, [...u32(0)])]),
+            actor('Fader 2', 3, 2427, [act(7, 250.5, [...u32(4097), ...u32(0)])]),
+        );
+        const runs = async (release: boolean | undefined) => {
+            const result = await convertPcSequences(stub(bytes), {
+                maps: {
+                    objectIdMap: new Map([
+                        [2416, 10],
+                        [2417, 11],
+                        [2427, 12],
+                    ]),
+                },
+                releaseHeldAtEnd: release,
+                usedIds: new Set(),
+            });
+            const entry = result.entries.find((e) => e.type === 0x311)!;
+            const seq = parseSequence(entry.id, entry.sub, entry.data)!;
+            return seq.actors.map((a) =>
+                parseActions(a)!
+                    .filter((x) => x.type === 5)
+                    .map((x) => [Math.round(x.time * 10) / 10, x.fields[0]!.value]),
+            );
+        };
+        expect(await runs(true)).toEqual([
+            [
+                [0, 0],
+                [250.5, 1],
+            ],
+            [
+                [0, 0],
+                [250.5, 1],
+            ],
+            [],
+        ]);
+        expect((await runs(undefined)).map((r) => r.length)).toEqual([1, 1, 0]);
+    });
+
     it('sets the lip-sync bit on the speech of lip-synced actors only', async () => {
         const speech = act(3, 1, [...u32(0x13f), ...f32(6.2), ...u16(10000), ...u16(0x10)]);
         const step = act(3, 2, [...u32(0x7d), ...f32(0.3), ...u16(6000), ...u16(0)]);

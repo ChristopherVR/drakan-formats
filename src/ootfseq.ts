@@ -204,6 +204,13 @@ export interface SequenceConvertOptions {
      * orbs draw over the whole Intro.
      */
     holdPlayerObjectId?: number;
+    /**
+     * A scene that the PC engine plays to the level's end (the Ruined Village Book's "backstory"): it holds the camera and
+     * the player at t = 0 and never gives them back, because the PC level ends there. The PS2 engine carries the held player
+     * into the next level (the hand-back to Ruined Village came up with no HUD, no control and Rynn unlit), so every actor still
+     * held at the end gets a release (run/stop 1) at the time of the scene's last action. See `releaseHeldActors`.
+     */
+    releaseHeldAtEnd?: boolean;
     /** Rewrites each parsed PC scene before it is converted (the Intro's culling show / hide timelines, `ootfcull.ts`). */
     rewrite?: (seq: PcSequence) => PcSequence;
 }
@@ -418,6 +425,7 @@ export function convertSequence(seq: PcSequence, opts: SequenceConvertOptions, r
         report.actionsOut += j.actionCount;
     }
     if (held) report.actionsOut += detachHeldPlayer(actors, held.slot);
+    if (opts.releaseHeldAtEnd) report.actionsOut += releaseHeldActors(actors);
     const slots = actors.reduce((m, a) => Math.max(m, a.slot + 1), 1);
     const s: SsdSequence = {
         id: 0,
@@ -469,6 +477,26 @@ function detachHeldPlayer(actors: SsdActor[], playerSlot: number): number {
         const j = insertAction(e.parent, newActionBytes(4, end, { a: 0, b: e.point }));
         e.parent.actions = j.actions;
         e.parent.actionCount = j.actionCount;
+        added++;
+    }
+    return added;
+}
+
+/**
+ * Gives back every actor whose last run/stop action holds it (value 0): one run/stop 1 at the time of the scene's last action,
+ * as the disc's scenes end ("0 at the start, 1 at the end"). Returns the number of actions added.
+ */
+export function releaseHeldActors(actors: SsdActor[]): number {
+    let end = 0;
+    for (const a of actors) for (const x of parseActions(a) ?? []) end = Math.max(end, x.time);
+    let added = 0;
+    for (const a of actors) {
+        const runs = (parseActions(a) ?? []).filter((x) => x.type === 5);
+        const last = runs[runs.length - 1];
+        if (!last || actionField(last, 'value') !== 0) continue;
+        const j = insertAction(a, newActionBytes(5, end, { value: 1 }));
+        a.actions = j.actions;
+        a.actionCount = j.actionCount;
         added++;
     }
     return added;
