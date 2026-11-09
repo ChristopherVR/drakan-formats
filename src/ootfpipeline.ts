@@ -57,6 +57,7 @@ import {
     skeletonChannelMap,
     sequenceSoundRefs,
     sequenceSsdStem,
+    unplayedSceneActors,
     ssdPackFiles,
     usedIdsOf,
 } from './ootfseq.ts';
@@ -110,6 +111,7 @@ import {
 import { writePs2Srsc, type Ps2Entry } from './ootfcontainer.ts';
 import {
     ENGINE_CLASSES,
+    FADER_RFL,
     PS2_SUBSTITUTES,
     aliasSquash,
     buildClassEntries,
@@ -1684,6 +1686,8 @@ export async function convertOotfLevels(
                 paramAlias: pcParamAlias,
                 name: title,
             });
+        // Sequences (`<container>|<id>`) a Stomp Player of this level plays after the conversion below.
+        const playedSequences = new Set<string>();
         let parts = await stage(`convert ${pc.path}`, async () => convertOnce());
         if (parts && opt.sequences !== false) {
             // Sequences need the final object ids, so convert once, convert the sequences, then convert again with their refs.
@@ -1712,6 +1716,7 @@ export async function convertOotfLevels(
                         );
                         continue;
                     }
+                    for (const id of g.ids) playedSequences.add(`${(c ?? '').toLowerCase()}|${id}`);
                     const used = ssdUsed.get(g.stem) ?? ssdUsed.set(g.stem, usedIdsOf(ssd)).get(g.stem)!;
                     const actorId = (engineClass: number): number | undefined => {
                         const object = pc.list.objects.find(
@@ -1946,6 +1951,46 @@ export async function convertOotfLevels(
             parts = again ?? first;
         }
         if (!parts) continue;
+        if (opt.sequences !== false) {
+            // Faders that only an unconverted cut scene starts (the Ruined Village Book's backstory) would run on their own.
+            const faders = new Set(
+                pc.list.objects
+                    .filter((o) => {
+                        const k = pc.classes.get(o.dbIndex)?.get(o.classId);
+                        return k?.rflClass === FADER_RFL && !k.model;
+                    })
+                    .map((o) => o.id),
+            );
+            if (faders.size) {
+                const seqs: { key: string; seq: PcSequence }[] = [];
+                for (const db of pc.odbPaths.keys()) {
+                    const ow = owner(pc, db);
+                    const bytes = ow ? await src.read(`${ow}.ssd`) : null;
+                    if (!ow || !bytes) continue;
+                    const reader = await SrscReader.fromBytes(bytes);
+                    for (const e of reader.entries) {
+                        if (e.type !== SSD_SEQUENCE) continue;
+                        try {
+                            seqs.push({
+                                key: `${ow.toLowerCase()}|${e.id}`,
+                                seq: parsePcSequence(e.id, e.sub, (await reader.read(e)).data),
+                            });
+                        } catch {
+                            // an unreadable sequence plays nothing either way
+                        }
+                    }
+                }
+                const unplayed = unplayedSceneActors(seqs, playedSequences, faders);
+                if (unplayed.size) {
+                    const gone = new Set([...unplayed].map((id) => parts!.objectIdMap.get(id) ?? id));
+                    parts = {
+                        ...parts,
+                        objects: { ...parts.objects, objects: parts.objects.objects.filter((o) => !gone.has(o.id)) },
+                    };
+                    log(`${pc.path}: ${unplayed.size} scene fader(s) of unconverted sequences left out`);
+                }
+            }
+        }
         if (opt.singletons !== false) {
             await stage(`singletons ${pc.path}`, async () => {
                 ensureSingletons(parts, pc, tplList.objects, classes);

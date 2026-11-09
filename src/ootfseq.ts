@@ -799,3 +799,26 @@ export function remapSequenceRefs(
     if (typeof value === 'number') return one(value) ?? 0;
     return value.map(one).filter((v): v is number => v !== undefined);
 }
+
+/**
+ * Level objects that only a cut scene we do not convert would start. The Ruined Village Book's two Faders are actors of its
+ * 250 s "backstory" sequence (a black fade-in at the start, a hold-until-trigger fade to black at the end); no Stomp Player of
+ * the level plays that sequence, so the PS2 never starts the first and the second held the whole screen black from the load on.
+ * Returns the ids from `candidates` (the level's model-less Faders) that are actors of an unplayed sequence and of no played
+ * one. `sequences` pairs each PC sequence with a key (`<container>|<sequence id>`) that `played` may contain.
+ */
+export function unplayedSceneActors(
+    sequences: readonly { key: string; seq: PcSequence }[],
+    played: ReadonlySet<string>,
+    candidates: ReadonlySet<number>,
+): Set<number> {
+    const unplayed = new Set<number>();
+    const playedActors = new Set<number>();
+    for (const { key, seq } of sequences)
+        for (const a of seq.actors) {
+            if (a.actorType !== 1 || !candidates.has(a.objectId)) continue;
+            (played.has(key) ? playedActors : unplayed).add(a.objectId);
+        }
+    for (const id of playedActors) unplayed.delete(id);
+    return unplayed;
+}
