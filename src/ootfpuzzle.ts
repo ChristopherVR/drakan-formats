@@ -634,3 +634,37 @@ export function applyPuzzleLogic(env: PuzzleEnv): PuzzleReport {
     for (const o of env.list.objects) if (o.links.some((l) => !ids.has(l))) o.links = o.links.filter((l) => ids.has(l));
     return rep;
 }
+
+/**
+ * A Stomp Player that starts the given converted sequences at the level load (Initial State On: the PS2 player arms itself and
+ * plays its list in order). The Ruined Village Book has no player of its own in the PC level: the PC engine plays its
+ * "backstory" sequence itself. Returns the new object's id, or null when the class has no usable fields.
+ */
+export function addAutoPlayStomp(
+    list: LvlObjectList,
+    classOf: (o: LvlObject) => OdbClass | undefined,
+    player: PuzzleClassRef,
+    refs: readonly number[],
+    pos: Vec3,
+    warnings: string[],
+    title: string,
+): number | null {
+    if (!refs.length) return null;
+    const { object } = addObject(list, { classId: player.classId, dbIndex: player.dbIndex, pos, rot: [0, 0, 0] });
+    object.flags = FLAG_VISIBLE;
+    object.scale = null;
+    object.links = [];
+    const pf = classOf(object)?.fields;
+    const specs: ParamSpec[] = [];
+    const field = (name: string, value: number | number[]): void => {
+        const i = fieldIndexByName(pf, name);
+        if (i >= 0) specs.push({ fieldIndex: i, type: pf![i]!.type, name: pf![i]!.name, value });
+        else warnings.push(`${title}: Stomp Player class has no field "${name}"`);
+    };
+    field('Sequence List', [...refs]);
+    field('List Play Order', 0);
+    field('Initial State', 1);
+    setObjectParams(list, object.id, specs);
+    return object.id;
+}
+

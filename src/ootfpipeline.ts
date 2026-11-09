@@ -91,7 +91,7 @@ import {
     pcInterfaceMusic,
 } from './ootfmusic.ts';
 import { buildOotfMusicPack, type OotfMusicPack } from './ootfdmusic.ts';
-import { applyPuzzleLogic, relayDetectorSequences } from './ootfpuzzle.ts';
+import { addAutoPlayStomp, applyPuzzleLogic, relayDetectorSequences } from './ootfpuzzle.ts';
 import { encodePs2Texture, type Ps2TextureOptions, type TextureMode } from './ootftex.ts';
 import { TextPlan, isTextField, parseRrcStrings, rewriteClassTextDefaults, rewriteObjectTexts } from './ootftext.ts';
 import {
@@ -185,6 +185,15 @@ import {
  */
 
 /** Directory-less name of the shared asset container ("Common\OotFCom\OotFCom" on the virtual disc). */
+/** Levels whose own sequence the PC engine plays at the load (the Ruined Village Book's "backstory"). */
+const AUTO_PLAY_LEVEL = /ruined village book\.lvl$/i;
+/**
+ * Opt-in (OOTF_BOOK_SCENE=1): the Book's backstory plays and ends the level (BOOK_SCENE_SECONDS). The sequence runs and the
+ * paintings change, but the game draws its 3D view into a thin strip at the bottom of the frame while it plays (the rest keeps the
+ * dimmed frame of the previous level), so it stays off until that is understood (journal 2026-11-09/ootf-book-scene.md).
+ */
+const bookSceneOn = (): boolean =>
+    (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_BOOK_SCENE'] === '1';
 export const OOTF_COMMON_STEM = 'OOTFCOM';
 const COMMON_DIR = 'files/ENGLISH/COMMON/OOTFCOM';
 const COMMON_DEP = 'Common\\OotFCom\\OotFCom';
@@ -1373,6 +1382,9 @@ export async function convertOotfLevels(
         ref: number;
         target: ClassTarget | null;
     }
+    /** Levels whose own sequence the PC engine starts at the load (no Stomp Player in the level). */
+    const isAutoPlayLevel = (pc: PcLevel): boolean => bookSceneOn() && AUTO_PLAY_LEVEL.test(pc.path);
+    const sequencePlayerTarget = (): ClassTarget | null => sequencePlayer?.t ?? null;
     const scan = async (pc: PcLevel, kind: ResourceKind): Promise<Need[]> => {
         const out: Need[] = [];
         const resolve = resolverFor(pc);
@@ -1394,6 +1406,18 @@ export async function convertOotfLevels(
                 await builder.registerOwner(ow);
                 for (const v of stomp.sequences)
                     out.push({ owner: ow, ref: v, target: resolve?.(o.dbIndex, o.classId) ?? null });
+            }
+        }
+        // The Ruined Village Book has no Stomp Player: the PC engine plays the level's own "backstory" sequence. Name it here
+        // so it converts like a listed one; autoPlayBookScene below starts it.
+        if (kind === 'sequence' && sequencePlayerTarget && isAutoPlayLevel(pc)) {
+            for (const [db] of pc.odbPaths) {
+                const ow = owner(pc, db);
+                const bytes = ow ? await src.read(`${ow}.ssd`) : null;
+                if (!ow || !bytes) continue;
+                await builder.registerOwner(ow);
+                for (const e of (await SrscReader.fromBytes(bytes)).entries)
+                    if (e.type === SSD_SEQUENCE) out.push({ owner: ow, ref: e.id, target: sequencePlayerTarget() });
             }
         }
         return out;
@@ -2152,6 +2176,20 @@ export async function convertOotfLevels(
                     warnings: res.warnings,
                 });
                 if (n) console.warn(`sequences ${title}: ${n} detector scene(s) given a Stomp Player`);
+                if (isAutoPlayLevel(pc)) {
+                    const refs = [...seqIds].filter(([k]) => k.startsWith(`${pc.path}|`)).map(([, v]) => v);
+                    const cam = lvl.objects.objects.find((o) => classOf(o)?.rflClass === 27);
+                    const id = addAutoPlayStomp(
+                        lvl.objects,
+                        classOf,
+                        { dbIndex: sequencePlayer.t.dbIndex, classId: sequencePlayer.t.classId },
+                        refs,
+                        cam ? ([...cam.pos] as [number, number, number]) : [0, 0, 0],
+                        res.warnings,
+                        title,
+                    );
+                    if (id !== null) console.warn(`sequences ${title}: ${refs.length} own sequence(s) started by Stomp Player ${id}`);
+                }
             });
         }
         const cl = plan0?.byPath.get(normalizeLevelRef(pc.path));
