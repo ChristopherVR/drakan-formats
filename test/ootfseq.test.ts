@@ -383,6 +383,65 @@ describe('ootfseq', () => {
         ]);
     });
 
+    it('ends a held scene with the player detached from the actor that carries her', async () => {
+        // Intro 3: the dragon puts Rynn (slot 2) on its point 19 at t = 0 and the level ends with her there; a gull is
+        // attached and detached again on another point and must be left alone.
+        const bytes = w(
+            str('Intro 3'),
+            u32(126),
+            u32(0),
+            u32(4),
+            u32(2),
+            actor('Rynn', 2, 2853, [act(1, 0, [...u32(0), ...u32(7), ...f32(0), ...f32(0.85), ...f32(1), ...u32(0)])]),
+            actor('Aroch', 3, 2852, [
+                act(4, 0, [...u32(2), ...u32(19)]),
+                act(4, 1, [...u32(4), ...u32(5)]),
+                act(4, 2, [...u32(0), ...u32(5)]),
+                act(0, 13.34, [
+                    ...f32(0),
+                    ...f32(0),
+                    ...f32(0),
+                    ...f32(1),
+                    ...f32(1),
+                    ...f32(2),
+                    ...f32(3),
+                    ...u32(0),
+                    ...u32(0x10),
+                ]),
+            ]),
+        );
+        const convert = (hold: number | undefined) =>
+            convertPcSequences(stub(bytes), {
+                maps: {
+                    objectIdMap: new Map([
+                        [2853, 77],
+                        [2852, 88],
+                    ]),
+                    animMapForActor: () => new Map([[7, 2400]]),
+                },
+                playerObjectId: 77,
+                holdPlayerObjectId: hold,
+                usedIds: new Set(),
+            });
+        const attaches = async (hold: number | undefined) => {
+            const result = await convert(hold);
+            const entry = result.entries.find((e) => e.type === 0x311)!;
+            const seq = parseSequence(entry.id, entry.sub, entry.data)!;
+            const dragon = seq.actors.find((a) => a.ref === 88)!;
+            return parseActions(dragon)!
+                .filter((x) => x.type === 4)
+                .map((x) => [x.time, ...x.fields.map((f) => f.value)].map((v) => Math.round(v * 100) / 100));
+        };
+        expect(await attaches(77)).toEqual([
+            [0, 2, 19],
+            [1, 4, 5],
+            [2, 0, 5],
+            [13.34, 0, 19], // the detach, at the scene's last action
+        ]);
+        // a scene that hands the player back (no held player) keeps her on the saddle
+        expect((await attaches(undefined)).map((x) => x[1])).toEqual([2, 4, 0]);
+    });
+
     it('sets the lip-sync bit on the speech of lip-synced actors only', async () => {
         const speech = act(3, 1, [...u32(0x13f), ...f32(6.2), ...u16(10000), ...u16(0x10)]);
         const step = act(3, 2, [...u32(0x7d), ...f32(0.3), ...u16(6000), ...u16(0)]);

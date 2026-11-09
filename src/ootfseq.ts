@@ -18,7 +18,7 @@ import { decodeFieldValue } from './fields.ts';
 import type { PcLevel } from './pc.ts';
 import type { SrscReader } from './srsc.ts';
 import type { Skeleton } from './ootfanim.ts';
-import { joinActions, parseActions } from './story/ssdactions.ts';
+import { actionField, insertAction, joinActions, newActionBytes, parseActions } from './story/ssdactions.ts';
 import { writeSequence, type SsdActor, type SsdSequence } from './story/ssd.ts';
 
 import { SSD_SEQUENCE } from './resources.ts';
@@ -417,6 +417,7 @@ export function convertSequence(seq: PcSequence, opts: SequenceConvertOptions, r
         report.actorsOut++;
         report.actionsOut += j.actionCount;
     }
+    if (held) report.actionsOut += detachHeldPlayer(actors, held.slot);
     const slots = actors.reduce((m, a) => Math.max(m, a.slot + 1), 1);
     const s: SsdSequence = {
         id: 0,
@@ -429,6 +430,48 @@ export function convertSequence(seq: PcSequence, opts: SequenceConvertOptions, r
         actors,
     };
     return writeSequence(s);
+}
+
+/**
+ * Ends the scene with the held player detached from every actor that still carries her (an attach action with actor slot 0 on
+ * the same point, at the time of the scene's last action). The Intro's last scene ("Intro 3") puts Rynn on Arokh's saddle
+ * (PC point 19) and the level ends with her there. The PS2 engine keeps the "attached" bit of the player's handle (`+4`, bit
+ * 0x80, set by the model attach `0x103af0` and cleared only by the detach `0x103df0`) through the level change, and the hair
+ * simulation of an attached object only runs from its parent's attachment pass (`0x1042c8`): the skinning pass (`0x116990`)
+ * skips `0x11d368` while that bit is set. With no parent in the next level, the ponytail's simulated vertices were drawn from
+ * the raw rest positions for the rest of the level: a long bar standing out behind her head in Ruined Village scene 1.1, its
+ * crouch and lunge. Only held players: a scene that releases the player keeps her mounted (the Islands and Volcano scenes
+ * hand her over on Arokh). Returns the number of actions added.
+ */
+function detachHeldPlayer(actors: SsdActor[], playerSlot: number): number {
+    const events: { parent: SsdActor; time: number; order: number; slot: number; point: number }[] = [];
+    let end = 0;
+    let order = 0;
+    for (const a of actors) {
+        for (const x of parseActions(a) ?? []) {
+            end = Math.max(end, x.time);
+            if (x.type === 4)
+                events.push({
+                    parent: a,
+                    time: x.time,
+                    order: order++,
+                    slot: actionField(x, 'a'),
+                    point: actionField(x, 'b'),
+                });
+        }
+    }
+    events.sort((p, q) => p.time - q.time || p.order - q.order);
+    const last = new Map<string, (typeof events)[number]>();
+    for (const e of events) last.set(`${e.parent.slot}:${e.point}`, e);
+    let added = 0;
+    for (const e of last.values()) {
+        if (e.slot !== playerSlot) continue;
+        const j = insertAction(e.parent, newActionBytes(4, end, { a: 0, b: e.point }));
+        e.parent.actions = j.actions;
+        e.parent.actionCount = j.actionCount;
+        added++;
+    }
+    return added;
 }
 
 function resolveObject(
@@ -480,12 +523,16 @@ export function settlePlayerLying(sorted: { x: PcAction; i: number }[], g: Playe
     const lyingLow = (c: PcAction | undefined, t: number): number | undefined => {
         if (!c) return undefined;
         const dv = view(c.payload);
-        const low = g.lowestJoint(dv.getUint32(4, true), dv.getFloat32(8, true) + (t - c.time) * dv.getFloat32(16, true));
+        const low = g.lowestJoint(
+            dv.getUint32(4, true),
+            dv.getFloat32(8, true) + (t - c.time) * dv.getFloat32(16, true),
+        );
         return low !== undefined && Number.isFinite(low) && low > LYING_LOWEST ? low : undefined;
     };
     const rest = (payload: Uint8Array, low: number): Uint8Array | null => {
         const dv = view(payload);
-        const y = g.groundAt(dv.getFloat32(16, true), dv.getFloat32(24, true), dv.getFloat32(20, true)) - low + LYING_RADIUS;
+        const y =
+            g.groundAt(dv.getFloat32(16, true), dv.getFloat32(24, true), dv.getFloat32(20, true)) - low + LYING_RADIUS;
         // Only lowers a body that hangs well above the ground; sitting and kneeling keys the PC placed are kept.
         if (!Number.isFinite(y) || y > dv.getFloat32(20, true) - FLOATING_GAP) return null;
         const out = payload.slice();
