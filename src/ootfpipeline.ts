@@ -149,7 +149,6 @@ import {
 import { buildRig, invertMat12, localToWorld, mat12ToQuat, mulMat12 } from './skeleton.ts';
 import { bindBasis, convertPcAnimToPs2 } from './ootfcreature.ts';
 import { sampleClip } from './anim.ts';
-import { hangingHairOverrides } from './ootfhair.ts';
 import { MOD_CHARACTER } from './model.ts';
 import { SSD_SEQUENCE } from './resources.ts';
 import {
@@ -2698,16 +2697,8 @@ export async function convertOotfLevels(
     Object.assign(res.files, ssdFiles);
     const playerFiles = await player.files();
     Object.assign(res.files, playerFiles);
-    if (ps2.playerMod && ps2.playerAdb && Object.keys(playerFiles).length > 0) {
-        // The ponytail at rest hangs (the engine leaves the hair at its bind pose in converted scenes).
-        const hair = await hangingHairOverrides(
-            ps2.playerMod,
-            ps2.playerAdb,
-            (ps2.playerStem ?? 'SYSTEM').toUpperCase(),
-        );
-        Object.assign(res.files, hair.files);
-        for (const w of hair.warnings) res.warnings.push(`player hair: ${w}`);
-    }
+    // `hangingHairOverrides` (ootfhair.ts) is not applied: re-weighting the ponytail did not make it hang in scenes and made some
+    // gameplay poses worse (docs/journal/2026-11-09/ootf-rynn-rig-audit.md, sixth pass).
     await sceneClips.files(res.files);
     return res;
 }
