@@ -117,9 +117,9 @@ function solidBoxBounds(model: NeutralModel): Uint8Array {
 }
 
 /** Rebuild polygon-index-dependent bounds, retaining the source's conservative sphere/box and excluding pad vertices. */
-function rigidDisplayList(model: NeutralModel): ReturnType<typeof withDisplayList> {
+function rigidDisplayList(model: NeutralModel, solid = false): ReturnType<typeof withDisplayList> {
     const dl = withDisplayList(model);
-    if (SOLID_BOX_MODEL.test(model.name)) {
+    if (solid || SOLID_BOX_MODEL.test(model.name)) {
         dl.model.bounds = solidBoxBounds(dl.model);
         return dl;
     }
@@ -179,6 +179,8 @@ export class OotfAssetBuilder {
     private readonly modelIds = new Map<string, number>();
     /** `container#id` (lower case) -> PC polygon indices left out of that model (`dropPolygonsOf`). */
     private readonly polygonDrops = new Map<string, ReadonlySet<number>>();
+    /** Models (`<container>#<id>`, lower case) that get one solid box as bounds (`requireSolidBox`). */
+    private readonly solidBoxKeys = new Set<string>();
     private readonly models: {
         id: number;
         model: NeutralModel;
@@ -525,7 +527,7 @@ export class OotfAssetBuilder {
                 // Preserve the established tree path; only newly required rigid representations need this upgrade.
                 const dl =
                     requireDisplayList && !(this.options.displayList ?? DEFAULT_DISPLAY_LIST).test(pc.name)
-                        ? rigidDisplayList(model)
+                        ? rigidDisplayList(model, this.solidBoxKeys.has(key))
                         : withDisplayList(model);
                 out = dl.model;
                 records = [...writePs2ModelRecords(out), { type: MOD_DISPLAY_LIST, data: dl.record }];
@@ -563,7 +565,7 @@ export class OotfAssetBuilder {
         if (existing.records?.some((r) => r.type === MOD_CHARACTER))
             return existing.records.some((r) => r.type === MOD_DISPLAY_LIST); // Never rebuild a skeleton as a rigid model.
         if (existing.model.polygons.length > 0 && !existing.records?.some((r) => r.type === MOD_DISPLAY_LIST)) {
-            const dl = rigidDisplayList(existing.model);
+            const dl = rigidDisplayList(existing.model, this.solidBoxKeys.has(existing.key));
             existing.model = dl.model;
             existing.records = [...writePs2ModelRecords(dl.model), { type: MOD_DISPLAY_LIST, data: dl.record }];
         }
@@ -840,6 +842,20 @@ export class OotfAssetBuilder {
             { type: 0x0501, id: a.id, sub: 0, data: a.info },
             { type: 0x0502, id: a.id, sub: 0, data: a.data },
         ]);
+    }
+
+    /**
+     * Give a rigid model one solid box as bounds instead of its PC shapes: a block Rynn pushes (ootfpush.ts). The PC bounds
+     * of the tomb's block are spheres, which do not stop her on the PS2, so she walked through it. Call before the model is
+     * added; false when the reference does not resolve or the model was already converted.
+     */
+    async requireSolidBox(owner: string, pcDb: number, pcId: number): Promise<boolean> {
+        await this.registerOwner(owner);
+        const c = this.resolveContainer(owner, pcDb);
+        const key = c ? `${lower(c)}#${pcId}` : '';
+        if (!c || this.modelIds.has(key)) return false;
+        this.solidBoxKeys.add(key);
+        return true;
     }
 
     /**

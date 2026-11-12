@@ -450,6 +450,11 @@ export interface PlanOptions {
     modelJoints?: (cls: OdbClass) => number | undefined;
     /** The 64 byte 0x0208 bounds block of a converted skinned model (new id); the class record caches a copy of it (body 16..80). */
     modelBounds?: (modelId: number, odbFile: string, modelDb: number) => Uint8Array | undefined;
+    /**
+     * True for a PC Rigid Body class (engine 16) whose object is pushed onto a plate and stands on a model: the PS2 Rigid Body
+     * rests on terrain only, so the class is cloned from a Mover (35) with the block's model instead (ootfpush.ts).
+     */
+    pushBlockMover?: (cls: OdbClass) => boolean;
 }
 
 // ---------------------------------------------------------------- plan
@@ -899,8 +904,9 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
         const info = modelFader ? ENGINE_CLASSES.get(MODEL_FADER_STANDIN) : ENGINE_CLASSES.get(rfl);
         let cands = byRfl.get(rfl) ?? [];
         let substituted = false;
-        const sub = substituteFor(cls, opt.substituteEngineId);
-        if ((!cands.length || FORCED_SUBSTITUTES.has(rfl) || modelFader) && sub !== undefined) {
+        const pushMover = rfl === 16 && !!opt.pushBlockMover?.(cls);
+        const sub = pushMover ? 35 : substituteFor(cls, opt.substituteEngineId);
+        if ((!cands.length || FORCED_SUBSTITUTES.has(rfl) || modelFader || pushMover) && sub !== undefined) {
             cands = byRfl.get(sub) ?? [];
             substituted = cands.length > 0;
         }
@@ -1021,7 +1027,7 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
             continue;
         }
         const kind = info?.kind;
-        const modelStandIn = substituted && (MODEL_STANDINS.has(rfl) || modelFader);
+        const modelStandIn = substituted && (MODEL_STANDINS.has(rfl) || modelFader || pushMover);
         // Particle emitters (43, 71, 97): the PC model is only an emitter box. The clone keeps the template's own emitter model.
         const ownFxModel =
             !substituted &&

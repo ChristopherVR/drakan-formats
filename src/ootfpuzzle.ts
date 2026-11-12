@@ -26,6 +26,7 @@ import type { OdbClass } from './odb.ts';
 import { encodeScalar, fieldIsIndirect, type ClassFieldDef } from './fields.ts';
 import { setExitDestinationId, setPlainParam } from './ootfcampaign.ts';
 import { GENERIC_MARKER } from './ootfclass.ts';
+import { MOVER_RFL, findPushPuzzles, pushSlide, worldBox, type ModelBox } from './ootfpush.ts';
 
 export interface PuzzleClassRef {
     dbIndex: number;
@@ -44,7 +45,7 @@ export interface PuzzleEnv {
     classOf(o: LvlObject): OdbClass | undefined;
     /** "Trigger Detector" class of the template. */
     detector?: PuzzleClassRef;
-    /** "Timer" class of the template (test aid only). */
+    /** "Timer" class of the template (test aids, and the arrival timer of a push block). */
     timer?: PuzzleClassRef;
     /** XDB id of a text in the XDB of the object's class database (null: no XDB for it). */
     textId?(o: LvlObject, text: string): number | null;
@@ -58,6 +59,8 @@ export interface PuzzleEnv {
      * class: `(db << 16) | id`, db in the frame of the holder class's own database (0 = that database), null when unreachable.
      */
     classRef?(pcDb: number, pcClassId: number, holder: PuzzleClassRef): number | null;
+    /** Model box of a push puzzle's block or plate in world units before its placement (ootfpush.ts), or null. */
+    pushBox?(o: LvlObject): ModelBox | null;
     warnings: string[];
 }
 
@@ -148,7 +151,11 @@ function newDetector(env: PuzzleEnv, pos: Vec3, size: Vec3, params: readonly [st
  */
 function platesToDetectors(env: PuzzleEnv, rep: PuzzleReport): void {
     const { pc, list } = env;
-    const plates = pc.list.objects.filter((o) => rflOf(pc, o) === 29 && list.objects.some((x) => x.id === o.id));
+    // The plates of a push puzzle whose block became a Mover are wired by `pushPuzzles`.
+    const pushed = pushPuzzlePlates(env);
+    const plates = pc.list.objects.filter(
+        (o) => rflOf(pc, o) === 29 && list.objects.some((x) => x.id === o.id) && !pushed.has(o.id),
+    );
     if (!plates.length || !env.detector) return;
     const det = new Map<number, LvlObject>();
     for (const p of plates) {
@@ -194,6 +201,179 @@ function platesToDetectors(env: PuzzleEnv, rep: PuzzleReport): void {
         const extra = o.links.map((l) => det.get(l)?.id).filter((x): x is number => x !== undefined);
         if (extra.length) o.links = [...new Set([...o.links, ...extra])];
     }
+}
+
+/** How long a push block takes to slide onto its plate (seconds). */
+export const PUSH_SLIDE_SECONDS = 2;
+/** How far around the block Rynn sets it off (world units): she is stopped about 170 units from its faces. */
+export const PUSH_TOUCH_MARGIN = 260;
+/** How far the detector of a pressed plate reaches around its tile (world units). */
+export const PUSH_PLATE_MARGIN = 100;
+
+/**
+ * The Mover's "Slide Axis" of a world axis for an unrotated object, and the sign of its distance, as seen in game on the tomb's
+ * block: axis 0 with a positive distance moves it toward +z, axis 2 toward -x (axis 1 is up, as the Rising Floor Ring).
+ */
+const MOVER_AXIS: Readonly<Record<0 | 2, { axis: number; sign: number }>> = {
+    0: { axis: 2, sign: -1 },
+    2: { axis: 0, sign: 1 },
+};
+
+/** The push puzzles of the level whose block was converted to a Mover (ootfpush.ts), with the converted block. */
+function moverPuzzles(env: PuzzleEnv): { z: ReturnType<typeof findPushPuzzles>[number]; dst: LvlObject }[] {
+    return findPushPuzzles(env.pc).flatMap((z) => {
+        const dst = env.list.objects.find((x) => x.id === z.block.id);
+        return dst && env.classOf(dst)?.rflClass === MOVER_RFL ? [{ z, dst }] : [];
+    });
+}
+
+/** PC ids of the plates of those puzzles: `pushPuzzles` wires them, not `platesToDetectors`. */
+function pushPuzzlePlates(env: PuzzleEnv): Set<number> {
+    return new Set(moverPuzzles(env).flatMap(({ z }) => z.plates.map((p) => p.id)));
+}
+
+/**
+ * Push puzzles whose block became a Mover (ootfpush.ts: it stands on a model, where a PS2 Rigid Body cannot rest). On the PC
+ * the block on a plate keeps that plate from rising, so pressing the plate that would raise it leaves the plates' counter at 0
+ * and the counter fires (the tomb: the Rising Floor Ring rises). Here:
+ *
+ *   * Walking into the block is the push: a Trigger Detector around it starts the slide onto the nearest plate tile of the
+ *     puzzle, and a timer reports the arrival when the slide is over.
+ *   * Each plate that raises the block's plate on the PC and starts raised gets a Trigger Detector on its tile (the tiles lie
+ *     far from the plate objects' origin, where the stand-in of `platesToDetectors` would put it).
+ *   * A copy of the PC counter starts at 1 + the number of those plates; the arrival and each of those plates count it down,
+ *     and at 0 it sends what the PC counter sends. The PC counter itself gets no message any more.
+ *
+ * The plates stay static props (a plate that starts lowered on the PC is placed lowered); plates rising again after a wrong
+ * step, as on the PC, are not reproduced.
+ */
+function pushPuzzles(env: PuzzleEnv): number {
+    const { pc, list } = env;
+    let done = 0;
+    for (const { z, dst } of moverPuzzles(env)) {
+        const slide = env.pushBox ? pushSlide(z, env.pushBox) : null;
+        const say = (why: string): void => void env.warnings.push(`${env.title}: push block ${z.block.id}: ${why}`);
+        if (!slide || !env.detector || !env.timer) {
+            say('no plate tile, detector or timer class: the block stays where it is');
+            continue;
+        }
+        if (dst.rot.some((r) => r % 360 !== 0))
+            say('the block is rotated: its slide axis is the model axis, not the world axis');
+        const f = env.classOf(dst)?.fields;
+        const set = (name: string, value: number): void => {
+            if (!setNamedParam(list, dst, f, name, value)) say(`the Mover class has no field "${name}"`);
+        };
+        // The block's base rests at the height of the raised tile (the PC places it a little above the floor and lets it drop).
+        dst.pos = [dst.pos[0]!, dst.pos[1]! + (slide.floor - slide.box.min[1]), dst.pos[2]!];
+        dst.links = [];
+        set('Type', 0); // Slide Only
+        set('Looping?', 0);
+        set('Damage', 0);
+        set('Slide Axis', MOVER_AXIS[slide.axis].axis);
+        set('Slide Distance (lu)', (MOVER_AXIS[slide.axis].sign * slide.distance) / CELL);
+        set('Total sliding time', PUSH_SLIDE_SECONDS);
+        set('Slide acceleration time', 0.4);
+        set('Slide deceleration time', 0.4);
+        set('Pause after moving forward (s)', 0);
+        // The template Mover's sounds and its own options belong to another mechanism.
+        for (const name of [
+            'Activate Instantly?',
+            'Is elevator?',
+            'Run Only When Visible?',
+            'Stop Sound',
+            'Reverse motion Stop Sound',
+            'Forward Looped Sound',
+            'Reverse Looped Sound',
+            'Forward Slide Sound',
+            'Reverse Slide Sound',
+        ])
+            setNamedParam(list, dst, f, name, 0);
+        // A plate that starts lowered on the PC is shown lowered.
+        for (const p of z.plates) {
+            const prop = list.objects.find((x) => x.id === p.id);
+            if (prop && (pcFieldNumber(pc, p, 'Initial State') ?? 0) === 1)
+                prop.pos = [
+                    prop.pos[0]!,
+                    prop.pos[1]! - (pcFieldNumber(pc, p, 'Sink Distance (wu)') ?? 0),
+                    prop.pos[2]!,
+                ];
+        }
+        const size = (b: ModelBox, k: 0 | 1 | 2, margin: number): number => (b.max[k] - b.min[k] + 2 * margin) / CELL;
+        const mid = (b: ModelBox, k: 0 | 2): number => (b.min[k] + b.max[k]) / 2;
+        const touch = newDetector(
+            env,
+            [mid(slide.box, 0), slide.floor + (slide.box.max[1] - slide.box.min[1]) / 2, mid(slide.box, 2)],
+            [size(slide.box, 0, PUSH_TOUCH_MARGIN), size(slide.box, 1, 0), size(slide.box, 2, PUSH_TOUCH_MARGIN)],
+            [
+                ['Task', 6],
+                ['Trigger Message', 1],
+                ['Detect Only Once?', 1],
+            ],
+        );
+        if (!touch) continue;
+        touch.links = [dst.id];
+        done++;
+        // The PC counter the block's plate reports to, and the raised plates that raise the block's plate.
+        const pcById = new Map(pc.list.objects.map((o) => [o.id, o]));
+        const pcCounter = slide.target.links.map((l) => pcById.get(l)).find((o) => !!o && rflOf(pc, o) === 7);
+        const counter = pcCounter ? list.objects.find((x) => x.id === pcCounter.id) : undefined;
+        const raisers = z.plates.filter(
+            (p) =>
+                p.id !== slide.target.id &&
+                p.links.includes(slide.target.id) &&
+                (pcFieldNumber(pc, p, 'Initial State') ?? 0) === 0 &&
+                !!env.pushBox?.(p),
+        );
+        if (!counter || !raisers.length) {
+            say('its plate has no counter or no raised plate raises it: the block slides, nothing counts it');
+            continue;
+        }
+        const copy = addObject(list, {
+            classId: counter.classId,
+            dbIndex: counter.dbIndex,
+            pos: [...counter.pos] as Vec3,
+            rot: [0, 0, 0],
+        }).object;
+        copy.params = counter.params.map((p) => ({ ...p }));
+        copy.data = [...counter.data];
+        copy.links = [...counter.links];
+        setNamedParam(list, copy, env.classOf(copy)?.fields, 'Initial Counter Value', 1 + raisers.length);
+        const arrival = addObject(list, {
+            classId: env.timer.classId,
+            dbIndex: env.timer.dbIndex,
+            pos: [...dst.pos] as Vec3,
+            rot: [0, 0, 0],
+        }).object;
+        arrival.params = [];
+        arrival.data = [];
+        arrival.links = [copy.id];
+        const tf = env.classOf(arrival)?.fields;
+        setNamedParam(list, arrival, tf, 'Time Until Trigger', PUSH_SLIDE_SECONDS);
+        setNamedParam(list, arrival, tf, 'Start Mode', 1); // Run When Triggered By Any Message
+        setNamedParam(list, arrival, tf, 'Repeat', 0);
+        setNamedParam(list, arrival, tf, 'Trigger Message', 1);
+        touch.links = [dst.id, arrival.id];
+        for (const p of raisers) {
+            const tile = worldBox(p, env.pushBox!(p)!);
+            const d = newDetector(
+                env,
+                [mid(tile, 0), tile.max[1] + 700, mid(tile, 2)],
+                [size(tile, 0, PUSH_PLATE_MARGIN), 1, size(tile, 2, PUSH_PLATE_MARGIN)],
+                [
+                    ['Task', 6],
+                    ['Trigger Message', pcFieldNumber(pc, p, 'Message To Send At Bottom') ?? 1],
+                    ['Detect Only Once?', 1],
+                ],
+            );
+            // The plate's other links (lights, sounds) fire with it; its plates and counters are replaced by the copy.
+            const others = p.links.filter((l) => {
+                const t = pcById.get(l);
+                return !!t && rflOf(pc, t) !== 29 && rflOf(pc, t) !== 7 && list.objects.some((x) => x.id === l);
+            });
+            if (d) d.links = [copy.id, ...others];
+        }
+    }
+    return done;
 }
 
 /** Class Messenger: link the relay to every object of its "Receiver Class" (the PS2 Message Relay has no class field). */
@@ -615,6 +795,7 @@ export function applyPuzzleLogic(env: PuzzleEnv): PuzzleReport {
         questLocks: 0,
     };
     platesToDetectors(env, rep);
+    pushPuzzles(env);
     questItemLocks(env, rep);
     messengers(env, rep);
     bossHeads(env, rep);
@@ -667,4 +848,3 @@ export function addAutoPlayStomp(
     setObjectParams(list, object.id, specs);
     return object.id;
 }
-

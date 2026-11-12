@@ -32,6 +32,7 @@ export * from './ootfassets.ts';
 export * from './ootfseq.ts';
 export * from './ootfsound.ts';
 export * from './ootfsubtitles.ts';
+export * from './ootfpush.ts';
 export * from './ootfclass.ts';
 export * from './ootfcoverage.ts';
 export * from './ootfanim.ts';

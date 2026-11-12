@@ -93,6 +93,7 @@ import {
 } from './ootfmusic.ts';
 import { buildOotfMusicPack, type OotfMusicPack } from './ootfdmusic.ts';
 import { addAutoPlayStomp, applyPuzzleLogic, relayDetectorSequences } from './ootfpuzzle.ts';
+import { findPushPuzzles, modelBoxOf, standsOnModel, type ModelBox } from './ootfpush.ts';
 import { encodePs2Texture, type Ps2TextureOptions, type TextureMode } from './ootftex.ts';
 import { TextPlan, isTextField, parseRrcStrings, rewriteClassTextDefaults, rewriteObjectTexts } from './ootftext.ts';
 import {
@@ -666,6 +667,34 @@ export async function convertOotfLevels(
                 ownedClasses.set(ownedClassKey(ow, id), cls);
             }
         }
+    // Push puzzles (ootfpush.ts): the block gets a solid box, and a block that stands on a model (the PS2 Rigid Body rests on
+    // terrain only) becomes a Mover that slides onto its plate; the puzzle pass wires it (ootfpuzzle.ts `pushPuzzles`).
+    const pushMovers = new Set<OdbClass>();
+    const pushBoxes = new Map<PcLevel, Map<number, ModelBox | null>>();
+    for (const pc of pcs)
+        await stage(`push puzzles ${pc.path}`, async () => {
+            const puzzles = findPushPuzzles(pc);
+            if (!puzzles.length) return;
+            const boxes = new Map<number, ModelBox | null>();
+            pushBoxes.set(pc, boxes);
+            for (const o of puzzles.flatMap((z) => [z.block, ...z.plates])) {
+                const cls = pc.classes.get(o.dbIndex)?.get(o.classId);
+                const ow = cls ? ownerOf.get(cls) : undefined;
+                const m = ow && cls?.model ? await builder.readPcModel(ow, cls.model.db, cls.model.id) : null;
+                boxes.set(o.id, m ? modelBoxOf(m.positions) : null);
+            }
+            for (const z of puzzles) {
+                const cls = pc.classes.get(z.block.dbIndex)?.get(z.block.classId);
+                const ow = cls ? ownerOf.get(cls) : undefined;
+                if (!cls?.model || !ow) continue;
+                // Rynn must be stopped by the block to push it or to set it off: spheres do not stop her (ootfassets.ts).
+                if (!(await builder.requireSolidBox(ow, cls.model.db, cls.model.id)))
+                    res.warnings.push(
+                        `${pc.path}: push block ${z.block.id}: its model was converted before it could get a solid box`,
+                    );
+                if (z.plates.length && standsOnModel(pc, z.block, boxes.get(z.block.id) ?? null)) pushMovers.add(cls);
+            }
+        });
     /** The PC class's own model: converted (`ok`), why the asset builder skipped it, or `none` when the class has none. */
     const modelStateOf = (cls: OdbClass): string => {
         if (!cls.model) return 'none';
@@ -998,6 +1027,7 @@ export async function convertOotfLevels(
                           },
                 substituteEngineId: PS2_SUBSTITUTES,
                 modelOdbFile: hostFile,
+                pushBlockMover: (cls) => pushMovers.has(cls),
                 modelSkinned,
                 templateSkinned: (c, file) => {
                     const st = c.model ? containerStem(file.replace(/\.ODB$/i, ''), c.model.db) : null;
@@ -2178,6 +2208,7 @@ export async function convertOotfLevels(
                     list: lvl.objects,
                     title,
                     classOf: ps2Class,
+                    pushBox: (o) => pushBoxes.get(pc)?.get(o.id) ?? null,
                     ...(detectorClass
                         ? { detector: { dbIndex: detectorClass.t.dbIndex, classId: detectorClass.t.classId } }
                         : {}),
