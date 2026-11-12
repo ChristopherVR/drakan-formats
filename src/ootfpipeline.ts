@@ -94,6 +94,7 @@ import {
 import { buildOotfMusicPack, type OotfMusicPack } from './ootfdmusic.ts';
 import { addAutoPlayStomp, applyPuzzleLogic, relayDetectorSequences } from './ootfpuzzle.ts';
 import { hideLightMarkers } from './ootfmarkers.ts';
+import { pcTransitionSequences, relayExitSequences } from './ootfexitseq.ts';
 import { findPushPuzzles, modelBoxOf, standsOnModel, type ModelBox } from './ootfpush.ts';
 import { encodePs2Texture, type Ps2TextureOptions, type TextureMode } from './ootftex.ts';
 import { TextPlan, isTextField, parseRrcStrings, rewriteClassTextDefaults, rewriteObjectTexts } from './ootftext.ts';
@@ -197,13 +198,19 @@ import {
 /** Directory-less name of the shared asset container ("Common\OotFCom\OotFCom" on the virtual disc). */
 /** Levels whose own sequence the PC engine plays at the load (the Ruined Village Book's "backstory"). */
 const AUTO_PLAY_LEVEL = /ruined village book\.lvl$/i;
+/** Levels whose transition exit scenes are not relayed (see the exits stage). */
+const EXIT_SCENE_SKIP = /volcano\.lvl$/i;
 /**
  * The Book's backstory plays and ends the level (BOOK_SCENE_SECONDS); OOTF_BOOK_SCENE=0 leaves it out. The thin strip it once
  * showed was the runtime's loading-screen hold, not the level (journal 2026-11-09/ootf-book-scene.md).
  */
 const bookSceneOn = (): boolean =>
     (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_BOOK_SCENE'] !== '0';
-/** Aspect a level of flat picture scenes is shown at: the PC game's only one. */
+/**
+ * Aspect a level of flat picture scenes is shown at: the PC game's only one. `OOTF_PICTURE_FILL=1` writes `4:3 fill`
+ * instead (the runtime then cuts the top and bottom so the picture fills a wide window; off by default, see the journal
+ * 2026-11-12/ootf-church-cinematic.md for the comparison).
+ */
 export const PICTURE_SCENE_ASPECT = '4:3';
 export const OOTF_COMMON_STEM = 'OOTFCOM';
 const COMMON_DIR = 'files/ENGLISH/COMMON/OOTFCOM';
@@ -2303,7 +2310,9 @@ export async function convertOotfLevels(
                     if (id !== null) console.warn(`sequences ${title}: ${refs.length} own sequence(s) started by Stomp Player ${id}`);
                     // Its scene pans a camera over flat pictures that fill a 4:3 screen at the PC field of view; a wider
                     // view runs past their edges, so the level is shown at 4:3 (manifest `level_aspect`).
-                    if (id !== null) (res.levelAspect ??= {})[title] = PICTURE_SCENE_ASPECT;
+                    if (id !== null)
+                        (res.levelAspect ??= {})[title] =
+                            dbgEnv0['OOTF_PICTURE_FILL'] === '1' ? `${PICTURE_SCENE_ASPECT} fill` : PICTURE_SCENE_ASPECT;
                 }
             });
         }
@@ -2391,6 +2400,66 @@ export async function convertOotfLevels(
                     },
                 });
                 for (const w of r.warnings) res.warnings.push(w);
+                // The PC transitions' exit / entrance scenes (the walk down the church stair): the rewrite above gave the exits
+                // fresh bodies, so name the converted sequences on them again.
+                // The PC transitions' exit / entrance scenes (the walk down the church stair): relayed through a Stomp Player and a
+                // Timer in front of the exit (ootfexitseq.ts).
+                // Not in a level whose own sequence is its exit scene and already plays at the load (the Book: its transition's
+                // ExitSequence is the backstory, which addAutoPlayStomp starts and the level's timer outlasts).
+                // Not in Volcanic either: its exit scene "9.9" (Arokh into the rift, Rynn mounted) stalled the game at the rift box
+                // when it was relayed (journal 2026-11-12/ootf-church-cinematic.md); OOTF_EXIT_SCENES=all relays it for a test.
+                const exitScenesOff = EXIT_SCENE_SKIP.test(pc.path) && dbgEnv0['OOTF_EXIT_SCENES'] !== 'all';
+                if (exitScenesOff && pcTransitionSequences(pc).length)
+                    res.warnings.push(`exits ${title}: exit sequence not played (known to stall the engine in this level)`);
+                if (sequencePlayer?.t.cls.fields && timerClass?.cls.fields && !isAutoPlayLevel(pc) && !exitScenesOff) {
+                    const lengths = new Map<string, Map<number, number>>();
+                    const lengthsOf = async (ow: string): Promise<Map<number, number>> => {
+                        let m = lengths.get(ow);
+                        if (!m) {
+                            m = new Map();
+                            lengths.set(ow, m);
+                            const bytes = await src.read(`${ow}.ssd`);
+                            const reader = bytes ? await SrscReader.fromBytes(bytes) : null;
+                            for (const e of reader?.entries ?? []) {
+                                if (e.type !== SSD_SEQUENCE) continue;
+                                try {
+                                    const seq = parsePcSequence(e.id, e.sub, (await reader!.read(e)).data);
+                                    m.set(e.id, Math.max(0, ...seq.actors.flatMap((x) => x.actions.map((y) => y.time))));
+                                } catch {
+                                    // an unreadable sequence was reported by the sequence stage
+                                }
+                            }
+                        }
+                        return m;
+                    };
+                    const owners = new Map<number, Map<number, number>>();
+                    for (const t of pcTransitionSequences(pc)) {
+                        const o = pc.list.objects.find((x) => x.id === t.objectId)!;
+                        const ow = owner(pc, o.dbIndex);
+                        if (ow && !owners.has(o.dbIndex)) owners.set(o.dbIndex, await lengthsOf(ow));
+                    }
+                    const relays = relayExitSequences({
+                        pc,
+                        list: lvl.objects,
+                        title,
+                        player: {
+                            dbIndex: sequencePlayer.t.dbIndex,
+                            classId: sequencePlayer.t.classId,
+                            fields: sequencePlayer.t.cls.fields,
+                        },
+                        timer: { dbIndex: timerClass.t.dbIndex, classId: timerClass.t.classId, fields: timerClass.cls.fields },
+                        mapSequence: (o, ref) => {
+                            const ow = owner(pc, o.dbIndex);
+                            return ow ? (seqIds.get(`${pc.path}|${ow}|${ref >>> 0}`) ?? null) : null;
+                        },
+                        seconds: (o, ref) => owners.get(o.dbIndex)?.get(ref & 0xffff) ?? null,
+                        warnings: res.warnings,
+                    });
+                    for (const r of relays)
+                        console.warn(
+                            `exits ${title}: transition ${r.exitId} plays ${r.sequences.length} scene(s) first (${r.seconds.toFixed(1)} s, started by ${r.senders.join(', ')})`,
+                        );
+                }
             });
         }
         // Last change of object flags: dynamic lights of a class with the "Light Source" cube are not drawn (ootfmarkers.ts).

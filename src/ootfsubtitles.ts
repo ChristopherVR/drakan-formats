@@ -89,6 +89,22 @@ export function parseSubtitleFile(json: unknown): SubtitleFile {
     };
 }
 
+/**
+ * Several subtitle files as one: a line of a later file replaces the same clip's line of an earlier one, also when the
+ * later line is empty (a clip the author wants without a subtitle). So a hand-corrected file listed after a fresh
+ * transcription wins. The language is the last file's.
+ */
+export function mergeSubtitleFiles(files: readonly SubtitleFile[]): SubtitleFile {
+    const byKey = new Map<string, SubtitleLine>();
+    for (const f of files) for (const l of f.lines) byKey.set(`${l.bank}#${l.id}`, l);
+    return {
+        format: SUBTITLE_FORMAT,
+        version: SUBTITLE_VERSION,
+        language: files.at(-1)?.language ?? 'english',
+        lines: [...byKey.values()],
+    };
+}
+
 /** Characters the engine's subtitle font and the cp1252 descriptor text cannot carry are replaced by plain ones. */
 export function plainSubtitleText(text: string): string {
     return text
