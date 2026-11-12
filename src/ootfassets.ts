@@ -116,10 +116,46 @@ function solidBoxBounds(model: NeutralModel): Uint8Array {
     );
 }
 
+/** How far the box of a pressure plate reaches over its highest polygon beyond the plate's sink distance (world units). */
+export const PLATE_BOX_HEADROOM = 96;
+
+/**
+ * Bounds of a pressure plate (ootfpush.ts): one OBB that lists every polygon and reaches `headroom` model units over the
+ * tile. The engine tests an actor against an object only when their boxes overlap (0x1242d8), then against the listed
+ * polygons. A flat PC tile has a box of no height; a block pushed onto the plate rests on the floor's terrain layer and does
+ * not follow the tile down, so the box must still reach the block's base when the plate is at the bottom: the sink distance
+ * plus `PLATE_BOX_HEADROOM`. The disc's own plate stands 130 units inside its box. Rynn stands on the listed polygons.
+ */
+function plateBounds(model: NeutralModel, headroom: number): Uint8Array {
+    const used = [...new Set(model.polygons.flatMap((p) => p.indices))];
+    const pts = used.flatMap((v) => [0, 1, 2].map((k) => model.positions[v * 3 + k]!));
+    let top = -Infinity;
+    for (let i = 1; i < pts.length; i += 3) top = Math.max(top, pts[i]!);
+    if (pts.length) pts.push(pts[0]!, top + headroom, pts[2]!);
+    return synthesizeBounds(Float32Array.from(pts), model.polygons.length);
+}
+
+/**
+ * The sphere bounds of a push block (ootfpush.ts) with their lowest sphere moved `depth` model units down, or null when the
+ * bounds are no sphere hierarchy. The PS2 Rigid Body rests on terrain and does not follow a plate that sinks under it; its
+ * own contact query (0x459a30) must still find the sunk tile, or the plate is free to rise again under the block.
+ */
+export function sinkLowestSphere(bounds: Uint8Array, depth: number): Uint8Array | null {
+    const n = sphereHierarchyCount(bounds);
+    if (!n) return null;
+    const out = bounds.slice();
+    const dv = new DataView(out.buffer, out.byteOffset, out.byteLength);
+    const at = (i: number): number => 76 + n * 4 + i * 16;
+    let low = 0;
+    for (let i = 1; i < n; i++) if (dv.getFloat32(at(i) + 4, true) < dv.getFloat32(at(low) + 4, true)) low = i;
+    dv.setFloat32(at(low) + 4, dv.getFloat32(at(low) + 4, true) - depth, true);
+    return out;
+}
+
 /** Rebuild polygon-index-dependent bounds, retaining the source's conservative sphere/box and excluding pad vertices. */
-function rigidDisplayList(model: NeutralModel, solid = false): ReturnType<typeof withDisplayList> {
+function rigidDisplayList(model: NeutralModel): ReturnType<typeof withDisplayList> {
     const dl = withDisplayList(model);
-    if (solid || SOLID_BOX_MODEL.test(model.name)) {
+    if (SOLID_BOX_MODEL.test(model.name)) {
         dl.model.bounds = solidBoxBounds(dl.model);
         return dl;
     }
@@ -179,8 +215,10 @@ export class OotfAssetBuilder {
     private readonly modelIds = new Map<string, number>();
     /** `container#id` (lower case) -> PC polygon indices left out of that model (`dropPolygonsOf`). */
     private readonly polygonDrops = new Map<string, ReadonlySet<number>>();
-    /** Models (`<container>#<id>`, lower case) that get one solid box as bounds (`requireSolidBox`). */
-    private readonly solidBoxKeys = new Set<string>();
+    /** Models that get the bounds of a pressure plate, with the box's headroom in model units (`requirePlateBox`). */
+    private readonly plateBoxKeys = new Map<string, number>();
+    /** Models whose lowest bounding sphere is moved down by that many model units (`requireSunkSphere`). */
+    private readonly sunkSphereKeys = new Map<string, number>();
     private readonly models: {
         id: number;
         model: NeutralModel;
@@ -527,7 +565,7 @@ export class OotfAssetBuilder {
                 // Preserve the established tree path; only newly required rigid representations need this upgrade.
                 const dl =
                     requireDisplayList && !(this.options.displayList ?? DEFAULT_DISPLAY_LIST).test(pc.name)
-                        ? rigidDisplayList(model, this.solidBoxKeys.has(key))
+                        ? rigidDisplayList(model)
                         : withDisplayList(model);
                 out = dl.model;
                 records = [...writePs2ModelRecords(out), { type: MOD_DISPLAY_LIST, data: dl.record }];
@@ -538,6 +576,20 @@ export class OotfAssetBuilder {
                     `model ${key}: display list failed (${e instanceof Error ? e.message : String(e)})`,
                 );
             }
+        }
+        if (!skin && this.plateBoxKeys.has(key)) {
+            out = { ...out, bounds: plateBounds(out, this.plateBoxKeys.get(key)!) };
+            if (records)
+                records = [...writePs2ModelRecords(out), ...records.filter((r) => r.type === MOD_DISPLAY_LIST)];
+        }
+        const sunk =
+            !skin && out.bounds && this.sunkSphereKeys.has(key)
+                ? sinkLowestSphere(out.bounds, this.sunkSphereKeys.get(key)!)
+                : null;
+        if (sunk) {
+            out = { ...out, bounds: sunk };
+            if (records)
+                records = [...writePs2ModelRecords(out), ...records.filter((r) => r.type === MOD_DISPLAY_LIST)];
         }
         const nid = this.nextModel++;
         this.modelIds.set(key, nid);
@@ -565,7 +617,7 @@ export class OotfAssetBuilder {
         if (existing.records?.some((r) => r.type === MOD_CHARACTER))
             return existing.records.some((r) => r.type === MOD_DISPLAY_LIST); // Never rebuild a skeleton as a rigid model.
         if (existing.model.polygons.length > 0 && !existing.records?.some((r) => r.type === MOD_DISPLAY_LIST)) {
-            const dl = rigidDisplayList(existing.model, this.solidBoxKeys.has(existing.key));
+            const dl = rigidDisplayList(existing.model);
             existing.model = dl.model;
             existing.records = [...writePs2ModelRecords(dl.model), { type: MOD_DISPLAY_LIST, data: dl.record }];
         }
@@ -845,16 +897,29 @@ export class OotfAssetBuilder {
     }
 
     /**
-     * Give a rigid model one solid box as bounds instead of its PC shapes: a block Rynn pushes (ootfpush.ts). The PC bounds
-     * of the tomb's block are spheres, which do not stop her on the PS2, so she walked through it. Call before the model is
-     * added; false when the reference does not resolve or the model was already converted.
+     * Move the lowest bounding sphere of a push block's model `depth` world units down (`sinkLowestSphere`). Call before the
+     * model is added; false when the reference does not resolve or the model was already converted.
      */
-    async requireSolidBox(owner: string, pcDb: number, pcId: number): Promise<boolean> {
+    async requireSunkSphere(owner: string, pcDb: number, pcId: number, depth: number): Promise<boolean> {
         await this.registerOwner(owner);
         const c = this.resolveContainer(owner, pcDb);
         const key = c ? `${lower(c)}#${pcId}` : '';
         if (!c || this.modelIds.has(key)) return false;
-        this.solidBoxKeys.add(key);
+        this.sunkSphereKeys.set(key, depth / 2048);
+        return true;
+    }
+
+    /**
+     * Give the model of a pressure plate bounds its plate can be pressed through (`plateBounds`); `sink` is the plate's sink
+     * distance in world units. Call before the model is added; false when the reference does not resolve or the model was
+     * already converted.
+     */
+    async requirePlateBox(owner: string, pcDb: number, pcId: number, sink: number): Promise<boolean> {
+        await this.registerOwner(owner);
+        const c = this.resolveContainer(owner, pcDb);
+        const key = c ? `${lower(c)}#${pcId}` : '';
+        if (!c || this.modelIds.has(key)) return false;
+        this.plateBoxKeys.set(key, Math.max(this.plateBoxKeys.get(key) ?? 0, (Math.max(0, sink) + PLATE_BOX_HEADROOM) / 2048));
         return true;
     }
 

@@ -191,13 +191,31 @@ export const PS2_SUBSTITUTES: ReadonlyMap<number, number> = new Map([
     [117, 33],
 ]);
 
+/** The fields of the Pressure Plate (29), the same on the PC and in the PS2 handler (0x45de10 reads them by position). */
+export const PRESSURE_PLATE_FIELDS: readonly string[] = [
+    'Sink Distance (wu)',
+    'Sink Speed (lu/s)',
+    'Rise Speed (lu/s)',
+    'Initial State',
+    'Stay Down When Pressed?',
+    'When Triggered',
+    'Send Off Message When Triggered?',
+    'Send Message When',
+    'Message To Send At Top',
+    'Message To Send At Bottom',
+    'Sink Sound',
+    'Rise Sound',
+    'Triggered by Rynn Only?',
+];
+
 /** PC engine ids whose PS2 class is cloned even though the PS2 has another class under the same number (144 = shields on PS2, 92 = a creature without the Dr. Evil fields, 117 = an egg without a lock). */
 export const FORCED_SUBSTITUTES: ReadonlySet<number> = new Set([144, 92, 117]);
 
 /**
  * Substituted PC engine ids whose clone gets the converted PC model instead of the template's: the Pirate Ship (a spline
- * vehicle on the PC) becomes a static Ground Object showing the ship, a Pressure Plate (29, no PS2 class reachable) a static
- * plate that cannot be pressed, and the Bell Hammer (117) a Key that shows the hammer.
+ * vehicle on the PC) becomes a static Ground Object showing the ship, a Pressure Plate (29) whose native record could not
+ * be written (see `PRESSURE_PLATE_FIELDS`) a static plate that cannot be pressed, and the Bell Hammer (117) a Key that
+ * shows the hammer.
  */
 export const MODEL_STANDINS: ReadonlySet<number> = new Set([130, 88, 100, 101, 29, 117]);
 
@@ -450,11 +468,6 @@ export interface PlanOptions {
     modelJoints?: (cls: OdbClass) => number | undefined;
     /** The 64 byte 0x0208 bounds block of a converted skinned model (new id); the class record caches a copy of it (body 16..80). */
     modelBounds?: (modelId: number, odbFile: string, modelDb: number) => Uint8Array | undefined;
-    /**
-     * True for a PC Rigid Body class (engine 16) whose object is pushed onto a plate and stands on a model: the PS2 Rigid Body
-     * rests on terrain only, so the class is cloned from a Mover (35) with the block's model instead (ootfpush.ts).
-     */
-    pushBlockMover?: (cls: OdbClass) => boolean;
 }
 
 // ---------------------------------------------------------------- plan
@@ -904,9 +917,64 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
         const info = modelFader ? ENGINE_CLASSES.get(MODEL_FADER_STANDIN) : ENGINE_CLASSES.get(rfl);
         let cands = byRfl.get(rfl) ?? [];
         let substituted = false;
-        const pushMover = rfl === 16 && !!opt.pushBlockMover?.(cls);
-        const sub = pushMover ? 35 : substituteFor(cls, opt.substituteEngineId);
-        if ((!cands.length || FORCED_SUBSTITUTES.has(rfl) || modelFader || pushMover) && sub !== undefined) {
+        // The Pressure Plate (29): the handler 0x45de10 is registered in PAL, but the databases a converted level names hold no
+        // class of it (the disc's two live in LEVEL4ON and LEVEL8OS). The PC class has the PS2 schema field for field, so
+        // its record is written from the PC defaults with the converted PC model (ootfpush.ts).
+        if (rfl === 29 && opt.modelOdbFile && opt.modelFor && cls.model) {
+            const host = ps2.find((o) => o.file === opt.modelOdbFile);
+            const model = host ? opt.modelFor(cls, host.file) : null;
+            const bounds = model ? opt.modelBounds?.(model.id, host!.file, model.db) : undefined;
+            const classId = host ? nextId(host.file) : undefined;
+            if (
+                host &&
+                model &&
+                bounds?.length === 64 &&
+                classId !== undefined &&
+                cls.data?.length === PRESSURE_PLATE_FIELDS.length &&
+                cls.fields?.length === PRESSURE_PLATE_FIELDS.length &&
+                cls.fields.every((f, i) => f.name.trim() === PRESSURE_PLATE_FIELDS[i])
+            ) {
+                const name = cls.name.trim() || 'OotF Pressure Plate';
+                // The two sounds are PC sound references; they stay silent until they are converted.
+                const data = cls.data.map((v, i) => (/Sound$/.test(PRESSURE_PLATE_FIELDS[i]!) ? 0 : v));
+                const group =
+                    [...host.classes.values()].find((c) => c.rflClass === 35)?.group ??
+                    host.classes.values().next().value?.group ??
+                    0;
+                const body = new Uint8Array(94 + data.length * 4);
+                const dv = view(body);
+                dv.setUint16(0, group, true);
+                dv.setUint16(2, model.id, true);
+                dv.setUint16(4, model.db, true);
+                dv.setUint16(14, 1, true); // model / bounds block follows
+                body.set(bounds, 16);
+                dv.setUint16(80, 29, true);
+                dv.setUint16(82, 1, true);
+                dv.setUint16(84, cls.icon ?? 0, true);
+                dv.setUint32(86, data.length, true);
+                dv.setUint32(90, data.length, true);
+                data.forEach((v, i) => dv.setUint32(94 + i * 4, v >>> 0, true));
+                const out: OdbClass = { ...cls, id: classId, name, group, runtimeClass: 0x1001d, model, data };
+                synthesized.push({
+                    pcKeys: [key],
+                    name,
+                    file: host.file,
+                    dbIndex: host.dbIndex,
+                    classId,
+                    group,
+                    rfl: 29,
+                    template: { dbIndex: host.dbIndex, classId: 0, name: 'Native Pressure Plate schema' },
+                    record: joinClassRecord(name, body),
+                    cls: out,
+                    copied: cls.fields.map((f) => f.name),
+                    skipped: [],
+                    coverage: 1,
+                });
+                continue;
+            }
+        }
+        const sub = substituteFor(cls, opt.substituteEngineId);
+        if ((!cands.length || FORCED_SUBSTITUTES.has(rfl) || modelFader) && sub !== undefined) {
             cands = byRfl.get(sub) ?? [];
             substituted = cands.length > 0;
         }
@@ -1027,7 +1095,7 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
             continue;
         }
         const kind = info?.kind;
-        const modelStandIn = substituted && (MODEL_STANDINS.has(rfl) || modelFader || pushMover);
+        const modelStandIn = substituted && (MODEL_STANDINS.has(rfl) || modelFader);
         // Particle emitters (43, 71, 97): the PC model is only an emitter box. The clone keeps the template's own emitter model.
         const ownFxModel =
             !substituted &&

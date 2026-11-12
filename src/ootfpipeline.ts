@@ -95,7 +95,20 @@ import { buildOotfMusicPack, type OotfMusicPack } from './ootfdmusic.ts';
 import { addAutoPlayStomp, applyPuzzleLogic, relayDetectorSequences } from './ootfpuzzle.ts';
 import { hideLightMarkers } from './ootfmarkers.ts';
 import { pcTransitionSequences, relayExitSequences } from './ootfexitseq.ts';
-import { findPushPuzzles, modelBoxOf, standsOnModel, type ModelBox } from './ootfpush.ts';
+import {
+    PUSH_SPHERE_REACH,
+    addPushFloor,
+    findPushPuzzles,
+    modelBoxOf,
+    modelTriangles,
+    plateSinkDistance,
+    pushFloor,
+    pushPuzzleSoundRefs,
+    pushableBounds,
+    standsOnModel,
+    worldBox,
+    type FloorTriangle,
+} from './ootfpush.ts';
 import { encodePs2Texture, type Ps2TextureOptions, type TextureMode } from './ootftex.ts';
 import { TextPlan, isTextField, parseRrcStrings, rewriteClassTextDefaults, rewriteObjectTexts } from './ootftext.ts';
 import {
@@ -675,32 +688,62 @@ export async function convertOotfLevels(
                 ownedClasses.set(ownedClassKey(ow, id), cls);
             }
         }
-    // Push puzzles (ootfpush.ts): the block gets a solid box, and a block that stands on a model (the PS2 Rigid Body rests on
-    // terrain only) becomes a Mover that slides onto its plate; the puzzle pass wires it (ootfpuzzle.ts `pushPuzzles`).
-    const pushMovers = new Set<OdbClass>();
-    const pushBoxes = new Map<PcLevel, Map<number, ModelBox | null>>();
+    // Pressure plates and the blocks Rynn pushes onto them (ootfpush.ts). Every plate becomes a native Pressure Plate
+    // (ootfclass.ts) and its model gets a box the plate can be pressed through. A push block stays a Rigid Body with its PC
+    // sphere bounds; one that stands on a model floor gets a terrain layer at the height of that floor, because the PS2
+    // Rigid Body rests on terrain only.
     for (const pc of pcs)
         await stage(`push puzzles ${pc.path}`, async () => {
-            const puzzles = findPushPuzzles(pc);
-            if (!puzzles.length) return;
-            const boxes = new Map<number, ModelBox | null>();
-            pushBoxes.set(pc, boxes);
-            for (const o of puzzles.flatMap((z) => [z.block, ...z.plates])) {
+            for (const o of pc.list.objects) {
                 const cls = pc.classes.get(o.dbIndex)?.get(o.classId);
                 const ow = cls ? ownerOf.get(cls) : undefined;
-                const m = ow && cls?.model ? await builder.readPcModel(ow, cls.model.db, cls.model.id) : null;
-                boxes.set(o.id, m ? modelBoxOf(m.positions) : null);
+                if (cls?.rflClass !== 29 || !cls.model || !ow) continue;
+                await builder.requirePlateBox(ow, cls.model.db, cls.model.id, plateSinkDistance(pc, o));
             }
-            for (const z of puzzles) {
+            for (const z of findPushPuzzles(pc)) {
                 const cls = pc.classes.get(z.block.dbIndex)?.get(z.block.classId);
                 const ow = cls ? ownerOf.get(cls) : undefined;
                 if (!cls?.model || !ow) continue;
-                // Rynn must be stopped by the block to push it or to set it off: spheres do not stop her (ootfassets.ts).
-                if (!(await builder.requireSolidBox(ow, cls.model.db, cls.model.id)))
+                const model = await builder.readPcModel(ow, cls.model.db, cls.model.id);
+                const box = model ? modelBoxOf(model.positions) : null;
+                if (model && !pushableBounds(model.bounds))
                     res.warnings.push(
-                        `${pc.path}: push block ${z.block.id}: its model was converted before it could get a solid box`,
+                        `${pc.path}: push block ${z.block.id}: its model has no sphere bounds; the PS2 Rigid Body cannot be pushed`,
                     );
-                if (z.plates.length && standsOnModel(pc, z.block, boxes.get(z.block.id) ?? null)) pushMovers.add(cls);
+                // The block does not follow a plate down: its lowest sphere must still reach the sunk tile.
+                const sink = Math.max(0, ...z.plates.map((p) => plateSinkDistance(pc, p)));
+                if (
+                    z.plates.length &&
+                    !(await builder.requireSunkSphere(ow, cls.model.db, cls.model.id, sink + PUSH_SPHERE_REACH))
+                )
+                    res.warnings.push(
+                        `${pc.path}: push block ${z.block.id}: its model was converted before its bounds could be adjusted`,
+                    );
+                if (!box || !standsOnModel(pc, z.block, box)) continue;
+                const floors: FloorTriangle[][] = [];
+                const [px, , pz] = z.block.pos as [number, number, number];
+                for (const o of pc.list.objects) {
+                    const c = pc.classes.get(o.dbIndex)?.get(o.classId);
+                    const cow = c ? ownerOf.get(c) : undefined;
+                    if (c?.rflClass !== 17 || !c.model || !cow) continue;
+                    const m = await builder.readPcModel(cow, c.model.db, c.model.id);
+                    const mb = m ? modelBoxOf(m.positions) : null;
+                    if (!m || !mb) continue;
+                    const wb = worldBox(o, mb);
+                    if (px < wb.min[0] || px > wb.max[0] || pz < wb.min[2] || pz > wb.max[2]) continue;
+                    floors.push(modelTriangles(o, m));
+                }
+                const pf = pushFloor(pc.terrain, z.block, worldBox(z.block, box).min[1], floors);
+                if (!pf) {
+                    res.warnings.push(
+                        `${pc.path}: push block ${z.block.id} stands on a model but no floor layer could be made: it will fall through`,
+                    );
+                    continue;
+                }
+                addPushFloor(pc.terrain, pf);
+                console.log(
+                    `push floor ${pc.path}: block ${z.block.id} rests on new invisible layer ${pf.layer.index} (${pf.layer.width} x ${pf.layer.height} cells) at ${Math.round(pf.floor)}: ${pf.solid} solid, ${pf.holes} hole triangles, named by ${pf.listedBy.length} layers`,
+                );
             }
         });
     /** The PC class's own model: converted (`ok`), why the asset builder skipped it, or `none` when the class has none. */
@@ -1035,7 +1078,6 @@ export async function convertOotfLevels(
                           },
                 substituteEngineId: PS2_SUBSTITUTES,
                 modelOdbFile: hostFile,
-                pushBlockMover: (cls) => pushMovers.has(cls),
                 modelSkinned,
                 templateSkinned: (c, file) => {
                     const st = c.model ? containerStem(file.replace(/\.ODB$/i, ''), c.model.db) : null;
@@ -1489,6 +1531,12 @@ export async function convertOotfLevels(
                         out.push({ owner: ow, ref: v >>> 0, target: resolve?.(o.dbIndex, o.classId) ?? null });
                 }
             }
+            // The sounds a pressure plate or a push block takes from its class (ootfpuzzle.ts `pushPuzzles` sets them).
+            if (kind === 'sound')
+                for (const v of pushPuzzleSoundRefs(pc, o)) {
+                    await builder.registerOwner(ow);
+                    out.push({ owner: ow, ref: v, target: resolve?.(o.dbIndex, o.classId) ?? null });
+                }
             // A Stomp Player without its own list plays its PC class's default list (convertStompPlayers writes it out).
             const stomp = kind === 'sequence' ? pcStompPlayer(pc, o) : null;
             if (stomp?.sequencesFromClass && stomp.sequences.length) {
@@ -2216,7 +2264,19 @@ export async function convertOotfLevels(
                     list: lvl.objects,
                     title,
                     classOf: ps2Class,
-                    pushBox: (o) => pushBoxes.get(pc)?.get(o.id) ?? null,
+                    soundRef: (o, ref, field) => {
+                        const src = pc.list.objects.find((x) => x.id === o.id);
+                        const target = plan?.synthesized.find((x) => x.dbIndex === o.dbIndex && x.classId === o.classId);
+                        return src && target
+                            ? mapResource('sound', ref, {
+                                  pc,
+                                  ownerDb: src.dbIndex,
+                                  classId: src.classId,
+                                  field,
+                                  target: { dbIndex: target.dbIndex, classId: target.classId, cls: target.cls },
+                              })
+                            : null;
+                    },
                     ...(detectorClass
                         ? { detector: { dbIndex: detectorClass.t.dbIndex, classId: detectorClass.t.classId } }
                         : {}),
@@ -2242,9 +2302,17 @@ export async function convertOotfLevels(
                         ? { mapPixel: (x: number, z: number) => mapPixelOf(levelMaps.get(pc.path)!.spec, x, z) }
                         : {}),
                 });
-                if (rep.plates || rep.bossHeads || rep.markers || rep.messengers || rep.questLocks)
+                if (
+                    rep.plates ||
+                    rep.nativePlates ||
+                    rep.pushBlocks ||
+                    rep.bossHeads ||
+                    rep.markers ||
+                    rep.messengers ||
+                    rep.questLocks
+                )
                     console.warn(
-                        `puzzles ${title}: ${rep.plates} plates -> ${rep.detectors} detectors, ${rep.bossHeads} boss heads (${rep.deathCounters} counters), ${rep.messengers} messengers, ${rep.markers} markers (${rep.markersSkipped} skipped), ${rep.quieted} cloud ring links removed, ${rep.questLocks} quest item locks`,
+                        `puzzles ${title}: ${rep.nativePlates} native plates, ${rep.pushBlocks} push blocks, ${rep.plates} plates -> ${rep.detectors} detectors, ${rep.bossHeads} boss heads (${rep.deathCounters} counters), ${rep.messengers} messengers, ${rep.markers} markers (${rep.markersSkipped} skipped), ${rep.quieted} cloud ring links removed, ${rep.questLocks} quest item locks`,
                     );
             });
         }
