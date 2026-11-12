@@ -128,7 +128,7 @@ import {
 } from './ootfclass.ts';
 import { OotfAssetBuilder, type AssetReport } from './ootfassets.ts';
 import { type Ps2TextureSwapOptions, effectiveSubstitutions, resolvePs2Substitutes } from './ootfps2tex.ts';
-import { type Ps2ModelSwapOptions, modelKey, planPs2Models } from './ootfps2model.ts';
+import { type Ps2ModelSwapOptions, healthUntilFlee, modelKey, planPs2Models } from './ootfps2model.ts';
 import { REFERENCE_ENGINES, deliberateOmission, pcParamAlias } from './ootfcoverage.ts';
 import { loadPcLevel, parsePcOdbClasses, pcLevelName, resolvePcPath, type PcFileSource, type PcLevel } from './pc.ts';
 import {
@@ -2332,6 +2332,36 @@ export async function convertOotfLevels(
                 }),
             };
             if (shown) res.warnings.push(`${pc.path}: ${shown} hidden creature(s) nothing links to made visible`);
+        }
+        {
+            // An enemy played by a Drakan 2 class that never flees (ootfps2model.ts `healthUntilFlee`: the Scavenger) gets the hit
+            // points its Order of the Flame class loses before it runs away, as an object parameter. The object's own PC values
+            // count before the PC class defaults; a creature placed dead keeps its health.
+            const pcById = new Map(pc.list.objects.map((x) => [x.id, x]));
+            let set = 0;
+            for (const o of parts.objects.objects) {
+                const src = pcById.get(o.id);
+                const pcCls = src ? pc.classes.get(src.dbIndex)?.get(src.classId) : undefined;
+                if (!src || !pcCls || !modelSwap.enemyHealthUntilFlee(pcCls.name)) continue;
+                const ps2Cls = classes.get(o.dbIndex)?.get(o.classId);
+                if (!ps2Cls?.fields || modelKey(ps2Cls.name) !== modelKey(modelSwap.enemyTarget(pcCls.name) ?? '')) continue;
+                const pcSpecs = objectParamSpecs(src);
+                const pcValue = (name: string): unknown => {
+                    const own = pcSpecs.find((sp) => sp.name === name);
+                    if (own) return own.value;
+                    const i = pcCls.fields?.findIndex((f) => f.name === name) ?? -1;
+                    return i >= 0 ? classFieldDefault(pcCls, i) : undefined;
+                };
+                const pcHealth = pcValue('Initial Health');
+                const health = typeof pcHealth === 'number' && pcHealth <= 0 ? null : healthUntilFlee(pcHealth, pcValue('Flee Health Limit'));
+                const fieldIndex = ps2Cls.fields.findIndex((f) => f.name === 'Initial Health');
+                if (health === null || fieldIndex < 0) continue;
+                const specs = objectParamSpecs(o).filter((sp) => sp.name !== 'Initial Health');
+                specs.push({ fieldIndex, type: ps2Cls.fields[fieldIndex]!.type, name: 'Initial Health', value: health });
+                setObjectParams(parts.objects, o.id, specs);
+                set++;
+            }
+            if (set) res.warnings.push(`${pc.path}: ${set} creature(s) of a Drakan 2 class that never flees got the health until the PC one flees`);
         }
         {
             // PC levels place a few creatures already dead (Ruined Village's grunt with Initial Health -50, dead slaves with 0) and the

@@ -29,6 +29,12 @@ export interface Ps2ModelSubstitution {
     defaultOff?: boolean;
     /** A scene-only prop (engine class 17) shown with the disc creature's model and rig; its scene clips are retargeted. */
     scene?: boolean;
+    /**
+     * Enemy rows whose Drakan 2 class never runs away: each placed creature gets, as its `Initial Health`, the damage the
+     * Order of the Flame creature takes before it flees (PC `Initial Health` minus PC `Flee Health Limit`), so the fight
+     * ends after the same number of blows as in the original. Every other value is the disc class's.
+     */
+    healthUntilFlee?: boolean;
 }
 
 const tock = (pc: string, ps2: string, label: string): Ps2ModelSubstitution => ({
@@ -95,7 +101,8 @@ export const DEFAULT_PS2_MODEL_SUBSTITUTIONS: readonly Ps2ModelSubstitution[] = 
         ootf: 'Scavenger',
         ps2: 'Scavenger',
         label: 'Scavenger',
-        why: 'The disc Scavenger class and model. The Order of the Flame Scavenger could not be hit by melee from most sides (its PC sphere hit volumes do not suit the PS2 engine, see the 2026-11-09 journal), while the disc one is hit normally; it keeps its PC placement, takes the health and attacks of the disc class, and plays the disc clips. Turn it off to keep the converted PC model.',
+        why: 'The disc Scavenger class and model. The Order of the Flame Scavenger could not be hit by melee from most sides (its PC sphere hit volumes do not suit the PS2 engine, see the 2026-11-09 journal), while the disc one is hit normally; it keeps its PC placement, takes the attacks of the disc class, and plays the disc clips. The Order of the Flame Scavenger runs away once it is down to 20 of its 35 hit points; the disc class never flees (2026-11-12 journal), so each one gets the 15 hit points it takes to drive the original off. Turn it off to keep the converted PC model.',
+        healthUntilFlee: true,
     },
     weapon('Short Sword', 'Steel Short Sword', 'Short sword', 'A plain one-handed short sword in both games.'),
     weapon('Long Sword', 'Steel Longsword', 'Long sword', 'A plain one-handed long sword in both games.'),
@@ -203,6 +210,20 @@ export interface Ps2ModelPlan {
     weapon(name: string): Ps2ModelSubstitution | null;
     /** The Drakan 2 class an enemy row names for this PC class (scene-only props use its model and rig), or null. */
     enemyTarget(name: string): string | null;
+    /** The swapped enemy gets the health after which its Order of the Flame class flees (`healthUntilFlee`, disc clips only). */
+    enemyHealthUntilFlee(name: string): boolean;
+}
+
+/**
+ * Hit points for a creature whose Drakan 2 class cannot flee: what the Order of the Flame creature loses before it runs
+ * (`health - fleeLimit`). Null when the PC creature does not flee (limit 0 or less), when the limit is not below the
+ * health, or when a value is not a finite number: then the disc class's own health stands.
+ */
+export function healthUntilFlee(health: unknown, fleeLimit: unknown): number | null {
+    if (typeof health !== 'number' || typeof fleeLimit !== 'number') return null;
+    if (!Number.isFinite(health) || !Number.isFinite(fleeLimit)) return null;
+    if (fleeLimit <= 0 || fleeLimit >= health) return null;
+    return Math.round(health - fleeLimit);
 }
 
 export function planPs2Models(o: Ps2ModelSwapOptions = {}): Ps2ModelPlan {
@@ -217,6 +238,10 @@ export function planPs2Models(o: Ps2ModelSwapOptions = {}): Ps2ModelPlan {
     return {
         enemy: (name) => (on.get(modelKey(name))?.category === 'enemies' ? anim : null),
         enemyOff: (name) => all.has(modelKey(name)) && on.get(modelKey(name))?.category !== 'enemies',
+        enemyHealthUntilFlee: (name) => {
+            const r = on.get(modelKey(name));
+            return r?.category === 'enemies' && anim === 'drakan2' && r.healthUntilFlee === true;
+        },
         enemyTarget: (name) => {
             const r = on.get(modelKey(name));
             return r?.category === 'enemies' ? r.ps2 : null;
