@@ -44,6 +44,7 @@ import {
     writePs2Sdb,
     type PcSoundBank,
 } from './ootfsound.ts';
+import { SUBTITLE_FORMAT, SUBTITLE_VERSION, type SubtitleLine, type SubtitleTable } from './ootfsubtitles.ts';
 import { applyCulling, planLevelCulling, sceneFileKey, type LevelCulling } from './ootfcull.ts';
 import { carryCreatures, type CarrierRig } from './ootfcarry.ts';
 import type { PcSeqActor, PcSequence, PlayerGround } from './ootfseq.ts';
@@ -200,6 +201,8 @@ const AUTO_PLAY_LEVEL = /ruined village book\.lvl$/i;
  */
 const bookSceneOn = (): boolean =>
     (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_BOOK_SCENE'] !== '0';
+/** Aspect a level of flat picture scenes is shown at: the PC game's only one. */
+export const PICTURE_SCENE_ASPECT = '4:3';
 export const OOTF_COMMON_STEM = 'OOTFCOM';
 const COMMON_DIR = 'files/ENGLISH/COMMON/OOTFCOM';
 const COMMON_DEP = 'Common\\OotFCom\\OotFCom';
@@ -313,6 +316,11 @@ export interface OotfPipelineOptions {
     texts?: boolean;
     sounds?: boolean;
     sequences?: boolean;
+    /**
+     * Subtitle lines of the PC voice clips (ootfsubtitles.ts; made on the player's machine from the player's own audio). The
+     * text of every converted clip is stored in its sound descriptor and the lines used are shipped as `story/subtitles.json`.
+     */
+    subtitles?: SubtitleTable;
     /** Name written into the header; default the PC level's name. */
     name?: (pc: PcLevel) => string;
     log?: (msg: string) => void;
@@ -390,6 +398,13 @@ export interface OotfPipelineResult {
     source: OotfSourceProfile | null;
     /** The rendered OotF music (PC id -> PS2MUSIC.SDB id, title track); null when not rendered. */
     music: OotfMusicPack | null;
+    /** Converted voice clips that got subtitle text (`OotfPipelineOptions.subtitles`). */
+    subtitles?: { lines: number; language: string };
+    /**
+     * Levels whose scenes frame flat pictures for a 4:3 screen (the Ruined Village Book's paintings): PS2 level title ->
+     * the aspect they must be shown at. The pack manifest carries it as `level_aspect`.
+     */
+    levelAspect?: Record<string, string>;
     /** Drakan 2 textures used in place of OotF ones (`OotfPipelineOptions.ps2Textures`), and rows that could not be used. */
     ps2Textures?: { used: { ootf: string; ps2: string; label: string }[]; skipped: { ootf: string; reason: string }[] };
     /** Drakan 2 models used for OotF classes (`OotfPipelineOptions.ps2Models`), by OotF class name. */
@@ -1568,8 +1583,33 @@ export async function convertOotfLevels(
             const conv = convertPcSounds(
                 banks,
                 { firstId: 1, groupId: group, groupName: 'Order of the Flame', nextId: freeId },
-                { maxBytes: 0x3f000, fitRates: [22050, 11025] },
+                {
+                    maxBytes: 0x3f000,
+                    fitRates: [22050, 11025],
+                    text: (key, pc) => opt.subtitles?.clipText(key, pc.id) ?? null,
+                },
             );
+            if (opt.subtitles) {
+                // The lines this pack uses, as engine-neutral data beside the engine's own copy in the descriptors.
+                const used: SubtitleLine[] = [];
+                for (const [key, bank] of banks)
+                    for (const pc of bank.sounds) {
+                        const line = conv.map.get(key, pc.id) !== null ? opt.subtitles.line(key, pc.id) : null;
+                        if (line && conv.sounds.some((x) => x.id === (conv.map.get(key, pc.id)! & 0xffff) && x.text))
+                            used.push(line);
+                    }
+                if (used.length) {
+                    res.subtitles = { lines: used.length, language: opt.subtitles.language };
+                    res.files['story/subtitles.json'] = strToU8(
+                        JSON.stringify({
+                            format: SUBTITLE_FORMAT,
+                            version: SUBTITLE_VERSION,
+                            language: opt.subtitles.language,
+                            lines: used,
+                        }),
+                    );
+                }
+            }
             for (const w of conv.warnings) res.warnings.push(`sounds: ${w}`);
             if (!conv.sounds.length) return;
             if (host) {
@@ -2229,6 +2269,9 @@ export async function convertOotfLevels(
                         title,
                     );
                     if (id !== null) console.warn(`sequences ${title}: ${refs.length} own sequence(s) started by Stomp Player ${id}`);
+                    // Its scene pans a camera over flat pictures that fill a 4:3 screen at the PC field of view; a wider
+                    // view runs past their edges, so the level is shown at 4:3 (manifest `level_aspect`).
+                    if (id !== null) (res.levelAspect ??= {})[title] = PICTURE_SCENE_ASPECT;
                 }
             });
         }

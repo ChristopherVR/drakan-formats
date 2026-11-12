@@ -318,6 +318,8 @@ export interface Ps2Sound {
     pcm: Int16Array;
     /** Also write the 0x0305 lip-sync track (`encodeLipSync`) so a speaking actor with a jaw channel moves its mouth. */
     lipSync?: boolean;
+    /** Subtitle text stored in the descriptor (flag 0x2000), cp1252; absent or empty: no text. */
+    text?: string;
 }
 
 /**
@@ -379,14 +381,25 @@ export function writePs2Group(g: Ps2Group): Uint8Array {
     return nameBytes(g.name);
 }
 
-/** 0x0302 descriptor exactly as the disc writes it (no subtitle text: `u32 2` stands for an empty text area). */
+/** Descriptor flag: a subtitle string follows the 32 fixed bytes (docs/reference/subtitles.md 3.1). */
+export const kPs2SoundTextFlag = 0x2000;
+/** The engine keeps a loaded subtitle in a 0x400 byte slot. */
+export const kPs2SoundTextMax = 1000;
+
+/**
+ * 0x0302 descriptor exactly as the disc writes it. Without text `u32 2` stands for an empty text area; with text the flag
+ * 0x2000 is set and `u16 length + text` (cp1252, NUL padded so the record ends 4-aligned) takes its place.
+ */
 export function writePs2Descriptor(s: Ps2Sound, pcmBytes: number, adpcmBytes: number): Uint8Array {
     const nb = nameBytes(s.name);
-    const out = new Uint8Array(nb.length + 48);
+    const text = s.text ? encodeSoundText(s.text) : null;
+    const start = nb.length + 34;
+    const textLen = text ? ((start + text.length + 1 + 3) & ~3) - start : 0;
+    const out = new Uint8Array(nb.length + 32 + (text ? 2 + textLen : 4) + 12);
     out.set(nb, 0);
     const dv = view(out);
     let o = nb.length;
-    dv.setUint32(o, s.flags >>> 0, true);
+    dv.setUint32(o, (text ? s.flags | kPs2SoundTextFlag : s.flags) >>> 0, true);
     dv.setUint32(o + 4, 0x00100001, true); // u16 channels 1, u16 bits 16
     dv.setUint32(o + 8, s.rate, true);
     dv.setInt32(o + 12, Math.min(0, Math.round(s.volume)), true);
@@ -395,11 +408,29 @@ export function writePs2Descriptor(s: Ps2Sound, pcmBytes: number, adpcmBytes: nu
     dv.setUint32(o + 24, 0, true);
     const pri = Math.max(0, Math.min(15, Math.round(s.priority)));
     dv.setUint32(o + 28, pri * 0x11, true);
-    dv.setUint32(o + 32, 2, true);
-    dv.setUint32(o + 36, pcmBytes, true);
-    dv.setUint32(o + 40, adpcmBytes, true);
-    dv.setUint32(o + 44, 0, true);
+    if (text) {
+        dv.setUint16(o + 32, textLen, true);
+        out.set(text, o + 34);
+        o += 34 + textLen;
+    } else {
+        dv.setUint32(o + 32, 2, true);
+        o += 36;
+    }
+    dv.setUint32(o, pcmBytes, true);
+    dv.setUint32(o + 4, adpcmBytes, true);
+    dv.setUint32(o + 8, 0, true);
     return out;
+}
+
+/** cp1252 bytes of a subtitle (characters outside Latin-1 become `?`), cut to what the engine's text slot holds. */
+function encodeSoundText(text: string): Uint8Array {
+    const out: number[] = [];
+    for (const ch of text) {
+        const c = ch.codePointAt(0)!;
+        out.push(c >= 0x20 && c < 256 ? c : 0x3f);
+        if (out.length >= kPs2SoundTextMax) break;
+    }
+    return Uint8Array.from(out);
 }
 
 export interface SdbRecord {
@@ -563,6 +594,8 @@ export interface SoundConvertOptions {
     fitRates?: readonly number[];
     /** Override the descriptor flags (default: 0x2, loop adds 0x8). */
     flags?: (pc: PcSound) => number;
+    /** Subtitle text of a sound (`key` = sdbKey of its PC bank), null for none. */
+    text?: (key: string, pc: PcSound) => string | null;
 }
 
 export interface ConvertedSound {
@@ -682,6 +715,8 @@ export function convertPcSounds(
                 // Speech is what the scenes and AI barks play on actors; a looped sound is never spoken.
                 lipSync: !loop,
             };
+            const text = loop ? null : (opts.text?.(key, pc) ?? null);
+            if (text) sound.text = text;
             sounds.push(sound);
             map.set(key, pc.id, next);
             bytes += size;
