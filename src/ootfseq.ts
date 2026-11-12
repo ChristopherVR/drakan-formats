@@ -211,6 +211,14 @@ export interface SequenceConvertOptions {
      * held at the end gets a release (run/stop 1) at the time of the scene's last action. See `releaseHeldActors`.
      */
     releaseHeldAtEnd?: boolean;
+    /**
+     * Messages sent to level objects at the time of the scene's last action, each by one more actor that does nothing else.
+     * The engine's skip (Esc / Start on a scene whose flags have 0x40) does not stop a scene: it moves the scene's clock to
+     * its last action and runs every action it passed, so a message at the end is sent whether the scene is watched or
+     * skipped. The Ruined Village Book ends its level this way (its exit used to wait for a Timer of the scene's length, so a
+     * skip released Rynn into the empty picture level for the rest of the 250 s). See `addEndMessages`.
+     */
+    endMessages?: readonly EndMessage[];
     /** Rewrites each parsed PC scene before it is converted (the Intro's culling show / hide timelines, `ootfcull.ts`). */
     rewrite?: (seq: PcSequence) => PcSequence;
 }
@@ -426,6 +434,11 @@ export function convertSequence(seq: PcSequence, opts: SequenceConvertOptions, r
     }
     if (held) report.actionsOut += detachHeldPlayer(actors, held.slot);
     if (opts.releaseHeldAtEnd) report.actionsOut += releaseHeldActors(actors);
+    if (opts.endMessages?.length) {
+        const added = addEndMessages(actors, opts.endMessages);
+        report.actorsOut += added;
+        report.actionsOut += added;
+    }
     const slots = actors.reduce((m, a) => Math.max(m, a.slot + 1), 1);
     const s: SsdSequence = {
         id: 0,
@@ -497,6 +510,42 @@ export function releaseHeldActors(actors: SsdActor[]): number {
         const j = insertAction(a, newActionBytes(5, end, { value: 1 }));
         a.actions = j.actions;
         a.actionCount = j.actionCount;
+        added++;
+    }
+    return added;
+}
+
+/** A message a scene sends to a level object when it ends (watched or skipped). */
+export interface EndMessage {
+    /** Converted level object id of the target. */
+    ref: number;
+    /** Engine message number: `0x1000 + n` for the object message enum value n (4097 On; 4101 is a Timer's Trigger Message 5). */
+    message: number;
+    /** Actor name in the sequence (for the editor's lists). */
+    name: string;
+}
+
+/**
+ * Appends one actor per message: slot after the last, `ref` the target object, one message action (type 7) at the time of
+ * the scene's last action. Actions run in time order, so it comes after everything else the scene does at that time
+ * (`releaseHeldActors` puts its releases there too). Returns the number of actors added.
+ */
+export function addEndMessages(actors: SsdActor[], messages: readonly EndMessage[]): number {
+    let end = 0;
+    for (const a of actors) for (const x of parseActions(a) ?? []) end = Math.max(end, x.time);
+    let added = 0;
+    for (const m of messages) {
+        const j = joinActions([newActionBytes(7, end, { message: m.message, param: 0 })]);
+        actors.push({
+            name: m.name,
+            slot: actors.reduce((s, a) => Math.max(s, a.slot + 1), 1),
+            ref: m.ref,
+            mode: 0,
+            nameLen: 0,
+            actionCount: j.actionCount,
+            actions: j.actions,
+            keys: [],
+        });
         added++;
     }
     return added;

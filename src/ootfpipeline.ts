@@ -47,7 +47,7 @@ import {
 import { SUBTITLE_FORMAT, SUBTITLE_VERSION, type SubtitleLine, type SubtitleTable } from './ootfsubtitles.ts';
 import { applyCulling, planLevelCulling, sceneFileKey, type LevelCulling } from './ootfcull.ts';
 import { carryCreatures, type CarrierRig } from './ootfcarry.ts';
-import type { PcSeqActor, PcSequence, PlayerGround } from './ootfseq.ts';
+import type { EndMessage, PcSeqActor, PcSequence, PlayerGround } from './ootfseq.ts';
 import { planShellTrims } from './ootfshell.ts';
 import { convertStompPlayers, pcStompPlayer } from './ootfstomp.ts';
 import {
@@ -211,6 +211,21 @@ import {
 /** Directory-less name of the shared asset container ("Common\OotFCom\OotFCom" on the virtual disc). */
 /** Levels whose own sequence the PC engine plays at the load (the Ruined Village Book's "backstory"). */
 const AUTO_PLAY_LEVEL = /ruined village book\.lvl$/i;
+/** Engine message a Timer sends for its Trigger Message 5 (0x1000 + 5): what the Book's level Timer gave its exit. */
+const EXIT_TIMER_MESSAGE = 0x1005;
+/**
+ * The end messages of an auto-play level's scene: one to each of the level's Level Transitions (PC class 55), the message its
+ * level Timer sends. The runtime takes such a message as the Book's exit (drakan_levelchange.cpp, exitHandlerEntry).
+ */
+function autoPlayEndMessages(pc: PcLevel, idMap: ReadonlyMap<number, number>): EndMessage[] {
+    const out: EndMessage[] = [];
+    for (const o of pc.list.objects) {
+        if (pc.classes.get(o.dbIndex)?.get(o.classId)?.rflClass !== 55) continue;
+        const ref = idMap.get(o.id);
+        if (ref !== undefined) out.push({ ref, message: EXIT_TIMER_MESSAGE, name: 'Level Exit' });
+    }
+    return out;
+}
 /** Levels whose transition exit scenes are not relayed (see the exits stage). */
 const EXIT_SCENE_SKIP = /volcano\.lvl$/i;
 /**
@@ -2119,6 +2134,8 @@ export async function convertOotfLevels(
                         holdPlayerObjectId: syntheticPlayer,
                         // the Book's backstory holds Rynn and the camera to the level's end, then hands back to Ruined Village
                         releaseHeldAtEnd: isAutoPlayLevel(pc),
+                        // ...and its end, watched or skipped, takes the level's exit (the level Timer alone outlasted a skip)
+                        endMessages: isAutoPlayLevel(pc) ? autoPlayEndMessages(pc, first.objectIdMap) : undefined,
                         playerGround,
                         rewrite: (seq) => carry(cull ? cull(seq) : seq),
                         usedIds: used,

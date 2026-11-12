@@ -488,6 +488,53 @@ describe('ootfseq', () => {
         expect((await runs(undefined)).map((r) => r.length)).toEqual([1, 1, 0]);
     });
 
+    it('sends the end messages at the last action, after the releases, so a skipped scene sends them too', async () => {
+        // The engine's skip moves the scene clock to its last action and runs what it passed: a message there always goes out.
+        const bytes = w(
+            str('backstory'),
+            u32(124),
+            u32(0),
+            u32(3),
+            u32(2),
+            actor('camera', 1, 2416, [act(5, 0, [...u32(0)]), act(0, 12, new Array(36).fill(0))]),
+            actor('Fader 2', 2, 2427, [act(7, 250.5, [...u32(4097), ...u32(0)])]),
+        );
+        const result = await convertPcSequences(stub(bytes), {
+            maps: {
+                objectIdMap: new Map([
+                    [2416, 10],
+                    [2427, 12],
+                ]),
+            },
+            releaseHeldAtEnd: true,
+            endMessages: [{ ref: 2420, message: 0x1005, name: 'Level Exit' }],
+            usedIds: new Set(),
+        });
+        const entry = result.entries.find((e) => e.type === 0x311)!;
+        const seq = parseSequence(entry.id, entry.sub, entry.data)!;
+        expect(seq.actors.map((a) => [a.name, a.slot, a.ref])).toEqual([
+            ['camera', 1, 10],
+            ['Fader 2', 2, 12],
+            ['Level Exit', 3, 2420],
+        ]);
+        expect(seq.slots).toBe(4);
+        const exit = parseActions(seq.actors[2]!)!;
+        expect(exit.map((x) => [x.type, Math.round(x.time * 10) / 10, x.fields[0]!.value, x.fields[1]!.value])).toEqual(
+            [[7, 250.5, 0x1005, 0]],
+        );
+        // no end messages: the scene is unchanged
+        const plain = await convertPcSequences(stub(bytes), {
+            maps: {
+                objectIdMap: new Map([
+                    [2416, 10],
+                    [2427, 12],
+                ]),
+            },
+            usedIds: new Set(),
+        });
+        expect(parseSequence(0, 0, plain.entries.find((e) => e.type === 0x311)!.data)!.actors).toHaveLength(2);
+    });
+
     it('sets the lip-sync bit on the speech of lip-synced actors only', async () => {
         const speech = act(3, 1, [...u32(0x13f), ...f32(6.2), ...u16(10000), ...u16(0x10)]);
         const step = act(3, 2, [...u32(0x7d), ...f32(0.3), ...u16(6000), ...u16(0)]);
