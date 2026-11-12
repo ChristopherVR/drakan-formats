@@ -458,20 +458,30 @@ export interface Ps2Texture {
     lossy: boolean;
     /** The lossless pixels (the final size, before quantising / 5 bit reduction); set only when `lossy`. */
     exact?: RgbaImage;
+    /**
+     * The picture the HD pack should upscale (what the exact sink receives); set when `lossy` or when the written size differs
+     * from the source size. A resized texture (terrain enlarged to `minSize`, squared or rounded to a power of two) gives the
+     * source pixels before the resize, so the upscaler works from the PC original instead of a smoothed or row-doubled copy;
+     * otherwise it is `exact`.
+     */
+    hdSource?: RgbaImage;
 }
 
 /**
- * Receiver for the lossless pixels of every lossy encode (`body` is the finished 0x0040 record). The HD pack tooling keys them by
- * the body's SHA-1 and upscales them instead of the quantised guest texture, so the engine (HD replacement by content hash)
- * shows the full-quality picture while the guest keeps the cheap 8 bpp texture it can load fast. Unset = ignored.
+ * Receiver for the HD source of every lossy or resized encode (`body` is the finished 0x0040 record, `image` is
+ * `Ps2Texture.hdSource`: the source pixels before any resize, else the final-size pixels before quantising). The HD pack
+ * tooling keys them by the body's SHA-1 and upscales them instead of the guest texture, so the engine (HD replacement by content
+ * hash) shows the full-quality picture while the guest keeps the cheap 8 bpp texture it can load fast. When `image` is smaller
+ * than the record, the tooling upscales it to the record's size times its factor. Unset = ignored.
  */
-let exactSink: ((body: Uint8Array, exact: RgbaImage) => void) | null = null;
-export function setExactSink(fn: ((body: Uint8Array, exact: RgbaImage) => void) | null): void {
+let exactSink: ((body: Uint8Array, image: RgbaImage) => void) | null = null;
+export function setExactSink(fn: ((body: Uint8Array, image: RgbaImage) => void) | null): void {
     exactSink = fn;
 }
-function lossyResult(t: Ps2Texture, exact: RgbaImage, emit = true): Ps2Texture {
-    if (emit) exactSink?.(t.body, exact);
-    return { ...t, exact };
+/** Attach the lossless final-size pixels (`exact`, lossy encodes only) and the HD source, and hand the source to the sink. */
+function hdResult(t: Ps2Texture, exact: RgbaImage | undefined, source: RgbaImage, emit = true): Ps2Texture {
+    if (emit) exactSink?.(t.body, source);
+    return { ...t, ...(exact ? { exact } : {}), hdSource: source };
 }
 
 /**
@@ -530,6 +540,9 @@ export function encodePs2Texture(source: RgbaImage, opt: Ps2TextureOptions = {})
     if (opt.square) w = h = Math.max(w, h);
     const enlarged = opaque && w >= src.width && h >= src.height && (w > src.width || h > src.height);
     const img = enlarged ? resampleSmooth(src, w, h) : resampleNearest(src, w, h);
+    // HD source: the pixels before the resize when the size changed (the HD pack upscales those to the record's size).
+    const resized = w !== src.width || h !== src.height;
+    const hdSource = resized ? src : img;
     const px = w * h;
     const fps = opt.fps ?? 10;
     const colors = new Map<number, number>();
@@ -627,7 +640,7 @@ export function encodePs2Texture(source: RgbaImage, opt: Ps2TextureOptions = {})
         for (let i = palette.length / 4; i < 256; i++) body[0x40 + 16 + i * 4 + 3] = PS2_OPAQUE;
         for (let i = 0; i < px; i++) body[0x40 + 16 + 1024 + i] = lookup(i);
         const t8: Ps2Texture = { body, width: w, height: h, bpp: 8, hasAlpha, lossy };
-        return lossy ? lossyResult(t8, img, !opt.deferExact) : t8;
+        return lossy || resized ? hdResult(t8, lossy ? img : undefined, hdSource, !opt.deferExact) : t8;
     }
     if (mode === 'truecolor') {
         const body = new Uint8Array(0x40 + px * 4);
@@ -638,7 +651,8 @@ export function encodePs2Texture(source: RgbaImage, opt: Ps2TextureOptions = {})
             body[0x40 + i * 4 + 2] = img.rgba[i * 4 + 2]!;
             body[0x40 + i * 4 + 3] = ps2Alpha(img.rgba[i * 4 + 3]!);
         }
-        return { body, width: w, height: h, bpp: 32, hasAlpha, lossy: false };
+        const t32: Ps2Texture = { body, width: w, height: h, bpp: 32, hasAlpha, lossy: false };
+        return resized ? hdResult(t32, undefined, hdSource, !opt.deferExact) : t32;
     }
     // More than 256 colours, no graded alpha: 16 bpp 1:5:5:5 (R in the low bits, A in bit 15), as the disc's 16 bpp textures.
     const body = new Uint8Array(0x40 + px * 2);
@@ -650,7 +664,7 @@ export function encodePs2Texture(source: RgbaImage, opt: Ps2TextureOptions = {})
         const b = img.rgba[i * 4 + 2]! >> 3;
         dv.setUint16(0x40 + i * 2, r | (g << 5) | (b << 10) | (img.rgba[i * 4 + 3]! >= 128 ? 0x8000 : 0), true);
     }
-    return lossyResult({ body, width: w, height: h, bpp: 16, hasAlpha, lossy: true }, img, !opt.deferExact);
+    return hdResult({ body, width: w, height: h, bpp: 16, hasAlpha, lossy: true }, img, hdSource, !opt.deferExact);
 }
 
 /**
@@ -663,6 +677,10 @@ export function upgradeIndexedSquareTexture(body: Uint8Array): Ps2Texture | null
         throw new OotfTextureError('unsupported fast-draw texture size');
     if (source.bpp === 8 && source.width === source.height) return null;
     const size = Math.max(source.width, source.height);
+    // HD source: the record's own picture before squaring (decoded opaque alpha 254 is opaque).
+    const original: RgbaImage = { width: source.width, height: source.height, rgba: new Uint8Array(source.rgba) };
+    for (let i = 3; i < original.rgba.length; i += 4) if (original.rgba[i] === 254) original.rgba[i] = 255;
+    const squared = source.width !== source.height;
     if (source.bpp === 8) {
         // Preserve the authored palette verbatim (including every alpha byte). Only resize the index plane.
         const paletteBytes = source.paletteKind === 1 ? 1024 : 512;
@@ -685,7 +703,8 @@ export function upgradeIndexedSquareTexture(body: Uint8Array): Ps2Texture | null
                     indices[
                         Math.floor((y * source.height) / size) * source.width + Math.floor((x * source.width) / size)
                     ]!;
-        return { body: next, width: size, height: size, bpp: 8, hasAlpha: (body[37]! & 2) !== 0, lossy: false };
+        const t: Ps2Texture = { body: next, width: size, height: size, bpp: 8, hasAlpha: (body[37]! & 2) !== 0, lossy: false };
+        return squared ? hdResult(t, undefined, original) : t;
     }
     // Resample before encoding, so opaque enlargement cannot select the separate smoothing path.
     const image = resampleNearest(source, size, size);
@@ -702,7 +721,8 @@ export function upgradeIndexedSquareTexture(body: Uint8Array): Ps2Texture | null
     upgraded.body.set(body.subarray(36, 64), 36);
     upgraded.body[38] = 0; // representation flag: the upgraded pixel/index plane is 8 bpp
     upgraded.hasAlpha = (body[37]! & 2) !== 0;
-    if (upgraded.lossy && upgraded.exact) exactSink?.(upgraded.body, upgraded.exact);
+    if (squared) upgraded.hdSource = original;
+    if (upgraded.hdSource) exactSink?.(upgraded.body, upgraded.hdSource);
     return upgraded;
 }
 

@@ -130,6 +130,40 @@ describe('PS2 texture encode', () => {
         expect(got[0]!.w).toBe(32);
     });
 
+    it('gives the HD sink the source pixels before a resize, also when the encode is lossless', () => {
+        const got: Array<{ body: Uint8Array; w: number; h: number; rgba: Uint8Array }> = [];
+        setExactSink((body, image) => got.push({ body, w: image.width, h: image.height, rgba: image.rgba }));
+        try {
+            // terrain: a 64 px opaque tile enlarged to 128 and quantised; the sink gets the 64 px original, `exact` stays the
+            // 128 px lossless picture the 8 bpp texture was made from
+            const tile = img(64, 64, (x, y) => [x * 4, y * 4, (x * 3 + y * 5) & 255, 255]);
+            const t = encodePs2Texture(tile, { mode: 'indexed', minSize: 128 });
+            expect([t.width, t.height, t.bpp, t.lossy]).toEqual([128, 128, 8, true]);
+            expect([t.exact?.width, t.hdSource?.width]).toEqual([128, 64]);
+            expect(got.at(-1)!.body).toBe(t.body);
+            expect([got.at(-1)!.w, got.at(-1)!.h]).toEqual([64, 64]);
+            expect(got.at(-1)!.rgba).toEqual(tile.rgba);
+            // a creature texture made square with at most 256 colours is exact (no `exact`), but it was stretched: the
+            // sink gets the non-square original so the upscaler does not see doubled rows
+            const skin = img(16, 8, (x, y) => [x * 10, y * 20, 30, 255]);
+            const s = encodePs2Texture(skin, { square: true });
+            expect([s.width, s.height, s.lossy, s.exact]).toEqual([16, 16, false, undefined]);
+            expect([s.hdSource?.width, s.hdSource?.height]).toEqual([16, 8]);
+            expect([got.at(-1)!.w, got.at(-1)!.h]).toEqual([16, 8]);
+            // a texture written at its own size and exactly: nothing for the sink
+            const n = got.length;
+            const same = encodePs2Texture(img(16, 16, (x) => [x, 0, 0, 255]), { square: true });
+            expect(same.hdSource).toBeUndefined();
+            expect(got).toHaveLength(n);
+            // deferExact: the source is attached but not emitted
+            const deferred = encodePs2Texture(tile, { mode: 'indexed', minSize: 128, deferExact: true });
+            expect(deferred.hdSource?.width).toBe(64);
+            expect(got).toHaveLength(n);
+        } finally {
+            setExactSink(null);
+        }
+    });
+
     it('enlarges an opaque texture to minSize with a smooth, tileable filter and keeps cut-outs hard', () => {
         const ramp = img(8, 8, (x) => [x * 30, 100, 50, 255]);
         const t = encodePs2Texture(ramp, { minSize: 16 });
@@ -375,6 +409,7 @@ describe('native item texture representation upgrades', () => {
         for (let y = 0; y < 16; y++)
             expected.set(original.rgba.subarray(Math.floor(y / 2) * 64, Math.floor(y / 2) * 64 + 64), y * 64);
         expect(image.rgba).toEqual(expected);
+        expect([upgraded.hdSource?.width, upgraded.hdSource?.height]).toEqual([16, 8]); // the HD source is not squared
         expect(upgradeIndexedSquareTexture(upgraded.body)).toBeNull();
     });
 
@@ -391,9 +426,12 @@ describe('native item texture representation upgrades', () => {
         new DataView(original.body.buffer).setFloat32(44, 2.5, true);
         const emitted: Uint8Array[] = [];
         try {
-            setExactSink((body, exact) => {
+            setExactSink((body, image) => {
                 emitted.push(body.slice());
-                expect([exact.width, exact.height]).toEqual([32, 32]);
+                // the HD source is the record's own 32 x 16 picture, not the row-doubled square, with opaque alpha 255
+                expect([image.width, image.height]).toEqual([32, 16]);
+                expect(image.rgba.filter((_, i) => i % 4 === 3).every((a) => a === 255)).toBe(true);
+                expect(image.rgba.slice(0, 3)).toEqual(rgba.slice(0, 3));
             });
             const next = upgradeIndexedSquareTexture(original.body)!;
             expect(next.lossy).toBe(true);
