@@ -418,6 +418,13 @@ export interface PlanOptions {
     modelOdbFiles?: ReadonlySet<string>;
     /** True for a PC class that must not be name-mapped to a same-named PS2 class (its converted skinned model is cloned instead). */
     keepOwnModel?: (cls: OdbClass) => boolean;
+    /**
+     * The auxiliary class reference (record body u32 at +10: class id, db) a clone must carry instead of none: a Drakan 2
+     * weapon is its handle model plus a child part class named there (the mace's head, the hammer's head, the axe itself,
+     * a sword's sheen layer), so a PC weapon shown with a disc weapon model needs that weapon's reference or it draws the
+     * handle alone. Undefined or 0 keeps the clone without one.
+     */
+    companionFor?: (cls: OdbClass, odbFile: string) => number | undefined;
     modelFor?: (cls: OdbClass, odbFile: string) => { id: number; db: number } | null;
     /**
      * Animation-typed defaults (type 9, scalar or array) of a class whose model was converted with its own clips: PC animation id
@@ -1247,10 +1254,11 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
         // PS2 headers carry an auxiliary class reference at +10/+12, independently of the field list. PC ODB
         // records have no equivalent (pc.ts parsePcClassRecord). Never inherit a template's unrelated companion:
         // e.g. the native air-current template attaches a Dust Devil generator to every imported river volume.
+        // The one companion a clone does carry is the caller's (`companionFor`: the child part of a swapped-in disc weapon).
         // Preserve +14, which announces the following model/bounds block; actual source class defaults are relocated later.
         const recordParts = splitClassRecord(record);
         const ownHeader = recordParts.body.slice();
-        view(ownHeader).setUint32(10, 0, true);
+        view(ownHeader).setUint32(10, (raw && opt.companionFor?.(cls, c.odb.file)) || 0, true);
         record = joinClassRecord(recordParts.name, ownHeader);
         if (modelRef && raw)
             record = patchRecordModel(record, modelRef, opt.modelBounds?.(modelRef.id, c.odb.file, modelRef.db));

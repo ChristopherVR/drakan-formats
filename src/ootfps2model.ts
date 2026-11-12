@@ -252,3 +252,17 @@ export function planPs2Models(o: Ps2ModelSwapOptions = {}): Ps2ModelPlan {
         },
     };
 }
+
+/**
+ * The auxiliary class reference of a disc class record (`raw` = the whole 0x0102 record: name field, then the body): the
+ * u32 at body +10, a class id in the low word and its db index in the high word, 0 for none. On the disc 88 of the 192
+ * weapon classes with a model name a child part there (engine class 203): "Steel Mace" is the handle and names "Steel Mace
+ * Head", "Steel Hammer" its head, "Steel Axe" (a sheen layer) the axe itself, the steel swords their sheen layer. A PC
+ * weapon shown with such a model must carry the reference, or it draws the handle alone.
+ */
+export function classCompanionRef(raw: Uint8Array): number {
+    if (raw.length < 2) return 0;
+    const dv = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+    const at = 2 + dv.getUint16(0, true) + 10;
+    return at + 4 <= raw.length ? dv.getUint32(at, true) : 0;
+}

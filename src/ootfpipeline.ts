@@ -128,7 +128,14 @@ import {
 } from './ootfclass.ts';
 import { OotfAssetBuilder, type AssetReport } from './ootfassets.ts';
 import { type Ps2TextureSwapOptions, effectiveSubstitutions, resolvePs2Substitutes } from './ootfps2tex.ts';
-import { type Ps2ModelSwapOptions, healthUntilFlee, modelKey, planPs2Models } from './ootfps2model.ts';
+import {
+    type Ps2ModelSwapOptions,
+    classCompanionRef,
+    healthUntilFlee,
+    modelKey,
+    planPs2Models,
+} from './ootfps2model.ts';
+import { ownModelClasses } from './ootfownmodel.ts';
 import { REFERENCE_ENGINES, deliberateOmission, pcParamAlias } from './ootfcoverage.ts';
 import { loadPcLevel, parsePcOdbClasses, pcLevelName, resolvePcPath, type PcFileSource, type PcLevel } from './pc.ts';
 import {
@@ -699,12 +706,20 @@ export async function convertOotfLevels(
     const modelSwap = planPs2Models(opt.ps2Models);
     const modelSwapsUsed = new Map<string, { ootf: string; ps2: string; label: string; category: string }>();
     const ps2WeaponModels = new Map<string, number>();
+    // A disc weapon is its handle model plus the child part its class record names (`classCompanionRef`), by disc class name.
+    const ps2WeaponCompanions = new Map<string, number>();
+    /** Swapped PC weapon class name -> the child part reference of the disc weapon whose model it shows. */
+    const weaponCompanions = new Map<string, number>();
     {
         const hostOdb = ps2.odbs.get((opt.hostStem ?? 'RESOURES').toUpperCase());
         if (hostOdb)
             for (const c of (await parseOdbClasses(hostOdb)).values())
-                if (c.model && c.model.db === 0 && !ps2WeaponModels.has(modelKey(c.name)))
+                if (c.model && c.model.db === 0 && !ps2WeaponModels.has(modelKey(c.name))) {
                     ps2WeaponModels.set(modelKey(c.name), c.model.id);
+                    const e = hostOdb.entries.find((x) => x.type === ODB_CLASS_TYPE && x.id === c.id);
+                    const ref = e ? classCompanionRef(await hostOdb.readRaw(e)) : 0;
+                    if (ref) ps2WeaponCompanions.set(modelKey(c.name), ref);
+                }
     }
     let culling: LevelCulling | null = null;
     if (opt.models !== false && opt.classes !== false && hostOk) {
@@ -746,6 +761,8 @@ export async function convertOotfLevels(
                     );
                 if (swap && native !== undefined && (await builder.useNativeModel(ow, m.db, m.id, native))) {
                     modelSwapsUsed.set(modelKey(u.cls.name), { ...swap, ootf: u.cls.name.trim() });
+                    const part = ps2WeaponCompanions.get(modelKey(swap.ps2));
+                    if (part) weaponCompanions.set(modelKey(u.cls.name), part);
                     continue;
                 }
                 // Native generic props need the strip draw representation even when their model is rigid.
@@ -843,6 +860,20 @@ export async function convertOotfLevels(
                 }
                 res.warnings.push(...retargetNotes);
             }
+            // Ropes keep the PC rope mesh the level scales to length, whatever the disc's same-named class shows (ootfownmodel.ts).
+            if (opt.models !== false && hostOk) {
+                const ropes = ownModelClasses(
+                    input.map((i) => {
+                        const ow = ownerOf.get(i.cls);
+                        const m = i.cls.model;
+                        const id = ow && m ? builder.mapModelRef(m.db, m.id, ow) : null;
+                        return { cls: i.cls, model: id === null ? null : String(id) };
+                    }),
+                );
+                for (const c of ropes) convertOwn.add(c);
+                if (ropes.length)
+                    log(`ropes: ${[...new Set(ropes.map((c) => c.name.trim()))].join(', ')} keep the PC rope model`);
+            }
             if (opt.models !== false && hostOk) {
                 for (const i of input) {
                     const target = i.cls.rflClass === 17 ? modelSwap.enemyTarget(i.cls.name) : null;
@@ -933,6 +964,12 @@ export async function convertOotfLevels(
             const planOpts: PlanOptions = {
                 modelOdbFiles: modelFiles,
                 keepOwnModel: (cls) => convertOwn.has(cls),
+                // A PC weapon shown with a disc weapon model carries that weapon's child part (the mace head ...); the part
+                // is a class of the host ODB, so only a clone made there can name it.
+                companionFor: (cls, file) =>
+                    file === hostFile && [14, 39, 79].includes(cls.rflClass ?? -1)
+                        ? weaponCompanions.get(modelKey(cls.name))
+                        : undefined,
                 rewriteText:
                     opt.texts === false || ootfDebugFlag('OOTF_NO_CLSTEXT')
                         ? undefined
