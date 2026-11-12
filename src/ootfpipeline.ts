@@ -1869,7 +1869,9 @@ export async function convertOotfLevels(
                             rigOf: (a) => (a.actorType === 1 ? creatureRigs.get(a.objectId) : undefined),
                             propReach: (a) => (a.actorType === 1 ? propReaches.get(a.objectId) : undefined),
                         });
-                    // The scene Wartok class a scene actor plays on (undefined for every other actor).
+                    // The scene Wartok class a scene actor plays on (undefined for every other actor). This level's class
+                    // objects are not the plan's, so the lookup also matches by signature (`sceneTockLookup`).
+                    const tockFor = sceneTockLookup(sceneTocks, sig);
                     const tockOf = (actor: PcSeqActor, targetId: number): SceneTock | undefined => {
                         if (!sceneTocks.size) return undefined;
                         const sourceId =
@@ -1880,7 +1882,7 @@ export async function convertOotfLevels(
                             sourceId !== undefined ? o.id === sourceId : first.objectIdMap.get(o.id) === targetId,
                         );
                         const cls = object && pc.classes.get(object.dbIndex)?.get(object.classId);
-                        return cls ? sceneTocks.get(cls) : undefined;
+                        return cls ? tockFor(cls) : undefined;
                     };
                     const cull = c ? cullRewrite(culling, c) : undefined;
                     const conv = await convertPcSequences(ssdReader, {
@@ -3157,6 +3159,26 @@ export function placedCorpsePose(
     if (spont >= 0 && fieldIsIndirect(cls.fields[spont]!.type))
         specs.push({ fieldIndex: spont, type: cls.fields[spont]!.type, name: cls.fields[spont]!.name, value: [] });
     return specs;
+}
+
+/**
+ * Finds the scene creature entry of a level's own class object. `tocks` is keyed by the class objects of the one class plan,
+ * which keeps the first level's object for each class signature (`sig`: name, engine id, defaults); every other level parses
+ * its own, equal objects. Looking them up by identity missed in every later level: Volcanic's scene orcs (first placed in
+ * Ruined Village) then played the PC Heuge clips on the disc orc rig, or no clip at all, and Volcanic crashed at a direct
+ * start or soon after the arrival (docs/journal/2026-11-12/ootf-volcanic-rift.md). So a miss falls back to the signature, the key the plan dedupes on.
+ */
+export function sceneTockLookup<T>(
+    tocks: ReadonlyMap<OdbClass, T>,
+    key: (cls: OdbClass) => string,
+): (cls: OdbClass) => T | undefined {
+    let byKey: Map<string, T> | undefined;
+    return (cls) => {
+        const hit = tocks.get(cls);
+        if (hit !== undefined || !tocks.size) return hit;
+        byKey ??= new Map([...tocks].map(([c, t]) => [key(c), t]));
+        return byKey.get(key(cls));
+    };
 }
 
 /** A scene-only Wartok class shown with the disc Wartok model (`ootfps2model.ts` scene rows). */
