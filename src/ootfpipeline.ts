@@ -93,6 +93,7 @@ import {
 } from './ootfmusic.ts';
 import { buildOotfMusicPack, type OotfMusicPack } from './ootfdmusic.ts';
 import { addAutoPlayStomp, applyPuzzleLogic, relayDetectorSequences } from './ootfpuzzle.ts';
+import { hideLightMarkers } from './ootfmarkers.ts';
 import { findPushPuzzles, modelBoxOf, standsOnModel, type ModelBox } from './ootfpush.ts';
 import { encodePs2Texture, type Ps2TextureOptions, type TextureMode } from './ootftex.ts';
 import { TextPlan, isTextField, parseRrcStrings, rewriteClassTextDefaults, rewriteObjectTexts } from './ootftext.ts';
@@ -2392,6 +2393,17 @@ export async function convertOotfLevels(
                 for (const w of r.warnings) res.warnings.push(w);
             });
         }
+        // Last change of object flags: dynamic lights of a class with the "Light Source" cube are not drawn (ootfmarkers.ts).
+        await stage(`markers ${pc.path}`, async () => {
+            const hidden = hideLightMarkers(
+                lvl.objects,
+                (o) =>
+                    classes.get(o.dbIndex)?.get(o.classId) ??
+                    plan?.synthesized.find((x) => x.dbIndex === o.dbIndex && x.classId === o.classId)?.cls,
+            );
+            if (hidden.length)
+                console.warn(`markers ${title}: ${hidden.length} dynamic light(s) no longer draw their marker cube`);
+        });
         if (opt.texts !== false)
             await stage(`texts ${pc.path}`, async () => void rewriteObjectTexts(lvl.objects, textPlan, xdbOf));
         if (opt.terrainShading !== false)
