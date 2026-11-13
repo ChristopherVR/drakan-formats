@@ -2001,6 +2001,20 @@ export async function convertOotfLevels(
                     const sceneObjectIds: RefLookup = {
                         get: (id) => (rynnProp && id === rynnProp.id ? syntheticPlayer : first.objectIdMap.get(id)),
                     };
+                    // Arokh's scene channels (attach points and animation channels) by joint name, PC rig -> PS2 rig: the PC
+                    // saddle is channel 19, the PS2 saddle 14 (19 is a neck joint there).
+                    const dragonId = actorId(28);
+                    const dragonChannels = await (async () => {
+                        const object = pc.list.objects.find(
+                            (o) => pc.classes.get(o.dbIndex)?.get(o.classId)?.rflClass === 28,
+                        );
+                        const cls = object && pc.classes.get(object.dbIndex)?.get(object.classId);
+                        const ow = cls && ownerOf.get(cls);
+                        if (dragonId === undefined || !cls?.model || !ow) return undefined;
+                        return dragonSceneChannels(ps2Odbs, modOf, containerStem, () =>
+                            builder.creatureSource(ow, cls.model!.db, cls.model!.id),
+                        );
+                    })();
                     // The player's scene clips, retargeted onto the PS2 player rig (new clips of its ADB), and its channel map.
                     const playerId = actorId(9) ?? (rynnProp ? syntheticPlayer : undefined);
                     const playerScene = await (async () => {
@@ -2118,7 +2132,11 @@ export async function convertOotfLevels(
                         maps: {
                             objectIdMap: sceneObjectIds,
                             channelMapForActor: (actor, targetId) =>
-                                targetId === playerId ? playerScene?.channels : tockOf(actor, targetId)?.channels,
+                                targetId === playerId
+                                    ? playerScene?.channels
+                                    : targetId === dragonId
+                                      ? dragonChannels
+                                      : tockOf(actor, targetId)?.channels,
                             // The PS2 Rynn class has a Jaw Channel: her speech gets the lip-sync bit (tracks: ootfsound.ts).
                             lipSyncForActor: (_actor, targetId) => targetId === playerId,
                             endIdleForActor: (_actor, targetId) =>
@@ -2179,7 +2197,7 @@ export async function convertOotfLevels(
                             },
                         },
                         playerObjectId: playerId,
-                        dragonObjectId: actorId(28),
+                        dragonObjectId: dragonId,
                         cameraObjectId: actorId(27),
                         cameraFov: pcLevelFov(pc),
                         holdPlayerObjectId: syntheticPlayer,
@@ -3563,6 +3581,46 @@ export function sceneTockLookup<T>(
         return byKey.get(key(cls));
     };
 }
+
+/**
+ * PC Arokh channel -> PS2 Arokh channel by joint name (`skeletonChannelMap`), for the attach points and animation channels
+ * of scene actions on the converted dragon. The PS2 rig is the skeleton of the first engine class 28 (Dragon) of the
+ * template's databases that has a skinned model; without it only the saddle is mapped. A scene that hands Rynn over on
+ * Arokh attaches her to his saddle: PC channel 19, PS2 channel 14. Kept unmapped, the PS2 engine put her on his neck joint
+ * 19, and his dismount, which detaches the saddle, left her held there: she stood on his back and could not walk away
+ * (Islands scene 5.1).
+ */
+async function dragonSceneChannels(
+    ps2Odbs: readonly Ps2OdbIn[],
+    modOf: (stem: string) => SrscReader | undefined,
+    containerStem: (stem: string, db: number) => string | null,
+    pcSource: () => Promise<{ skeleton: Skeleton } | null>,
+): Promise<Map<number, number> | undefined> {
+    let ps2: Skeleton | undefined;
+    for (const odb of ps2Odbs) {
+        for (const c of odb.classes.values()) {
+            if (ps2 || c.rflClass !== 28 || !c.model) continue;
+            const stem = containerStem(odb.file.replace(/\.ODB$/i, ''), c.model.db);
+            const rec = stem ? modOf(stem)?.find(0x0208, c.model.id) : undefined;
+            if (!stem || !rec) continue;
+            try {
+                ps2 = parseSkeleton(await modOf(stem)!.readRaw(rec), 'ps2');
+            } catch {
+                // not a skinned model
+            }
+        }
+    }
+    const pc = await pcSource();
+    if (!pc) return undefined;
+    const pcNames = buildRig(pc.skeleton, 0).names;
+    if (ps2) return skeletonChannelMap(pc.skeleton, pcNames, ps2, buildRig(ps2, 0).names);
+    // The extracted disc data does not always hold the dragon's MOD: the saddle alone, where every disc scene puts Rynn.
+    const saddle = pc.skeleton.channels.findIndex((c) => /^saddle$/i.test(pcNames[c.joint] ?? ''));
+    return saddle >= 0 ? new Map([[saddle, PS2_AROKH_SADDLE]]) : undefined;
+}
+
+/** Attach point of the PS2 Arokh's saddle: every disc scene that seats Rynn on him attaches her there (1.02, 3.01, 4.1, ...). */
+export const PS2_AROKH_SADDLE = 14;
 
 /** A scene-only Wartok class shown with the disc Wartok model (`ootfps2model.ts` scene rows). */
 interface SceneTock {

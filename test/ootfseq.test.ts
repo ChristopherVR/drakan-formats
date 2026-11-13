@@ -359,6 +359,63 @@ describe('ootfseq', () => {
         expect(words(seq.actors[1]!)).toEqual([[1, 4]]);
     });
 
+    it("puts a handed-over Rynn on the PS2 Arokh's saddle, not on the joint with the PC saddle's index", async () => {
+        // PC Arokh: channel 19 = saddle; PS2 Arokh: channel 14 = saddle, 19 = a neck joint (Islands scene 5.1).
+        const pcNames: string[] = [];
+        Object.assign(pcNames, { 0: 'Dragon', 9: 'jaw', 30: 'saddle' });
+        const ps2Names: string[] = [];
+        Object.assign(ps2Names, { 0: 'Arokh', 20: 'saddle', 30: 'neck_d', 40: 'jaw' });
+        const pcRig = {
+            channels: Array.from({ length: 20 }, (_, i) => ({
+                joint: i === 19 ? 30 : i === 10 ? 9 : 100 + i,
+                caps: [],
+            })),
+        };
+        const ps2Rig = {
+            channels: Array.from({ length: 25 }, (_, i) => ({
+                joint: i === 14 ? 20 : i === 19 ? 30 : i === 24 ? 40 : 200 + i,
+                caps: [],
+            })),
+        };
+        const dragon = skeletonChannelMap(pcRig, pcNames, ps2Rig, ps2Names);
+        expect([...dragon]).toEqual([
+            [10, 24],
+            [19, 14],
+        ]);
+        const bytes = w(
+            str('Stomp'),
+            u32(126),
+            u32(0),
+            u32(4),
+            u32(2),
+            actor('Aroch', 2, 1349, [act(4, 0, [...u32(3), ...u32(19)]), act(4, 5, [...u32(0), ...u32(19)])]),
+            actor('Wrynn', 3, 1348, [act(5, 0, [...u32(0)])]),
+        );
+        const result = await convertPcSequences(stub(bytes), {
+            maps: {
+                objectIdMap: new Map([
+                    [1349, 50],
+                    [1348, 42],
+                ]),
+                channelMapForActor: (_a, target) => (target === 50 ? dragon : undefined),
+            },
+            playerObjectId: 42,
+            dragonObjectId: 50,
+            usedIds: new Set(),
+        });
+        const entry = result.entries.find((e) => e.type === 0x311)!;
+        const seq = parseSequence(entry.id, entry.sub, entry.data)!;
+        const aroch = seq.actors.find((a) => a.ref === 50)!;
+        expect(
+            parseActions(aroch)!
+                .filter((x) => x.type === 4)
+                .map((x) => x.fields.slice(0, 2).map((f) => f.value)),
+        ).toEqual([
+            [3, 14],
+            [0, 14],
+        ]);
+    });
+
     it('keeps holding a synthetic player that also plays a PC actor', async () => {
         const bytes = w(
             str('Intro 3'),
