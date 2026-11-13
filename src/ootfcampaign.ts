@@ -107,8 +107,13 @@ const bookScene = (): boolean =>
     (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_BOOK_SCENE'] !== '0';
 /** Length of the Book's narration sequence ("The Book", 25.7 s) plus a short margin (backstory off: OOTF_BOOK_SCENE=0). */
 export const BOOK_SECONDS = 28;
-/** Length of the Book with its backstory scene (the default): its last fader message is at 250.5 s. */
-export const BOOK_SCENE_SECONDS = 250.7;
+/**
+ * The Book with its backstory scene (the default): the scene takes the exit itself at its last action, 250.5 s of scene
+ * time (ootfseq.ts `endMessages`). The level Timer is only a fallback for a scene that never runs, so it waits well past
+ * that: a scene that starts late after a load (seen in play) used to lose to a Timer of 250.7 s, which took the exit
+ * before the scene released Rynn, and she came back to Ruined Village held (journal 2026-11-13/ootf-book-skip-and-reload).
+ */
+export const BOOK_SCENE_SECONDS = 280;
 
 export interface CampaignLevel {
     /** PC path as listed (`Mountain World/Ruined Village/Ruined Village.lvl`). */

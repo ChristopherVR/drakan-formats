@@ -157,13 +157,13 @@ describe('exit and entrance sequences', () => {
         expect(value(arm, 'Start Mode')).toBe(1);
         expect(value(arm, 'Destroy After Timeout?')).toBe(0);
         expect(value(arm, 'Time Until Trigger')).toBeCloseTo(0.5, 5);
-        // the box starts disabled, is enabled by a message, fires once: ON to the exit and the arm Timer again
-        expect(box.links).toEqual([100, arm.id]);
+        // the box starts disabled, is enabled by the arm Timer's message and sends ON to the exit on every entry
+        expect(box.links).toEqual([100]);
         expect(box.pos).toEqual([1000, 2600, 3000]);
         expect(box.scale).toEqual([0.4, 0.6, 0.4]);
         expect(value(box, 'Initial State')).toBe(1);
         expect(value(box, 'Can be Triggered by Message ?')).toBe(1);
-        expect(value(box, 'Detect Only Once?')).toBe(1);
+        expect(value(box, 'Detect Only Once?')).toBe(0);
         expect(value(box, 'Trigger Message')).toBe(1);
         expect(value(box, 'Detect Which?')).toBe(0);
         // without a place for the box (or when the scene cannot be rewritten) the relay keeps its Timer

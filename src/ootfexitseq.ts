@@ -20,12 +20,15 @@
 // would load without anything left to fire the exit. So, when the pipeline can rewrite the converted scenes:
 //   * the last relayed scene itself sends the exit its ON at its end (a scene's progress is saved with it and a skip runs
 //     its actions; a Timer's countdown did not survive a load), and starts an "arm" Timer;
-//   * the arm Timer (0.5 s, kept after it fires) enables a re-offer box where the exit scene brings the player on before
-//     her last walk onto the exit (the foot of the church stair), first disabled;
-//   * the box fires once, sends ON to the exit and starts the arm Timer again.
-// The world stands still under the save prompt, so a player who saves goes on with the box still disabled; one who backs
-// out gets the box 0.5 s later, as often as she backs out. What a save keeps of this was measured in play
-// (journal 2026-11-13/ootf-book-skip-and-reload.md).
+//   * the arm Timer (0.5 s) enables a re-offer box where the exit scene brings the player on before her last walk onto
+//     the exit (the foot of the church stair), first disabled so the exit scene cannot walk her into it;
+//   * the box sends ON to the exit every time she walks into it, so a player who backs out of the save prompt gets it
+//     again by walking back, as often as she backs out; its enabled state is saved with the level.
+// The world is not stopped under the save prompt, so the level cannot tell a player who said yes from one who backed
+// out: the runtime closes the exit in the level-change save it writes when she says yes (pack manifest `one_way_exits`,
+// drakan_exit_guard.h), and the restored level after the next one never offers it again. Measured in play: journal
+// 2026-11-13/ootf-book-skip-and-reload.md (a Timer that has fired is not started again by a later message, so the box
+// does not re-arm itself; it does not need to).
 
 import type { ClassFieldDef } from './fields.ts';
 import { FLAG_SCALED, addObject, setObjectParams, type LvlObject, type LvlObjectList, type ParamSpec } from './lvl.ts';
@@ -233,7 +236,7 @@ function buildReoffer(
         ['detect which?', 0], // Rynn on foot
         ['initial state', 1], // Disabled: the arm Timer enables it
         ['can be triggered by message ?', 1], // a message enables it
-        ['detect only once?', 1], // spent when it fires, so a save made at the prompt keeps it off
+        ['detect only once?', 0], // every walk into it offers the exit again (the runtime closes the exit once taken)
         ['trigger message', MESSAGE_ON],
     ];
     const timerValues: [string, number][] = [
@@ -242,7 +245,9 @@ function buildReoffer(
         ['repeat', 0],
     ];
     if (!at || detectorValues.some(([n]) => dIdx(n) < 0) || timerValues.some(([n]) => tIdx(n) < 0)) {
-        env.warnings.push(`${env.title}: transition ${exitId}: no re-offer box (a field or the scene's foot point is missing)`);
+        env.warnings.push(
+            `${env.title}: transition ${exitId}: no re-offer box (a field or the scene's foot point is missing)`,
+        );
         return null;
     }
     const spec = (cls: ExitRelayClass, i: number, value: number): ParamSpec => ({
@@ -265,7 +270,7 @@ function buildReoffer(
     });
     box.flags = 1 | FLAG_SCALED;
     box.scale = [...EXIT_REOFFER_SCALE];
-    box.links = [exitId, arm.id];
+    box.links = [exitId];
     setObjectParams(
         env.list,
         box.id,
