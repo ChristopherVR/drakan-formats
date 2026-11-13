@@ -559,7 +559,7 @@ function convertLayer(
     if (lim > 0) limitLayerTextures(cellTexLeft, L.width, L.height, lim);
     if (L.type !== LAYER_TYPE_WATER) {
         limitWindowTextures(cellTexLeft, L.width, L.height);
-        if (!splitChunksEnv()) limitChunkTextures(cellTexLeft, L.width, L.height);
+        if (repaintChunksEnv()) limitChunkTextures(cellTexLeft, L.width, L.height);
     }
     // Collision belongs to the platform conversion, not the optional opaque/shading rewrite in the pipeline.
     // Native PS2 collision skips triangles on 0x40/0x80 even when the texture reference is a hole sentinel.
@@ -1011,7 +1011,10 @@ export function limitWindowTextures(tex: Uint32Array, w: number, h: number, max 
  * a failed allocation and the game hung (docs/journal/2026-11-14/ootf-check-b.md). Here the texture that the fewest cells
  * of an over-full chunk use (then the fewest in the layer) gives way: each of its cells takes the texture most of its eight
  * neighbours use among the chunk's other textures, else the chunk's most used one. Returns the number of cells changed.
- * Hole and invisible cells are left alone. Env DRAKAN_TERRAIN_CHUNKS=split keeps the earlier cut chunks.
+ * Hole and invisible cells are left alone. Off by default since the runtime keeps the terrain draw pages out of the
+ * game heap (`[general] terrain_page_pool`, docs/journal/2026-11-14/ootf-terrain-heap.md): the cut chunks draw the PC's
+ * textures exactly and no longer run the heap out. Env DRAKAN_TERRAIN_CHUNKS=repaint turns it on (8 to 27 % of the
+ * drawn cells change texture).
  */
 export function limitChunkTextures(tex: Uint32Array, w: number, h: number, max = MAX_CHUNK_TEXTURES): number {
     const special = (t: number): boolean => t === TEX_HOLE || t === TEX_INVISIBLE;
@@ -1071,11 +1074,11 @@ export function limitChunkTextures(tex: Uint32Array, w: number, h: number, max =
     return changed;
 }
 
-function splitChunksEnv(): boolean {
+function repaintChunksEnv(): boolean {
     return (
         (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.[
             'DRAKAN_TERRAIN_CHUNKS'
-        ] === 'split'
+        ] === 'repaint'
     );
 }
 
