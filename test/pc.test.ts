@@ -16,7 +16,12 @@ import {
     parsePcObjectList,
     parsePs2Terrain,
     pcDependencyKey,
+    WATER_HOLE_DEPTH,
     WATER_HOLE_SINK,
+    WATER_SEAM_SINK,
+    cropWaterLayer,
+    hasWaterTriangle,
+    inertWaterLayer,
     ps2BlobFor,
     readPs2Blob,
     waterHoleHeights,
@@ -567,24 +572,149 @@ describe('PC -> PS2 conversion', () => {
         expect(blobs.map((b) => b.empty)).toEqual([false, true]);
     });
 
-    it('keeps water hole vertices inside the bank and leaves water cells alone', () => {
-        // 3 x 1 cells: water, hole, hole. PC hole vertices are lifted to 5000 (into a bank at 3000) and 500.
+    it('puts water hole vertices under the bank, hangs them down over a drop and leaves water triangles alone', () => {
+        // 3 x 1 cells: water, hole, invisible. PC hole vertices are lifted to 5000 (up a bank) and 500.
         const L = {
             width: 3,
             height: 1,
             originX: 0,
             originZ: 0,
             heights: Float32Array.from([1000, 1000, 5000, 500, 1000, 1000, 5000, 500]),
+            cellFlags: new Uint16Array(3),
+            cellTexLeft: Uint32Array.from([7, TEX_HOLE, TEX_INVISIBLE]),
+            cellTexRight: Uint32Array.from([7, TEX_HOLE, TEX_INVISIBLE]),
         };
-        const tex = [7, TEX_HOLE, TEX_HOLE];
-        const bank = (x: number): number => (x >= 2 * 2048 ? 3000 : 800);
-        const out = waterHoleHeights(L, tex, (x) => bank(x));
-        expect([...out.slice(0, 4)]).toEqual([1000, 1000, 1000, 500]); // never above the water it borders
-        // a dip next to the water: the hole vertex goes under its ground
-        expect([...waterHoleHeights(L, tex, () => 800).slice(0, 4)]).toEqual([1000, 1000, 800 - WATER_HOLE_SINK, 500]);
-        // with no ground the hole vertices take the nearest water height; a far lower floor stops a cell below the surface
-        expect([...waterHoleHeights(L, tex).slice(0, 4)]).toEqual([1000, 1000, 1000, 500]);
-        expect([...waterHoleHeights(L, tex, () => -90000).slice(0, 4)]).toEqual([1000, 1000, 1000 - 2048, 500 - 2048]);
+        // a bank at 3000: never above the water it borders; a lower PC height is kept
+        expect([...waterHoleHeights(L, undefined, () => 3000)]).toEqual([1000, 1000, 1000, 500, 1000, 1000, 1000, 500]);
+        // a dip next to the water: under its ground
+        expect(waterHoleHeights(L, undefined, () => 800)[2]).toBe(800 - WATER_HOLE_SINK);
+        // a drop (the floor more than a cell's width down): the hole cell hangs down from the water's edge
+        const deep = 1000 - WATER_HOLE_DEPTH;
+        expect([...waterHoleHeights(L, undefined, () => -9000).slice(0, 4)]).toEqual([1000, 1000, deep, deep]);
+        // no floor at all (a basin made of models): the water height
+        expect([...waterHoleHeights(L).slice(0, 4)]).toEqual([1000, 1000, 1000, 500]);
+        // another layer's water near that height (a seam inside one sea): just under it, before any floor rule
+        const seam = waterHoleHeights(
+            L,
+            (x) => (x >= 2 * 2048 ? 1100 : NaN),
+            () => -9000,
+        );
+        expect([...seam.slice(0, 4)]).toEqual([1000, 1000, 1100 - WATER_SEAM_SINK, 1100 - WATER_SEAM_SINK]);
+        // water far above or below is another body: it does not count
+        expect(
+            waterHoleHeights(
+                L,
+                () => 9000,
+                () => -9000,
+            )[2],
+        ).toBe(deep);
+    });
+
+    it('cuts a water layer down to the cells around its water', () => {
+        const nc = 4 * 3;
+        const tex = new Uint32Array(nc).fill(TEX_HOLE);
+        tex[1 * 4 + 1] = 7; // one water cell at (1, 1); its right triangle only at (2, 1)
+        const right = Uint32Array.from(tex);
+        right[1 * 4 + 2] = 7;
+        const L = {
+            index: 3,
+            id: 4,
+            width: 4,
+            height: 3,
+            type: 2,
+            originX: 10,
+            originZ: 20,
+            worldHeight: 0,
+            name: 'pool',
+            flags: 0,
+            lightDirection: 0,
+            lightAscension: 0,
+            lightColor: 0,
+            ambientColor: 0,
+            lightDropoff: 0,
+            visible: [3],
+            heights: Float32Array.from({ length: 20 }, (_, i) => i),
+            vertexFlags: new Uint16Array(20),
+            vertexMask: new Uint8Array(20),
+            cellFlags: Uint16Array.from({ length: nc }, (_, i) => i),
+            cellTexLeft: tex,
+            cellTexRight: right,
+            cellUv: Uint16Array.from({ length: nc * 8 }, (_, i) => i),
+            source: 'pc' as const,
+        };
+        const C = cropWaterLayer(L);
+        expect([C.originX, C.originZ, C.width, C.height]).toEqual([11, 21, 2, 1]);
+        expect([...C.heights]).toEqual([6, 7, 8, 11, 12, 13]);
+        expect([...C.cellFlags]).toEqual([5, 6]);
+        expect([...C.cellTexLeft]).toEqual([7, TEX_HOLE]);
+        expect([...C.cellTexRight]).toEqual([7, 7]);
+        expect([...C.cellUv.slice(8, 16)]).toEqual([48, 49, 50, 51, 52, 53, 54, 55]);
+        expect(C.index).toBe(3);
+        // a layer whose water fills it is returned as it is
+        const full = { ...L, cellTexLeft: new Uint32Array(nc).fill(7) };
+        expect(cropWaterLayer(full)).toBe(full);
+    });
+
+    it('counts each triangle of a shore cell on its own', () => {
+        // One cell, water in the left triangle only (diagonal a-d: left = a b c). The right triangle's own corner d is lifted
+        // up the bank on the PC; the converter draws the whole cell, so d goes under the edge.
+        const L = {
+            width: 1,
+            height: 1,
+            originX: 0,
+            originZ: 0,
+            heights: Float32Array.from([1000, 1000, 1000, 6000]),
+            cellFlags: new Uint16Array(1),
+            cellTexLeft: Uint32Array.from([7]),
+            cellTexRight: Uint32Array.from([TEX_HOLE]),
+        };
+        const drop = (): number => -9000;
+        expect([...waterHoleHeights(L, undefined, drop)]).toEqual([1000, 1000, 1000, 1000 - WATER_HOLE_DEPTH]);
+        // over a bank it goes under the bank
+        expect([...waterHoleHeights(L, undefined, () => 1500)]).toEqual([1000, 1000, 1000, 1000]);
+        // with the other diagonal (left = c d a) the right triangle's own corner is b
+        const B = { ...L, cellFlags: Uint16Array.from([1]), heights: Float32Array.from([1000, 6000, 1000, 1000]) };
+        expect([...waterHoleHeights(B, undefined, drop)]).toEqual([1000, 1000 - WATER_HOLE_DEPTH, 1000, 1000]);
+        // a layer with no water triangle keeps its heights (it becomes an inert floor instead)
+        const none = { ...L, cellTexLeft: Uint32Array.from([TEX_HOLE]) };
+        expect([...waterHoleHeights(none)]).toEqual([1000, 1000, 1000, 6000]);
+    });
+
+    it('turns a water layer with no visible triangle into an empty floor', () => {
+        const base = {
+            index: 0,
+            id: 1,
+            width: 2,
+            height: 1,
+            type: 2,
+            originX: 0,
+            originZ: 0,
+            worldHeight: 0,
+            name: 'invisible water',
+            flags: 0,
+            lightDirection: 0,
+            lightAscension: 0,
+            lightColor: 0,
+            ambientColor: 0,
+            lightDropoff: 0,
+            visible: [0],
+            heights: new Float32Array(6),
+            vertexFlags: Uint16Array.from([1, 1, 1, 1, 1, 1]),
+            vertexMask: new Uint8Array(6),
+            cellFlags: Uint16Array.from([0x31, 0x30]),
+            cellTexLeft: Uint32Array.from([TEX_INVISIBLE, TEX_HOLE]),
+            cellTexRight: Uint32Array.from([TEX_INVISIBLE, TEX_HOLE]),
+            cellUv: new Uint16Array(16),
+            source: 'pc' as const,
+        };
+        expect(hasWaterTriangle(base)).toBe(false);
+        expect(hasWaterTriangle({ ...base, cellTexRight: Uint32Array.from([TEX_INVISIBLE, 7]) })).toBe(true);
+        const L = inertWaterLayer(base);
+        expect(L.type).toBe(0);
+        expect([...L.cellTexLeft]).toEqual([TEX_HOLE, TEX_HOLE]);
+        expect([...L.cellFlags]).toEqual([0xc1, 0xc0]);
+        expect([...L.vertexFlags]).toEqual([0, 0, 0, 0, 0, 0]);
+        expect([...L.vertexMask]).toEqual([0, 0, 0, 0, 0, 0]);
     });
 
     it('writes terrain that the PS2 reader decodes (two layers)', async () => {
