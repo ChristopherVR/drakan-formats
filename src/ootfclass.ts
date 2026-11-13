@@ -578,6 +578,33 @@ function animFallback(
     return own ?? [...animMap.values()].sort((a, b) => a - b)[0];
 }
 
+/** Template clip fields that start a creature's death (the PS2 engine picks one by how the creature dies). */
+const DEATH_CLIP_FIELDS = ['death', 'forward death', 'sleep death', 'idle death'] as const;
+
+/**
+ * The converted death clip of the PC class (its `Death`, else `Forward Death`, `Sleep Death`, `Idle Death`) to stand in for
+ * a template death field the PC class leaves empty. With the Base Idle stand-in a slave whose PC class names only `Death`
+ * got its standing pickaxe idle as `Idle Death` and `Sleep Death`: a slave placed dead stood upright, and the idle was
+ * written to play once, so the living slaves froze after one swing.
+ */
+function deathFallback(
+    pf: readonly { name: string; type: number }[],
+    data: readonly number[],
+    animMap: ReadonlyMap<number, number>,
+): number | undefined {
+    for (const name of DEATH_CLIP_FIELDS) {
+        const i = pf.findIndex((f) => f.name.trim().toLowerCase() === name && fieldBase(f.type) === FIELD_ANIMATION);
+        const dword = i >= 0 ? data[i] : undefined;
+        if (dword === undefined) continue;
+        const ids = fieldIsIndirect(pf[i]!.type) ? (decodeFieldValue(pf[i]!.type, dword, data) as number[]) : [dword];
+        for (const id of ids) {
+            const n = id ? animMap.get(id & 0xffff) : undefined;
+            if (n !== undefined) return n;
+        }
+    }
+    return undefined;
+}
+
 interface Merge {
     data: number[];
     copied: string[];
@@ -768,17 +795,20 @@ export function mergeDefaults(
         // A clip is played on the model's skeleton by joint index: a clip with another track count than the converted rig has
         // (every clip the template names, 5100..5313 in Volcanic's Ebon Knight) does not fit it. Every such field gets a
         // converted clip of the PC class instead (its base idle, else any converted clip), which has the rig's track count.
-        const fallback = animFallback(pf, pc.data ?? [], animMap);
-        if (fallback !== undefined)
-            for (const j of foreignAnim) {
-                const v = out[j] ?? 0;
-                if (fieldIsIndirect(tf[j]!.type)) {
-                    const n = v >>> 16;
-                    if (n === 0) continue;
-                    out[j] = ((n << 16) | out.length) >>> 0;
-                    for (let k = 0; k < n; k++) out.push(fallback);
-                } else if ((v & 0xffff) !== 0) out[j] = fallback;
-            }
+        const idleFallback = animFallback(pf, pc.data ?? [], animMap);
+        const dying = deathFallback(pf, pc.data ?? [], animMap);
+        for (const j of foreignAnim) {
+            const isDeath = (DEATH_CLIP_FIELDS as readonly string[]).includes(tf[j]!.name.trim().toLowerCase());
+            const fallback = (isDeath ? dying : undefined) ?? idleFallback;
+            if (fallback === undefined) continue;
+            const v = out[j] ?? 0;
+            if (fieldIsIndirect(tf[j]!.type)) {
+                const n = v >>> 16;
+                if (n === 0) continue;
+                out[j] = ((n << 16) | out.length) >>> 0;
+                for (let k = 0; k < n; k++) out.push(fallback);
+            } else if ((v & 0xffff) !== 0) out[j] = fallback;
+        }
     }
     // Original melee/Bow/Armor classes have no TAG skill gate. Native 341858 rejects weapons whose scalar Skill Level
     // exceeds stats row 1/2 and armour above the character level. A clone must not inherit that template restriction.

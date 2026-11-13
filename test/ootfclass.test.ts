@@ -156,6 +156,54 @@ describe('ootfclass', () => {
         expect(mergeDefaults(pc, cls(2, 'Wrong engine', 14, [[T_INT, 'Skill Level']], [2])).data).toEqual([2]);
     });
 
+    it('fills a template death field the PC creature leaves empty with its death clip, not its idle', () => {
+        const T_ANIM = 9;
+        const T_ANIMS = 0x1009;
+        const anims: [number, string][] = [
+            [T_ANIMS, 'Death'],
+            [T_ANIMS, 'Forward Death'],
+            [T_ANIMS, 'Sleep Death'],
+            [T_ANIMS, 'Idle Death'],
+            [T_ANIM, 'Base Idle'],
+            [T_ANIMS, 'Spontaneous Idle Anims'],
+        ];
+        // PC slave: Death = [21], every other death field empty, Base Idle 20, idles [20, 22].
+        const pc = cls(1, 'Slave', 49, anims, [(1 << 16) | 6, 0, 0, 0, 20, (2 << 16) | 7, 21, 20, 22]);
+        // Template: its own rig's clips 900..905 in every field.
+        const tpl = cls(2, 'Orc', 49, anims, [
+            (1 << 16) | 6,
+            (1 << 16) | 7,
+            (1 << 16) | 8,
+            (1 << 16) | 9,
+            904,
+            (1 << 16) | 10,
+            900,
+            901,
+            902,
+            903,
+            905,
+        ]);
+        const map = new Map([
+            [20, 120],
+            [21, 121],
+            [22, 122],
+        ]);
+        const m = mergeDefaults(pc, tpl, undefined, map);
+        const list = (i: number): number[] => {
+            const v = m.data[i]!;
+            return m.data.slice(v & 0xffff, (v & 0xffff) + (v >>> 16));
+        };
+        expect(list(0)).toEqual([121]);
+        expect(list(1)).toEqual([121]); // Forward Death
+        expect(list(2)).toEqual([121]); // Sleep Death
+        expect(list(3)).toEqual([121]); // Idle Death: a creature placed dead lies in it
+        expect(m.data[4]).toBe(120);
+        expect(list(5)).toEqual([120, 122]);
+        // Without a converted death clip the death fields keep the idle stand-in (a clip of the converted rig).
+        const noDeath = mergeDefaults(pc, tpl, undefined, new Map([[20, 120]]));
+        expect(noDeath.data.slice(noDeath.data[3]! & 0xffff, (noDeath.data[3]! & 0xffff) + 1)).toEqual([120]);
+    });
+
     it('uses a complete rigid native Bow template only for a source model known to be rigid', () => {
         const source = {
             ...cls(1, 'Original rigid Bow', 79, [[T_FLOAT, 'Rate of Fire']], [f32(1.75)]),
