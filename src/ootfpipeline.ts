@@ -48,6 +48,8 @@ import { SUBTITLE_FORMAT, SUBTITLE_VERSION, type SubtitleLine, type SubtitleTabl
 import { applyCulling, planLevelCulling, sceneFileKey, type LevelCulling } from './ootfcull.ts';
 import { carryCreatures, type CarrierRig } from './ootfcarry.ts';
 import type { EndMessage, PcSeqActor, PcSequence, PlayerGround } from './ootfseq.ts';
+import { addEndMessages } from './ootfseq.ts';
+import { parseSequence, writeSequence } from './story/ssd.ts';
 import { planShellTrims } from './ootfshell.ts';
 import { convertStompPlayers, pcStompPlayer } from './ootfstomp.ts';
 import {
@@ -225,6 +227,50 @@ function autoPlayEndMessages(pc: PcLevel, idMap: ReadonlyMap<number, number>): E
         if (ref !== undefined) out.push({ ref, message: EXIT_TIMER_MESSAGE, name: 'Level Exit' });
     }
     return out;
+}
+/**
+ * Adds end messages to the converted sequence `id` in the pack's SSD files (the exit relay's last scene, ootfexitseq.ts).
+ * False when the sequence is not there exactly once or does not parse.
+ */
+function rewriteSceneEnd(files: Record<string, Uint8Array>, id: number, messages: readonly EndMessage[]): boolean {
+    const keys = Object.keys(files).filter((k) => new RegExp(`\\.SSD/0311_${id}_\\d+\\.bin$`, 'i').test(k));
+    if (keys.length !== 1) return false;
+    const key = keys[0]!;
+    const m = /0311_(\d+)_(\d+)\.bin$/i.exec(key)!;
+    const seq = parseSequence(Number(m[1]), Number(m[2]), files[key]!);
+    if (!seq) return false;
+    addEndMessages(seq.actors, messages);
+    seq.slots = seq.actors.reduce((n, a) => Math.max(n, a.slot + 1), 1);
+    files[key] = writeSequence(seq);
+    return true;
+}
+
+/**
+ * Where an exit scene brings the player on before her last walk onto the exit: the last transform key of the player actor
+ * (the level's player object, PC class 9, or an actor named Rynn) that lies more than 500 units from her final key. The
+ * church stair: the foot of the stair, where "Book 1B" shows her before she walks onto the exit. Null without such a key.
+ */
+function sceneFootPoint(pc: PcLevel, seq: PcSequence): [number, number, number] | null {
+    const isPlayer = (a: PcSeqActor): boolean => {
+        const o = a.actorType === 1 ? pc.list.objects.find((x) => x.id === a.objectId) : undefined;
+        return (o && pc.classes.get(o.dbIndex)?.get(o.classId)?.rflClass === 9) || /^w?rynn$/i.test(a.name.trim());
+    };
+    for (const a of seq.actors) {
+        if (!isPlayer(a)) continue;
+        const keys = a.actions
+            .filter((x) => x.type === 0 && x.payload.length >= 28)
+            .map((x) => {
+                const dv = new DataView(x.payload.buffer, x.payload.byteOffset, x.payload.byteLength);
+                return [dv.getFloat32(16, true), dv.getFloat32(20, true), dv.getFloat32(24, true)] as [number, number, number];
+            });
+        const last = keys[keys.length - 1];
+        if (!last) continue;
+        for (let i = keys.length - 2; i >= 0; i--) {
+            const k = keys[i]!;
+            if (Math.hypot(k[0] - last[0], k[1] - last[1], k[2] - last[2]) > 500) return k;
+        }
+    }
+    return null;
 }
 /** Levels whose transition exit scenes are not relayed (see the exits stage). */
 const EXIT_SCENE_SKIP = /volcano\.lvl$/i;
@@ -442,6 +488,11 @@ export interface OotfPipelineResult {
      * the aspect they must be shown at. The pack manifest carries it as `level_aspect`.
      */
     levelAspect?: Record<string, string>;
+    /**
+     * Relayed exits that the pack offers again after a backed-out save and that close once taken (ootfexitseq.ts):
+     * `PS2 level title @ x, y, z` of the exit object. The pack manifest carries them as `one_way_exits`.
+     */
+    oneWayExits?: string[];
     /** Drakan 2 textures used in place of OotF ones (`OotfPipelineOptions.ps2Textures`), and rows that could not be used. */
     ps2Textures?: { used: { ootf: string; ps2: string; label: string }[]; skipped: { ootf: string; reason: string }[] };
     /** Drakan 2 models used for OotF classes (`OotfPipelineOptions.ps2Models`), by OotF class name. */
@@ -2498,11 +2549,14 @@ export async function convertOotfLevels(
                     res.warnings.push(`exits ${title}: exit sequence not played (known to stall the engine in this level)`);
                 if (sequencePlayer?.t.cls.fields && timerClass?.cls.fields && !isAutoPlayLevel(pc) && !exitScenesOff) {
                     const lengths = new Map<string, Map<number, number>>();
+                    const parsed = new Map<string, Map<number, PcSequence>>();
                     const lengthsOf = async (ow: string): Promise<Map<number, number>> => {
                         let m = lengths.get(ow);
                         if (!m) {
                             m = new Map();
                             lengths.set(ow, m);
+                            const p = new Map<number, PcSequence>();
+                            parsed.set(ow, p);
                             const bytes = await src.read(`${ow}.ssd`);
                             const reader = bytes ? await SrscReader.fromBytes(bytes) : null;
                             for (const e of reader?.entries ?? []) {
@@ -2510,6 +2564,7 @@ export async function convertOotfLevels(
                                 try {
                                     const seq = parsePcSequence(e.id, e.sub, (await reader!.read(e)).data);
                                     m.set(e.id, Math.max(0, ...seq.actors.flatMap((x) => x.actions.map((y) => y.time))));
+                                    p.set(e.id, seq);
                                 } catch {
                                     // an unreadable sequence was reported by the sequence stage
                                 }
@@ -2538,8 +2593,29 @@ export async function convertOotfLevels(
                             return ow ? (seqIds.get(`${pc.path}|${ow}|${ref >>> 0}`) ?? null) : null;
                         },
                         seconds: (o, ref) => owners.get(o.dbIndex)?.get(ref & 0xffff) ?? null,
+                        // the exit is offered again after a backed-out save (ootfexitseq.ts, buildReoffer)
+                        ...(detectorClass?.cls.fields
+                            ? {
+                                  detector: {
+                                      dbIndex: detectorClass.t.dbIndex,
+                                      classId: detectorClass.t.classId,
+                                      fields: detectorClass.cls.fields,
+                                  },
+                              }
+                            : {}),
+                        endMessages: (id, messages) => rewriteSceneEnd(ssdFiles, id, messages),
+                        reofferAt: (o, ref) => {
+                            const ow = owner(pc, o.dbIndex);
+                            const seq = ow ? parsed.get(ow)?.get(ref & 0xffff) : undefined;
+                            return seq ? sceneFootPoint(pc, seq) : null;
+                        },
                         warnings: res.warnings,
                     });
+                    for (const r of relays) {
+                        const exit = lvl.objects.objects.find((o) => o.id === r.exitId);
+                        if (r.reofferId !== null && exit)
+                            (res.oneWayExits ??= []).push(`${title} @ ${exit.pos.map((v) => Math.round(v)).join(', ')}`);
+                    }
                     for (const r of relays)
                         console.warn(
                             `exits ${title}: transition ${r.exitId} plays ${r.sequences.length} scene(s) first (${r.seconds.toFixed(1)} s, started by ${r.senders.join(', ')})`,

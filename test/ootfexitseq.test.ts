@@ -94,13 +94,101 @@ describe('exit and entrance sequences', () => {
         expect(sender.links).toEqual([9, r.startTimerId, r.exitTimerId]);
         expect(byId(r.startTimerId).links).toEqual([r.playerId]);
         expect(value(byId(r.startTimerId), 'Trigger Message')).toBe(4);
-        expect(byId(r.exitTimerId).links).toEqual([100]);
-        expect(value(byId(r.exitTimerId), 'Trigger Message')).toBe(1);
-        expect(value(byId(r.exitTimerId), 'Time Until Trigger')).toBeCloseTo(19.95, 3);
+        expect(byId(r.exitTimerId!).links).toEqual([100]);
+        expect(value(byId(r.exitTimerId!), 'Trigger Message')).toBe(1);
+        expect(value(byId(r.exitTimerId!), 'Time Until Trigger')).toBeCloseTo(19.95, 3);
+        expect(r.reofferId).toBeNull(); // no detector class given: the relay's Timer fires the exit
         expect(exit.links).toEqual([]);
         // the exit can no longer be walked into: only the timer fires it
         expect(exit.scale).toEqual([0.01, 0.01, 0.01]);
         expect(exit.flags & 0x100).toBe(0x100);
+    });
+
+    it('lets the last scene fire the exit and offers the exit again from a box at the foot', () => {
+        const pc = pcLevel();
+        const exit = obj(100, 498);
+        const sender = obj(50, 128);
+        sender.links = [100];
+        const list = listOf(sender, exit);
+        const fullTimer = {
+            ...timer,
+            fields: [...timer.fields, field('Repeat', T_ENUM), field('Destroy After Timeout?', T_ENUM)],
+        };
+        const detector = {
+            dbIndex: 2,
+            classId: 129,
+            fields: ['Task', 'Detect Which?', 'Initial State', 'Can be Triggered by Message ?', 'Trigger Message', 'Detect Only Once?'].map(
+                (n) => field(n, T_ENUM),
+            ),
+        };
+        const ends: { id: number; messages: unknown[] }[] = [];
+        const warnings: string[] = [];
+        const relays = relayExitSequences({
+            pc,
+            list,
+            title: 'Level',
+            player,
+            timer: fullTimer,
+            detector,
+            endMessages: (id, messages) => (ends.push({ id, messages: [...messages] }), true),
+            reofferAt: (_o, ref) => (ref === 0x41e ? [1000, 2000, 3000] : null),
+            mapSequence: (_o: LvlObject, ref: number) => (ref === 0x41e ? 71 : 72),
+            seconds: () => 1,
+            warnings,
+        });
+        expect(warnings).toEqual([]);
+        const r = relays[0]!;
+        const byId = (id: number) => list.objects.find((o) => o.id === id)!;
+        // no countdown fires the exit: the entrance scene (the last one) sends it ON and starts the arm Timer at its end
+        expect(r.exitTimerId).toBeNull();
+        expect(sender.links).toEqual([r.startTimerId]);
+        expect(ends).toEqual([
+            {
+                id: 72,
+                messages: [
+                    { ref: 100, message: 4097, name: 'Level Exit' },
+                    { ref: r.armTimerId, message: 4097, name: 'Exit Re-offer' },
+                ],
+            },
+        ]);
+        const arm = byId(r.armTimerId!);
+        const box = byId(r.reofferId!);
+        expect(arm.links).toEqual([box.id]);
+        expect(value(arm, 'Start Mode')).toBe(1);
+        expect(value(arm, 'Destroy After Timeout?')).toBe(0);
+        expect(value(arm, 'Time Until Trigger')).toBeCloseTo(0.5, 5);
+        // the box starts disabled, is enabled by a message, fires once: ON to the exit and the arm Timer again
+        expect(box.links).toEqual([100, arm.id]);
+        expect(box.pos).toEqual([1000, 2600, 3000]);
+        expect(box.scale).toEqual([0.4, 0.6, 0.4]);
+        expect(value(box, 'Initial State')).toBe(1);
+        expect(value(box, 'Can be Triggered by Message ?')).toBe(1);
+        expect(value(box, 'Detect Only Once?')).toBe(1);
+        expect(value(box, 'Trigger Message')).toBe(1);
+        expect(value(box, 'Detect Which?')).toBe(0);
+        // without a place for the box (or when the scene cannot be rewritten) the relay keeps its Timer
+        const exit2 = obj(100, 498);
+        const sender2 = obj(50, 128);
+        sender2.links = [100];
+        const list2 = listOf(sender2, exit2);
+        const w2: string[] = [];
+        const r2 = relayExitSequences({
+            pc,
+            list: list2,
+            title: 'Level',
+            player,
+            timer: fullTimer,
+            detector,
+            endMessages: () => false,
+            reofferAt: () => [0, 0, 0],
+            mapSequence: (_o: LvlObject, ref: number) => (ref === 0x41e ? 71 : 72),
+            seconds: () => 1,
+            warnings: w2,
+        })[0]!;
+        expect(r2.exitTimerId).not.toBeNull();
+        expect(r2.reofferId).toBeNull();
+        expect(list2.objects).toHaveLength(5); // sender, exit, player, start and exit Timers
+        expect(w2.join()).toMatch(/could not be given its end messages/);
     });
 
     it('says why a scene cannot play', () => {
