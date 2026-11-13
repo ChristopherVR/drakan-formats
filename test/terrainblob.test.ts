@@ -4,6 +4,7 @@ import { TEX_HOLE, TEX_INVISIBLE } from '../src/terrain.ts';
 import { readPs2Blob, writePs2Blob } from '../src/terrainwrite.ts';
 import type { TerrainLayer } from '../src/terrain.ts';
 import {
+    limitChunkTextures,
     limitLayerTextures,
     limitWindowTextures,
     ps2BlobBuilder,
@@ -285,5 +286,44 @@ describe('limitWindowTextures', () => {
         // Nothing to do within the limit.
         const few = Uint32Array.from([1, 2, 3, 4, 5, 6, 7, 8, 1]);
         expect(limitWindowTextures(few, 3, 3)).toBe(0);
+    });
+});
+
+describe('limitChunkTextures', () => {
+    it('keeps every chunk of a layer within 8 textures so the blob cuts no chunk', () => {
+        // 30 x 20 cells, every one with a texture of its own (as PC levels are painted), a few holes left alone.
+        const w = 30;
+        const h = 20;
+        const tex = Uint32Array.from({ length: w * h }, (_, i) => 1000 + i);
+        tex[5] = TEX_HOLE;
+        tex[w * 7 + 13] = TEX_INVISIBLE;
+        const before = Uint32Array.from(tex);
+        const L0 = layer(w, h, 0, (x, z) => before[z * w + x]!);
+        const cut = readPs2Blob(buildPs2TerrainBlob(L0)).chunks.length;
+        expect(limitChunkTextures(tex, w, h)).toBeGreaterThan(0);
+        expect(tex[5]).toBe(TEX_HOLE);
+        expect(tex[w * 7 + 13]).toBe(TEX_INVISIBLE);
+        const xs = ps2ChunkSplit(w);
+        const zs = ps2ChunkSplit(h);
+        for (let a = 0; a < xs.length - 1; a++)
+            for (let b = 0; b < zs.length - 1; b++) {
+                const seen = new Set<number>();
+                for (let z = Math.max(0, zs[b]! - 1); z <= Math.min(h - 1, zs[b + 1]!); z++)
+                    for (let x = Math.max(0, xs[a]! - 1); x <= Math.min(w - 1, xs[a + 1]!); x++) {
+                        const t = tex[z * w + x]!;
+                        if (t !== TEX_HOLE && t !== TEX_INVISIBLE) seen.add(t);
+                    }
+                expect(seen.size).toBeLessThanOrEqual(MAX_CHUNK_TEXTURES);
+            }
+        // Every cell keeps a texture the layer already had, and the blob now has the disc's chunk grid.
+        for (const t of tex) expect(before).toContain(t);
+        const stats = { reducedChunks: 0 };
+        const chunks = readPs2Blob(buildPs2TerrainBlob(layer(w, h, 0, (x, z) => tex[z * w + x]!), { stats })).chunks;
+        expect(chunks.length).toBe((xs.length - 1) * (zs.length - 1));
+        expect(chunks.length).toBeLessThan(cut);
+        expect(stats.reducedChunks).toBe(0);
+        // Nothing to do within the limit.
+        const few = Uint32Array.from({ length: 16 }, (_, i) => 1 + (i % 8));
+        expect(limitChunkTextures(few, 4, 4)).toBe(0);
     });
 });

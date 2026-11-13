@@ -37,7 +37,13 @@ import {
 import { odbStemForDependency, type OdbClass, type OdbIndex } from './odb.ts';
 import { pcLevelName, type PcLevel } from './pc.ts';
 import { writeSrsc, type SrscReader } from './srsc.ts';
-import { MAX_CHUNK_TEXTURES, buildPs2TerrainBlob, planTerrainSlots, type TerrainSlot } from './terrainblob.ts';
+import {
+    MAX_CHUNK_TEXTURES,
+    buildPs2TerrainBlob,
+    planTerrainSlots,
+    ps2ChunkSplit,
+    type TerrainSlot,
+} from './terrainblob.ts';
 import {
     CELL_FLAG_BACKSLASH,
     LVL_TYPE_LAYERS,
@@ -551,7 +557,10 @@ function convertLayer(
     }
     const lim = opt.maxTexturesPerLayer ?? layerTexEnv() ?? MAX_LAYER_TEXTURES;
     if (lim > 0) limitLayerTextures(cellTexLeft, L.width, L.height, lim);
-    if (L.type !== LAYER_TYPE_WATER) limitWindowTextures(cellTexLeft, L.width, L.height);
+    if (L.type !== LAYER_TYPE_WATER) {
+        limitWindowTextures(cellTexLeft, L.width, L.height);
+        if (!splitChunksEnv()) limitChunkTextures(cellTexLeft, L.width, L.height);
+    }
     // Collision belongs to the platform conversion, not the optional opaque/shading rewrite in the pipeline.
     // Native PS2 collision skips triangles on 0x40/0x80 even when the texture reference is a hole sentinel.
     // Floors and ceilings carry the PC's per-triangle holes in the PS2 triangle bits (see `ps2TriangleBits`).
@@ -990,6 +999,83 @@ export function limitWindowTextures(tex: Uint32Array, w: number, h: number, max 
         }
     }
     return changed;
+}
+
+/**
+ * Keep the cells each disc-sized chunk lists (its up to 12 x 12 cells and the ring around them, the same rectangles
+ * `buildPs2TerrainBlob` writes) within `max` distinct textures, so no chunk has to be cut. The PC paints nearly every cell
+ * with a texture of its own, and cutting chunks down to single cells gave converted layers up to 752 chunks with 5,491
+ * texture entries (Wartok Canyons; the disc has at most 25 chunks and 70 entries per layer). The engine builds a draw page
+ * per chunk texture and keeps the pages of every layer in view: in Wartok Canyons' lower canyon they took three times
+ * the terrain budget, the guest heap ran out while a layer's pages were built (`FUN_00154060`), the page list was read from
+ * a failed allocation and the game hung (docs/journal/2026-11-14/ootf-check-b.md). Here the texture that the fewest cells
+ * of an over-full chunk use (then the fewest in the layer) gives way: each of its cells takes the texture most of its eight
+ * neighbours use among the chunk's other textures, else the chunk's most used one. Returns the number of cells changed.
+ * Hole and invisible cells are left alone. Env DRAKAN_TERRAIN_CHUNKS=split keeps the earlier cut chunks.
+ */
+export function limitChunkTextures(tex: Uint32Array, w: number, h: number, max = MAX_CHUNK_TEXTURES): number {
+    const special = (t: number): boolean => t === TEX_HOLE || t === TEX_INVISIBLE;
+    const xs = ps2ChunkSplit(w);
+    const zs = ps2ChunkSplit(h);
+    const windows: number[][] = [];
+    for (let a = 0; a < xs.length - 1; a++)
+        for (let b = 0; b < zs.length - 1; b++) {
+            const cells: number[] = [];
+            for (let z = Math.max(0, zs[b]! - 1); z <= Math.min(h - 1, zs[b + 1]!); z++)
+                for (let x = Math.max(0, xs[a]! - 1); x <= Math.min(w - 1, xs[a + 1]!); x++) cells.push(z * w + x);
+            windows.push(cells);
+        }
+    const layerUses = new Map<number, number>();
+    for (const t of tex) if (!special(t)) layerUses.set(t, (layerUses.get(t) ?? 0) + 1);
+    let changed = 0;
+    for (let pass = 0; pass < 64; pass++) {
+        let over = false;
+        for (const cells of windows) {
+            for (;;) {
+                const uses = new Map<number, number>();
+                for (const i of cells) if (!special(tex[i]!)) uses.set(tex[i]!, (uses.get(tex[i]!) ?? 0) + 1);
+                if (uses.size <= max) break;
+                over = true;
+                const victim = [...uses.keys()].sort(
+                    (a, b) => uses.get(a)! - uses.get(b)! || (layerUses.get(a) ?? 0) - (layerUses.get(b) ?? 0) || b - a,
+                )[0]!;
+                const most = [...uses.keys()]
+                    .filter((t) => t !== victim)
+                    .sort((a, b) => uses.get(b)! - uses.get(a)! || a - b)[0]!;
+                for (const i of cells) {
+                    if (tex[i] !== victim) continue;
+                    const x = i % w;
+                    const z = (i / w) | 0;
+                    const near = new Map<number, number>();
+                    for (let dz = -1; dz <= 1; dz++)
+                        for (let dx = -1; dx <= 1; dx++) {
+                            const a = x + dx;
+                            const b = z + dz;
+                            if ((!dx && !dz) || a < 0 || b < 0 || a >= w || b >= h) continue;
+                            const t = tex[b * w + a]!;
+                            if (t !== victim && uses.has(t)) near.set(t, (near.get(t) ?? 0) + 1);
+                        }
+                    const pick =
+                        [...near].sort((p, q) => q[1] - p[1] || uses.get(q[0])! - uses.get(p[0])! || p[0] - q[0])[0]?.[0] ??
+                        most;
+                    layerUses.set(victim, layerUses.get(victim)! - 1);
+                    layerUses.set(pick, (layerUses.get(pick) ?? 0) + 1);
+                    tex[i] = pick;
+                    changed++;
+                }
+            }
+        }
+        if (!over) break;
+    }
+    return changed;
+}
+
+function splitChunksEnv(): boolean {
+    return (
+        (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.[
+            'DRAKAN_TERRAIN_CHUNKS'
+        ] === 'split'
+    );
 }
 
 /** Default for `ConvertOptions.maxTexturesPerLayer`. */
