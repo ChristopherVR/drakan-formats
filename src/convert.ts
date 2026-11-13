@@ -1056,8 +1056,9 @@ export function limitChunkTextures(tex: Uint32Array, w: number, h: number, max =
                             if (t !== victim && uses.has(t)) near.set(t, (near.get(t) ?? 0) + 1);
                         }
                     const pick =
-                        [...near].sort((p, q) => q[1] - p[1] || uses.get(q[0])! - uses.get(p[0])! || p[0] - q[0])[0]?.[0] ??
-                        most;
+                        [...near].sort(
+                            (p, q) => q[1] - p[1] || uses.get(q[0])! - uses.get(p[0])! || p[0] - q[0],
+                        )[0]?.[0] ?? most;
                     layerUses.set(victim, layerUses.get(victim)! - 1);
                     layerUses.set(pick, (layerUses.get(pick) ?? 0) + 1);
                     tex[i] = pick;
@@ -1296,6 +1297,48 @@ export function dominantTexture(layers: readonly TerrainLayer[]): number {
     return best;
 }
 
+/** Another layer continues the ground at a border vertex when it holds that vertex within this height (world units). */
+export const GROUND_JOIN_TOLERANCE = 64;
+
+/**
+ * The ground beyond a layer's edge, for the normals of layer border vertices (`TerrainBlobOptions.heightBeyond`). Order of
+ * the Flame levels are cut into hundreds of small layers (Wartok Canyons 441, about 9 x 9 cells each), so a third of their
+ * vertices lie on a layer border; with only the layer's own heights those took half the slope and drew the borders as
+ * lines of flatter, brighter light. Another layer continues the ground when it holds the border vertex itself at the same
+ * height (`GROUND_JOIN_TOLERANCE`), so a cave floor under an outdoor slope or a ceiling is never taken; its height at the
+ * neighbouring vertex is used however steep. Water layers do not count.
+ */
+export function groundBeyond(
+    layers: readonly TerrainLayer[],
+): (x0: number, z0: number, h0: number, x: number, z: number) => number | null {
+    const byVertex = new Map<number, TerrainLayer[]>();
+    const key = (x: number, z: number): number => x * 65536 + z;
+    for (const L of layers) {
+        if (L.type === LAYER_TYPE_WATER) continue;
+        for (let z = 0; z <= L.height; z++)
+            for (let x = 0; x <= L.width; x++) {
+                const k = key(L.originX + x, L.originZ + z);
+                const list = byVertex.get(k);
+                if (list) list.push(L);
+                else byVertex.set(k, [L]);
+            }
+    }
+    const heightIn = (L: TerrainLayer, x: number, z: number): number | null => {
+        const lx = x - L.originX;
+        const lz = z - L.originZ;
+        return lx < 0 || lz < 0 || lx > L.width || lz > L.height ? null : L.heights[lz * (L.width + 1) + lx]!;
+    };
+    return (x0, z0, h0, x, z) => {
+        for (const L of byVertex.get(key(x0, z0)) ?? []) {
+            const h = heightIn(L, x0, z0);
+            if (h === null || Math.abs(h - h0) > GROUND_JOIN_TOLERANCE) continue;
+            const there = heightIn(L, x, z);
+            if (there !== null) return there;
+        }
+        return null;
+    };
+}
+
 /** The reduced-chunk warning is printed once per session. */
 let warnedReducedChunks = false;
 
@@ -1306,10 +1349,13 @@ let warnedReducedChunks = false;
  */
 export const ps2BlobBuilder = (levelTag: number): BlobBuilder => {
     const plans = new WeakMap<readonly TerrainLayer[], Map<number, TerrainSlot>>();
+    const grounds = new WeakMap<readonly TerrainLayer[], ReturnType<typeof groundBeyond>>();
     return (L, all) => {
         const list = all ?? [L];
         let plan = plans.get(list);
         if (!plan) plans.set(list, (plan = planTerrainSlots(list)));
+        let ground = grounds.get(list);
+        if (!ground) grounds.set(list, (ground = groundBeyond(list)));
         const s = plan.get(L.index);
         const stats = { reducedChunks: 0 };
         const blob = buildPs2TerrainBlob(L, {
@@ -1318,6 +1364,7 @@ export const ps2BlobBuilder = (levelTag: number): BlobBuilder => {
             slot: s,
             stats,
             noDrawData: L.type === LAYER_TYPE_WATER,
+            heightBeyond: L.type === LAYER_TYPE_WATER ? undefined : ground,
         });
         if (stats.reducedChunks > 0 && !warnedReducedChunks) {
             warnedReducedChunks = true;

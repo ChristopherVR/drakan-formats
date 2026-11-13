@@ -7,8 +7,10 @@ import {
     PS2_LAVA_TEXTURE,
     PS2_SURDANA_WATER_TEXTURE,
     PS2_WATER_TEXTURE,
+    TERRAIN_TEXTURE_SLOT,
     TerrainTextureBuilder,
     buildTerrainPoolTxd,
+    cellTexelsOf,
     convertTerrainTextures,
     nativeWaterTextures,
     findSplatDbIndex,
@@ -66,6 +68,11 @@ describe('terrain textures', () => {
         expect(img.bpp).toBe(8);
         expect(img.width).toBe(32);
         expect(Array.from(img.rgba.subarray(0, 3))).toEqual([200, 10, 10]);
+        // material: a PROCTEES class that tiles once per cell like the PC ("Patchy Snow"), not 45 "Blue Snow" (2 x 2 cells)
+        expect(new DataView(body.buffer, body.byteOffset, body.byteLength).getUint32(40, true)).toBe(
+            TERRAIN_TEXTURE_SLOT,
+        );
+        expect(TERRAIN_TEXTURE_SLOT).toBe(55);
         expect(t.mapTexture(99, pc)).toBeNull();
         expect(t.mapTexture(0xffffffff, pc)).toBeNull();
     });
@@ -147,9 +154,16 @@ describe('terrain far textures (the level splat TXD)', () => {
         const s0 = plan.get(0)!;
         const s1 = plan.get(1)!;
         // cell (cx, cz) of layer 0 covers texels xLo + 4cx .. +3, zLo + 4cz .. +3 (stored row order)
-        expect(at(s0.xLo + 0, s0.zLo + 0)).toEqual([200, 40, 40]);
-        expect(at(s0.xLo + 4 + 3, s0.zLo + 3)).toEqual([40, 200, 40]);
-        expect(at(s0.xLo + 4 * 2 + 1, s0.zLo + 4 + 2)).toEqual([200, 40, 40]);
+        // Layer 0 is A B A / B hole A. A texel blends the textures of the cells round the cell's corners, weighted by how
+        // many of a corner's cells use them (the blob's vertex weights), interpolated to the texel centre:
+        // cell (0, 0) at texel (0, 0): A 1, B 0.25 -> (168, 72, 40); cell (1, 0) at texel (3, 3): A 1.77, B 1.11.
+        const near = (got: number[], want: number[]): void =>
+            got.forEach((v, k) => expect(Math.abs(v - want[k]!)).toBeLessThanOrEqual(1));
+        near(at(s0.xLo + 0, s0.zLo + 0), [168, 72, 40]);
+        near(at(s0.xLo + 4 + 3, s0.zLo + 3), [138, 102, 40]);
+        // a cell next to another texture is not one flat colour any more
+        expect(at(s0.xLo + 0, s0.zLo + 0)).not.toEqual(at(s0.xLo + 3, s0.zLo + 3));
+        // layer 1 is B beside an invisible cell: nothing to blend with
         expect(at(s1.xLo + 2, s1.zLo + 1)).toEqual([40, 200, 40]);
         // the hole (layer 0 cell 1,1), the invisible cell (layer 1 cell 1,0) and the unused pool corner: group mean of 6 cells
         const mean = [Math.round((3 * 200 + 3 * 40) / 6), Math.round((3 * 40 + 3 * 200) / 6), 40];
@@ -157,6 +171,45 @@ describe('terrain far textures (the level splat TXD)', () => {
         expect(at(s1.xLo + 4 + 1, s1.zLo + 1)).toEqual(mean);
         expect(at(pool - 1, pool - 1)).toEqual(mean);
         for (let i = 0; i < pool * pool; i++) expect(img.rgba[i * 4 + 1]).not.toBe(100); // never the disc's magenta filler
+    });
+
+    it('draws each texture with its own shrunk picture, and one colour where a cell and its neighbours share a texture', async () => {
+        const all = (c: number): number[] => Array.from({ length: 9 }, () => c);
+        const one = [layer(0, 3, 3, 0, all(A))];
+        const plan = planTerrainSlots(one);
+        const s = plan.get(0)!;
+        const read = async (bytes: Uint8Array) => {
+            const r = await SrscReader.fromBytes(bytes);
+            const img = decodeTxd(await r.readRaw(r.entries.find((e) => e.type === 0x40)!), { upright: false });
+            return (x: number, z: number): number[] =>
+                Array.from(img.rgba.subarray((z * s.pool + x) * 4, (z * s.pool + x) * 4 + 3));
+        };
+        const flat = await read(buildTerrainPoolTxd(one, (ref) => colors.get(ref) ?? null));
+        for (let z = 0; z < 12; z++)
+            for (let x = 0; x < 12; x++) expect(flat(s.xLo + x, s.zLo + z)).toEqual([200, 40, 40]);
+        // a 4 x 4 picture: red rising with the column, green with the row
+        const pic = new Float32Array(48);
+        for (let ty = 0; ty < 4; ty++)
+            for (let tx = 0; tx < 4; tx++) pic.set([40 + 50 * tx, 40 + 50 * ty, 40], (ty * 4 + tx) * 3);
+        const grain = await read(
+            buildTerrainPoolTxd(
+                one,
+                (ref) => colors.get(ref) ?? null,
+                (ref) => (ref === A ? pic : null),
+            ),
+        );
+        for (let tz = 0; tz < 4; tz++)
+            for (let tx = 0; tx < 4; tx++)
+                expect(grain(s.xLo + 4 + tx, s.zLo + 4 + tz)).toEqual([40 + 50 * tx, 40 + 50 * tz, 40]);
+    });
+
+    it('shrinks a texture to 4 x 4 texels by box filter', () => {
+        const rgba = new Uint8Array(8 * 8 * 4);
+        for (let y = 0; y < 8; y++)
+            for (let x = 0; x < 8; x++) rgba.set([x < 4 ? 0 : 200, y * 10, 7, 255], (y * 8 + x) * 4);
+        const t = cellTexelsOf({ width: 8, height: 8, rgba });
+        expect(Array.from(t.subarray(0, 3))).toEqual([0, 5, 7]);
+        expect(Array.from(t.subarray((3 * 4 + 3) * 3, (3 * 4 + 3) * 3 + 3))).toEqual([200, 65, 7]);
     });
 
     it('gives the mean colour of converted and template terrain textures by cell ref', async () => {
@@ -167,6 +220,8 @@ describe('terrain far textures (the level splat TXD)', () => {
         const b = await TerrainTextureBuilder.create(src, base, 9);
         expect(b.meanOfRef((9 << 16) | 3)).toEqual([180, 20, 30]);
         expect(b.meanOfRef((9 << 16) | 4)).toBeNull();
+        expect(Array.from(b.texelsOfRef((9 << 16) | 3)!.subarray(0, 3))).toEqual([180, 20, 30]);
+        expect(b.texelsOfRef((9 << 16) | 4)).toBeNull();
     });
 });
 

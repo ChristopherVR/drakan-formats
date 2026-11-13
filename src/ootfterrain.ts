@@ -33,10 +33,16 @@ import type { LvlHeader } from './lvl.ts';
 export const TERRAIN_TXD_PATH = 'files/ENGLISH/WORLDCON/PROCTEES/PROCTEES.TXD';
 /**
  * u32 at texture header +40 of converted terrain textures: the texture's material, a class of `PROCTEES.ODB` (0 in splat
- * textures). 45 is "Blue Snow", a splat material, the only value verified to render right; 1 is "Water" (drew flat dark
- * olive on ground), 114 and above froze the world in the 2026-10-31 runs (journal 2026-11-08/ootf-water.md).
+ * textures). The material decides how the engine draws the texture: its "Base Tiling Size" is how many cells one tile spans
+ * (the disc's grass and dirt 1, snow 2, outdoor rock 4), its "Splat Fade Distance" how far the texture is drawn over the far
+ * colour map, and it gives the foot-step sounds. A PC terrain tile spans exactly one cell (every cell of every campaign level
+ * maps 0..1), so the material must tile once per cell. 55 is "Patchy Snow": Base Tiling Size 1, fade 30 cells (as before),
+ * no noise pass, snow foot-steps. It was 45 "Blue Snow", whose Base Tiling Size 2 stretched every converted ground texture
+ * over 2 x 2 cells, twice the PC size and half its sharpness (seen in game, journal 2026-11-14/ootf-terrain-look.md). 1 is
+ * "Water" (drew flat dark olive on ground); ids that are not PROCTEES classes (a counter from 114 up) froze the world in the
+ * 2026-10-31 runs (journal 2026-11-08/ootf-water.md). `DRAKAN_TERRAIN_SLOT=45` gives the old look.
  */
-export const TERRAIN_TEXTURE_SLOT = 45;
+export const TERRAIN_TEXTURE_SLOT = 55;
 
 /**
  * Liquid surfaces. A PC terrain texture whose material (texture header +38, a class ref into the texture container's ODB)
@@ -144,6 +150,8 @@ export class TerrainTextureBuilder {
     /** `container#id` (lower case) -> new id in the target TXD. */
     private readonly ids = new Map<string, number>();
     private readonly means = new Map<number, [number, number, number]>();
+    /** Texture id -> its picture shrunk to `TERRAIN_POOL_TEXELS_PER_CELL` squared texels (far textures). */
+    private readonly smalls = new Map<number, Float32Array | null>();
     /** `<container>.odb` (lower case) -> its classes; `<container>.db` -> its dependency list. */
     private readonly odbs = new Map<string, Promise<Map<number, OdbClass> | null>>();
     private readonly dbs = new Map<string, Promise<Map<number, string> | null>>();
@@ -266,6 +274,7 @@ export class TerrainTextureBuilder {
             this.entries.push({ type: TXD_ENTRY_TYPE, id, sub: 0, data: tex.body });
             this.ids.set(key, id);
             this.means.set(id, mean);
+            this.smalls.set(id, cellTexelsOf(decodeTxd(tex.body, { upright: false })));
             level.set(ref, ((this.db << 16) | id) >>> 0);
             colors.push({ ref, mean, made: true });
             made++;
@@ -318,6 +327,18 @@ export class TerrainTextureBuilder {
      * lava = a damage above 0), else null. The material ref is `db << 16 | class`, db indexing `<container>.db` (0 = itself).
      */
     async liquidOf(container: string, id: number): Promise<'water' | 'lava' | null> {
+        const c = await this.materialOf(container, id);
+        if (!c || ((c.rflClass ?? c.runtimeClass ?? 0) & 0xffff) !== PC_LIQUID_MATERIAL_CLASS) return null;
+        const dmg = c.fields?.findIndex((f) => f.name.startsWith('Damage (')) ?? -1;
+        const damage = dmg >= 0 ? classFieldDefault(c, dmg) : 0;
+        return typeof damage === 'number' && damage > 0 ? 'lava' : 'water';
+    }
+
+    /**
+     * The PC material class of texture `id` of `<container>.txd` (texture header +38, `db << 16 | class`, db indexing
+     * `<container>.db`, 0 = the container itself), or null.
+     */
+    async materialOf(container: string, id: number): Promise<OdbClass | null> {
         const txd = await this.open(container);
         const e = txd?.find(TXD_ENTRY_TYPE, id);
         if (!txd || !e) return null;
@@ -342,11 +363,7 @@ export class TerrainTextureBuilder {
             const b = await this.src.read(`${owner}.odb`);
             return b ? parsePcOdbClasses(await SrscReader.fromBytes(b)) : null;
         });
-        const c = classes?.get(ref & 0xffff);
-        if (!c || ((c.rflClass ?? c.runtimeClass ?? 0) & 0xffff) !== PC_LIQUID_MATERIAL_CLASS) return null;
-        const dmg = c.fields?.findIndex((f) => f.name.startsWith('Damage (')) ?? -1;
-        const damage = dmg >= 0 ? classFieldDefault(c, dmg) : 0;
-        return typeof damage === 'number' && damage > 0 ? 'lava' : 'water';
+        return classes?.get(ref & 0xffff) ?? null;
     }
 
     private async decode(container: string, id: number, label: string): Promise<RgbaImage | null> {
@@ -385,6 +402,24 @@ export class TerrainTextureBuilder {
         }
         this.means.set(id, mean);
         return mean;
+    }
+
+    /**
+     * The texture of a cell ref (as `meanOfRef`) shrunk to the far textures' density, `TERRAIN_POOL_TEXELS_PER_CELL` squared
+     * RGB texels in stored row order (`cellTexelsOf`), or null when the id is not in the TXD.
+     */
+    texelsOfRef(ref: number): Float32Array | null {
+        const id = ref & 0xffff;
+        if (this.smalls.has(id)) return this.smalls.get(id)!;
+        const e = this.entries.find((x) => x.type === TXD_ENTRY_TYPE && x.id === id);
+        let t: Float32Array | null = null;
+        try {
+            t = e ? cellTexelsOf(decodeTxd(e.data, { upright: false })) : null;
+        } catch {
+            t = null;
+        }
+        this.smalls.set(id, t);
+        return t;
     }
 
     /** The target TXD: the base entries followed by every converted texture. Ship it at `TERRAIN_TXD_PATH`. */
@@ -499,19 +534,52 @@ export const TERRAIN_POOL_TEXELS_PER_CELL = 4;
 const POOL_HEADER_SCALE = 256;
 
 /**
+ * A ground texture shrunk to the far textures' density: `TERRAIN_POOL_TEXELS_PER_CELL` squared RGB texels (box filter), rows
+ * in the picture's stored order, 48 floats. A converted tile spans one cell (`TERRAIN_TEXTURE_SLOT`), so these are the
+ * texels of that cell in a far texture.
+ */
+export function cellTexelsOf(img: { width: number; height: number; rgba: Uint8Array }): Float32Array {
+    const n = TERRAIN_POOL_TEXELS_PER_CELL;
+    const out = new Float32Array(n * n * 3);
+    for (let ty = 0; ty < n; ty++)
+        for (let tx = 0; tx < n; tx++) {
+            const y0 = Math.floor((ty * img.height) / n);
+            const y1 = Math.max(y0 + 1, Math.floor(((ty + 1) * img.height) / n));
+            const x0 = Math.floor((tx * img.width) / n);
+            const x1 = Math.max(x0 + 1, Math.floor(((tx + 1) * img.width) / n));
+            const sum = [0, 0, 0];
+            for (let y = y0; y < y1; y++)
+                for (let x = x0; x < x1; x++)
+                    for (let k = 0; k < 3; k++) sum[k]! += img.rgba[(y * img.width + x) * 4 + k]!;
+            const cnt = (y1 - y0) * (x1 - x0);
+            for (let k = 0; k < 3; k++) out[(ty * n + tx) * 3 + k] = sum[k]! / cnt;
+        }
+    return out;
+}
+
+/**
  * The level's own `_splats` TXD (`<level>TS.TXD`): texture `n` is the far texture of terrain group `seq` n. The engine draws
  * distant terrain with it instead of the cell textures: each layer samples the `pool x pool` texture at its slot rectangle
- * (`x_lo..x_hi`, `z_lo..z_hi` of the inline blob), 4 texels per cell, rows in stored order, the cell's texture shrunk to
- * its mean colour (LEVEL1NA against LEVEL1TS: chroma error 0.035 for this placement, 0.12 and more for flipped ones;
- * brightness ratio 0.97..1.01, so no lighting is baked in). Packs used to ship the template's file, so far terrain showed
- * Surdana's colours and, wherever a converted slot fell into the template's unused pool area, its magenta (248, 100, 248)
- * filler: the pink cliffs of Wartok Canyons. `colorOf` gives a cell ref's mean RGB (`TerrainTextureBuilder.meanOfRef`);
- * texels no drawn cell covers take the group's mean colour, so filtering at a slot border never reaches a foreign colour.
- * The slots come from `planTerrainSlots` over the same layer list, exactly as `ps2BlobBuilder` places them.
+ * (`x_lo..x_hi`, `z_lo..z_hi` of the inline blob), 4 texels per cell, rows in stored order (LEVEL1NA against LEVEL1TS:
+ * chroma error 0.035 for this placement, 0.12 and more for flipped ones; brightness ratio 0.97..1.01, so no lighting is
+ * baked in). Packs used to ship the template's file, so far terrain showed Surdana's colours and, wherever a converted slot
+ * fell into the template's unused pool area, its magenta (248, 100, 248) filler: the pink cliffs of Wartok Canyons. The
+ * slots come from `planTerrainSlots` over the same layer list, exactly as `ps2BlobBuilder` places them.
+ *
+ * What a texel holds: the disc's far textures are a small picture of the blended ground, not one colour per cell (only 9 %
+ * of the 4 x 4 cell blocks of LEVEL1TS are one colour: textures fade into each other across cells and keep their grain).
+ * One flat colour per cell made distant Order of the Flame slopes, where nearly every cell has a texture of its own, a
+ * mosaic of 4-texel squares (journal 2026-11-14/ootf-terrain-look.md). So each texel takes the blend the near passes draw:
+ * the textures of the cells round a vertex, weighted by how many of its (up to four) cells use them like the blob's vertex
+ * weights (`buildPs2TerrainBlob`), interpolated across the cell, each texture taken from its own shrunk picture at that
+ * texel (`texelsOf`, `cellTexelsOf`). Without `texelsOf` (or for a ref it does not know) a texture counts with its mean
+ * colour (`colorOf`, `TerrainTextureBuilder.meanOfRef`). Texels no drawn cell covers take the group's mean colour, so
+ * filtering at a slot border never reaches a foreign colour.
  */
 export function buildTerrainPoolTxd(
     layers: readonly TerrainLayer[],
     colorOf: (ref: number) => readonly [number, number, number] | null,
+    texelsOf?: (ref: number) => Float32Array | null,
 ): Uint8Array {
     const plan = planTerrainSlots(layers);
     const groups = new Map<number, { pool: number; layers: TerrainLayer[] }>();
@@ -524,19 +592,31 @@ export function buildTerrainPoolTxd(
         groups.set(s.seq, g);
     }
     const n = TERRAIN_POOL_TEXELS_PER_CELL;
+    const drawn = (ref: number): boolean => ref !== TEX_HOLE && ref !== TEX_INVISIBLE && colorOf(ref) !== null;
+    const samples = new Map<number, Float32Array>();
+    /** n x n RGB texels of a ref: its shrunk picture, else its mean colour everywhere. */
+    const sample = (ref: number): Float32Array => {
+        let t = samples.get(ref);
+        if (!t) {
+            t = texelsOf?.(ref) ?? undefined;
+            if (!t) {
+                const m = colorOf(ref)!;
+                t = new Float32Array(n * n * 3);
+                for (let i = 0; i < n * n; i++) t.set(m, i * 3);
+            }
+            samples.set(ref, t);
+        }
+        return t;
+    };
     const entries: Ps2Entry[] = [];
     for (const seq of [...groups.keys()].sort((a, b) => a - b)) {
         const { pool, layers: members } = groups.get(seq)!;
-        const cellColor = (L: TerrainLayer, c: number): readonly [number, number, number] | null => {
-            const ref = L.cellTexLeft[c]!;
-            return ref === TEX_HOLE || ref === TEX_INVISIBLE ? null : colorOf(ref);
-        };
         const sum = [0, 0, 0];
         let count = 0;
         for (const L of members)
-            for (let c = 0; c < L.cellTexLeft.length; c++) {
-                const m = cellColor(L, c);
-                if (!m) continue;
+            for (const ref of L.cellTexLeft) {
+                if (!drawn(ref)) continue;
+                const m = colorOf(ref)!;
                 for (let k = 0; k < 3; k++) sum[k]! += m[k]!;
                 count++;
             }
@@ -545,17 +625,50 @@ export function buildTerrainPoolTxd(
         for (let i = 0; i < pool * pool; i++) rgba.set([fill[0]!, fill[1]!, fill[2]!, 255], i * 4);
         for (const L of members) {
             const s = plan.get(L.index)!;
-            for (let cz = 0; cz < L.height; cz++)
-                for (let cx = 0; cx < L.width; cx++) {
-                    const m = cellColor(L, cz * L.width + cx);
-                    if (!m) continue;
-                    const px = [Math.round(m[0]), Math.round(m[1]), Math.round(m[2]), 255];
-                    for (let dz = 0; dz < n; dz++) {
-                        const z = s.zLo + cz * n + dz;
+            const W = L.width;
+            const H = L.height;
+            const refAt = (x: number, z: number): number | null => {
+                if (x < 0 || z < 0 || x >= W || z >= H) return null;
+                const r = L.cellTexLeft[z * W + x]!;
+                return drawn(r) ? r : null;
+            };
+            for (let cz = 0; cz < H; cz++)
+                for (let cx = 0; cx < W; cx++) {
+                    if (refAt(cx, cz) === null) continue;
+                    // Corner (a, b) of the cell is vertex (cx + a, cz + b); its weight for a texture is the number of the four
+                    // cells round that vertex using it.
+                    const weights = new Map<number, number[]>();
+                    for (let b = 0; b <= 1; b++)
+                        for (let a = 0; a <= 1; a++)
+                            for (let dz = -1; dz <= 0; dz++)
+                                for (let dx = -1; dx <= 0; dx++) {
+                                    const r = refAt(cx + a + dx, cz + b + dz);
+                                    if (r === null) continue;
+                                    const w = weights.get(r) ?? [0, 0, 0, 0];
+                                    w[b * 2 + a]!++;
+                                    weights.set(r, w);
+                                }
+                    for (let tz = 0; tz < n; tz++) {
+                        const z = s.zLo + cz * n + tz;
                         if (z >= pool) continue;
-                        for (let dx = 0; dx < n; dx++) {
-                            const x = s.xLo + cx * n + dx;
-                            if (x < pool) rgba.set(px, (z * pool + x) * 4);
+                        const fz = (tz + 0.5) / n;
+                        for (let tx = 0; tx < n; tx++) {
+                            const x = s.xLo + cx * n + tx;
+                            if (x >= pool) continue;
+                            const fx = (tx + 0.5) / n;
+                            const o = (tz * n + tx) * 3;
+                            const acc = [0, 0, 0];
+                            let total = 0;
+                            for (const [r, w] of weights) {
+                                const wt =
+                                    (w[0]! * (1 - fx) + w[1]! * fx) * (1 - fz) + (w[2]! * (1 - fx) + w[3]! * fx) * fz;
+                                if (wt <= 0) continue;
+                                const t = sample(r);
+                                for (let k = 0; k < 3; k++) acc[k]! += wt * t[o + k]!;
+                                total += wt;
+                            }
+                            const px = acc.map((v) => Math.min(255, Math.max(0, Math.round(v / total))));
+                            rgba.set([px[0]!, px[1]!, px[2]!, 255], (z * pool + x) * 4);
                         }
                     }
                 }

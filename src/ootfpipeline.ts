@@ -2983,7 +2983,13 @@ export async function convertOotfLevels(
             splats: tex
                 ? { TXD: tex.txd }
                 : terrBuilder
-                  ? { TXD: buildTerrainPoolTxd(parts.terrain, (r) => terrBuilder.meanOfRef(r)) }
+                  ? {
+                        TXD: buildTerrainPoolTxd(
+                            parts.terrain,
+                            (r) => terrBuilder.meanOfRef(r),
+                            (r) => terrBuilder.texelsOfRef(r),
+                        ),
+                    }
                   : {},
         });
     }

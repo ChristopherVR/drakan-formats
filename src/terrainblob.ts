@@ -59,6 +59,13 @@ export interface TerrainBlobOptions {
      * stores them so (171 of 171 in LEVEL1NA); the engine's water pass draws them from the cells, not from chunks.
      */
     noDrawData?: boolean;
+    /**
+     * Height at world vertex (`x`, `z`) (cell units) of the ground that continues past the layer's edge from its border
+     * vertex (`x0`, `z0`) of height `h0`, or null when none does. A border vertex then takes its slope from both sides like
+     * an inner one instead of from half a difference (the clamped neighbour), which lit every layer border as a flatter,
+     * brighter line. Without it the clamped rule stays (the disc levels' rewrites keep their normals).
+     */
+    heightBeyond?: (x0: number, z0: number, h0: number, x: number, z: number) => number | null;
 }
 
 /** Cell rectangle of a chunk: x0..x1 and z0..z1 are vertex indices, so the chunk covers cells x0..x1-1 and z0..z1-1. */
@@ -122,7 +129,7 @@ export function buildPs2TerrainBlob(layer: TerrainLayer, opts: TerrainBlobOption
     const o = new Out();
     if (opts.noDrawData || !layer.cellTexLeft.some((t) => !isSpecial(t))) {
         o.u32(0);
-        writeNormals(o, layer, flat);
+        writeNormals(o, layer, flat, opts.heightBeyond);
         return o.done();
     }
     const xHi = 4 * w - 1;
@@ -248,12 +255,17 @@ export function buildPs2TerrainBlob(layer: TerrainLayer, opts: TerrainBlobOption
         }
     }
 
-    writeNormals(o, layer, flat);
+    writeNormals(o, layer, flat, opts.heightBeyond);
     return o.done();
 }
 
 /** Normals: entry 0 is always zero; a flat layer has one more entry pointing up; others have one per vertex. */
-function writeNormals(o: Out, layer: TerrainLayer, flat: boolean): void {
+function writeNormals(
+    o: Out,
+    layer: TerrainLayer,
+    flat: boolean,
+    beyond?: (x0: number, z0: number, h0: number, x: number, z: number) => number | null,
+): void {
     o.u32(0);
     if (flat) {
         o.u8(0);
@@ -263,12 +275,36 @@ function writeNormals(o: Out, layer: TerrainLayer, flat: boolean): void {
     } else {
         const sw = layer.width + 1;
         const sh = layer.height + 1;
-        const hAt = (x: number, z: number): number =>
-            layer.heights[Math.min(Math.max(z, 0), sh - 1) * sw + Math.min(Math.max(x, 0), sw - 1)]!;
+        const own = (x: number, z: number): number => layer.heights[z * sw + x]!;
+        // A neighbour outside the layer: the ground continuing there (`beyond`), else none.
+        const at = (x0: number, z0: number, x: number, z: number): number | null =>
+            x >= 0 && z >= 0 && x < sw && z < sh
+                ? own(x, z)
+                : (beyond?.(
+                      layer.originX + x0,
+                      layer.originZ + z0,
+                      own(x0, z0),
+                      layer.originX + x,
+                      layer.originZ + z,
+                  ) ?? null);
+        // Slope from both neighbours when both exist, else one-sided; without `beyond` the old clamped rule.
+        const slope = (h: number, lo: number | null, hi: number | null, clampLo: number, clampHi: number): number =>
+            beyond
+                ? lo !== null && hi !== null
+                    ? (hi - lo) / (2 * CELL_SIZE)
+                    : lo !== null
+                      ? (h - lo) / CELL_SIZE
+                      : hi !== null
+                        ? (hi - h) / CELL_SIZE
+                        : 0
+                : (clampHi - clampLo) / (2 * CELL_SIZE);
+        const clamped = (x: number, z: number): number =>
+            own(Math.min(Math.max(x, 0), sw - 1), Math.min(Math.max(z, 0), sh - 1));
         for (let z = 0; z < sh; z++) {
             for (let x = 0; x < sw; x++) {
-                const dx = (hAt(x + 1, z) - hAt(x - 1, z)) / (2 * CELL_SIZE);
-                const dz = (hAt(x, z + 1) - hAt(x, z - 1)) / (2 * CELL_SIZE);
+                const h = own(x, z);
+                const dx = slope(h, at(x, z, x - 1, z), at(x, z, x + 1, z), clamped(x - 1, z), clamped(x + 1, z));
+                const dz = slope(h, at(x, z, x, z - 1), at(x, z, x, z + 1), clamped(x, z - 1), clamped(x, z + 1));
                 const m = Math.hypot(dx, 1, dz);
                 o.u8(Math.round((-dx / m) * 127));
                 o.u8(Math.round((1 / m) * 127));

@@ -4,6 +4,7 @@ import { TEX_HOLE, TEX_INVISIBLE } from '../src/terrain.ts';
 import { readPs2Blob, writePs2Blob } from '../src/terrainwrite.ts';
 import type { TerrainLayer } from '../src/terrain.ts';
 import {
+    groundBeyond,
     limitChunkTextures,
     limitLayerTextures,
     limitWindowTextures,
@@ -318,12 +319,61 @@ describe('limitChunkTextures', () => {
         // Every cell keeps a texture the layer already had, and the blob now has the disc's chunk grid.
         for (const t of tex) expect(before).toContain(t);
         const stats = { reducedChunks: 0 };
-        const chunks = readPs2Blob(buildPs2TerrainBlob(layer(w, h, 0, (x, z) => tex[z * w + x]!), { stats })).chunks;
+        const chunks = readPs2Blob(
+            buildPs2TerrainBlob(
+                layer(w, h, 0, (x, z) => tex[z * w + x]!),
+                { stats },
+            ),
+        ).chunks;
         expect(chunks.length).toBe((xs.length - 1) * (zs.length - 1));
         expect(chunks.length).toBeLessThan(cut);
         expect(stats.reducedChunks).toBe(0);
         // Nothing to do within the limit.
         const few = Uint32Array.from({ length: 16 }, (_, i) => 1 + (i % 8));
         expect(limitChunkTextures(few, 4, 4)).toBe(0);
+    });
+});
+
+describe('normals of layer border vertices', () => {
+    // Two 2 x 2 layers side by side on one even slope rising 1024 per cell along x; a third, a cave floor, under the second.
+    const slope = (originX: number, base: number): TerrainLayer => {
+        const L = { ...layer(2, 2, 0, () => 5), index: originX, originX };
+        for (let z = 0; z <= 2; z++) for (let x = 0; x <= 2; x++) L.heights[z * 3 + x] = base + 1024 * (originX + x);
+        return L;
+    };
+    const a = slope(0, 0);
+    const b = slope(2, 0);
+    const cave = { ...slope(2, -20000), index: 9 };
+    const normalsOf = (blob: Uint8Array): number[][] => {
+        const n = readPs2Blob(blob).normals;
+        const out: number[][] = [];
+        for (let i = 0; i < n.length; i += 4)
+            out.push([(n[i]! << 24) >> 24, (n[i + 1]! << 24) >> 24, (n[i + 2]! << 24) >> 24]);
+        return out;
+    };
+
+    it('takes the slope across the border from the layer that continues the ground, never from a layer above or below', () => {
+        const beyond = groundBeyond([a, b, cave]);
+        expect(beyond(2, 1, 2048, 3, 1)).toBe(3072);
+        expect(beyond(2, 1, 2048, 1, 1)).toBe(1024);
+        expect(beyond(2, 1, -17952, 3, 1)).toBe(3072 - 20000);
+        expect(beyond(2, 1, 900, 3, 1)).toBeNull(); // no layer holds the vertex at that height
+        const inner = normalsOf(buildPs2TerrainBlob(a, { heightBeyond: beyond }))[1 * 3 + 1]!;
+        const edge = normalsOf(buildPs2TerrainBlob(a, { heightBeyond: beyond }))[1 * 3 + 2]!;
+        expect(edge).toEqual(inner);
+        // the old rule: half the slope at the edge
+        const clamped = normalsOf(buildPs2TerrainBlob(a))[1 * 3 + 2]!;
+        expect(Math.abs(clamped[0]!)).toBeLessThan(Math.abs(inner[0]!));
+    });
+
+    it('uses a one-sided slope where no layer continues the ground', () => {
+        const alone = normalsOf(buildPs2TerrainBlob(a, { heightBeyond: () => null }));
+        expect(alone[1 * 3 + 2]).toEqual(alone[1 * 3 + 1]);
+    });
+
+    it('is what the converter blob builder writes', () => {
+        const all = [a, b, cave];
+        const blob = ps2BlobBuilder(0x18)(a, all);
+        expect(normalsOf(blob)[1 * 3 + 2]).toEqual(normalsOf(blob)[1 * 3 + 1]);
     });
 });
