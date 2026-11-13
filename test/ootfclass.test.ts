@@ -110,7 +110,7 @@ describe('ootfclass', () => {
         expect(m.data[3]! & 0xffff).toBe(ps2Timer.data!.length);
     });
 
-    it.each([14, 79])('removes only an inherited TAG skill requirement from converted weapon class %i', (rfl) => {
+    it.each([14, 79, 45])('removes only an inherited TAG skill requirement from converted item class %i', (rfl) => {
         const pc = cls(1, 'Original weapon', rfl, [[T_FLOAT, 'Rate of Fire (1.0 = normal)']], [f32(1.75)]);
         const tpl = cls(
             2,
@@ -336,6 +336,34 @@ describe('ootfclass', () => {
         expect(parseClassBody(splitClassRecord(record.data).body)?.data).toEqual([1, 0]);
         native.data![1] = 0;
         expect(planClassMapping([{ db: 1, id: 1, cls: pc }], [o]).mapped.get('1:1')?.classId).toBe(911);
+    });
+
+    it('gives OotF armour no Drakan 2 level requirement, also for a same-name native armour', () => {
+        const o = odb();
+        const armourFields: [number, string][] = [
+            [T_INT, 'Skill Level'],
+            [T_FLOAT, 'Damage Prevention (0-1)'],
+            [T_INT, 'Total Durability Points'],
+        ];
+        const native = cls(912, 'Dragon Armor', 45, armourFields, [8, f32(0.75), 0xffffffff]);
+        o.classes.set(912, native);
+        const pcFields: [number, string][] = [
+            [T_FLOAT, 'Damage Prevention (0-1)'],
+            [T_INT, 'Total Durability Points'],
+        ];
+        const pc = cls(1, 'Dragon Armor', 45, pcFields, [f32(0.75), 100]);
+        const plan = planClassMapping([{ db: 1, id: 1, cls: pc }], [o]);
+        expect(plan.mapped.size).toBe(0);
+        expect(plan.synthesized).toHaveLength(1);
+        expect(plan.synthesized[0]!.cls.data).toEqual([0, f32(0.75), 100]);
+        expect(native.data).toEqual([8, f32(0.75), 0xffffffff]); // Drakan 2's own Dragon Armor keeps level 8
+        // a differently named PC armour cloned from a restricted native one (Chain Mail from "Chain Armor", level 3)
+        const chain = cls(2, 'Chain Mail', 45, pcFields, [f32(0.2), 100]);
+        expect(mergeDefaults(chain, cls(3, 'Chain Armor', 45, armourFields, [3, f32(0.2), 300])).data).toEqual([
+            0,
+            f32(0.2),
+            100,
+        ]);
     });
 
     it('maps animation-typed defaults (scalar and array) through the converted clip ids', () => {

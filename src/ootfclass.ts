@@ -586,10 +586,18 @@ interface Merge {
     same: number;
 }
 
-/** A verified TAG-only weapon restriction, absent from the original PC melee/Bow schema. */
+/**
+ * Engine ids whose PS2 "Skill Level" gates equipping (native `341858`): melee 14 and Bow 79 against the melee / archery
+ * skill rows, Armor 45 against the character level. No Order of the Flame item class has a requirement field, so the
+ * template's value is a Drakan 2 restriction the PC item never had (the Chain Mail cloned from "Chain Armor" needed
+ * level 3, Dragon Armor level 8).
+ */
+const EQUIP_REQUIREMENT_RFL: ReadonlySet<number> = new Set([14, 79, 45]);
+
+/** The template's "Skill Level" index when it is an inherited equip requirement absent from the PC schema, else -1. */
 function inheritedWeaponSkillField(pc: OdbClass, tpl: OdbClass): number {
     if (
-        (pc.rflClass !== 14 && pc.rflClass !== 79) ||
+        !EQUIP_REQUIREMENT_RFL.has(pc.rflClass ?? -1) ||
         pc.rflClass !== tpl.rflClass ||
         !pc.fields ||
         pc.fields?.some((f) => f.name.trim().toLowerCase() === 'skill level')
@@ -772,8 +780,8 @@ export function mergeDefaults(
                 } else if ((v & 0xffff) !== 0) out[j] = fallback;
             }
     }
-    // Original melee/Bow classes have no TAG skill gate. Native341858 rejects equipped weapons whose
-    // scalar Skill Level exceeds stats row1/2. A clone must not inherit that unrelated template restriction.
+    // Original melee/Bow/Armor classes have no TAG skill gate. Native 341858 rejects weapons whose scalar Skill Level
+    // exceeds stats row 1/2 and armour above the character level. A clone must not inherit that template restriction.
     const skill = inheritedWeaponSkillField(pc, tpl);
     if (skill >= 0) out[skill] = 0;
     return { data: out, copied, skipped, coverage: valueFields === 0 ? 1 : found / valueFields, same };
