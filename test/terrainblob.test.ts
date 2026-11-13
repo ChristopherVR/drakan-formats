@@ -3,7 +3,14 @@ import { describe, expect, it } from 'vitest';
 import { TEX_HOLE, TEX_INVISIBLE } from '../src/terrain.ts';
 import { readPs2Blob, writePs2Blob } from '../src/terrainwrite.ts';
 import type { TerrainLayer } from '../src/terrain.ts';
-import { limitLayerTextures, ps2BlobBuilder, ps2BlobFor, ps2LevelTag, writePs2Terrain } from '../src/convert.ts';
+import {
+    limitLayerTextures,
+    limitWindowTextures,
+    ps2BlobBuilder,
+    ps2BlobFor,
+    ps2LevelTag,
+    writePs2Terrain,
+} from '../src/convert.ts';
 import {
     LAYER_FLAG_FLAT,
     MAX_CHUNK_TEXTURES,
@@ -243,5 +250,40 @@ describe('buildPs2TerrainBlob', () => {
     it('reads the level tag back out of a written layer table', () => {
         const payload = writePs2Terrain([layer(3, 3, 0, () => 0x90001)], ps2BlobBuilder(0x21));
         expect(ps2LevelTag(payload)).toBe(0x21);
+    });
+});
+
+describe('limitWindowTextures', () => {
+    it('keeps every 3 x 3 block of cells within the 8 textures a chunk can blend', () => {
+        // 4 x 3 cells, every one with a texture of its own (12 > 8), one hole that is left alone.
+        const w = 4;
+        const h = 3;
+        const tex = Uint32Array.from({ length: w * h }, (_, i) => 100 + i);
+        tex[0] = TEX_HOLE;
+        const changed = limitWindowTextures(tex, w, h);
+        expect(changed).toBeGreaterThan(0);
+        expect(tex[0]).toBe(TEX_HOLE);
+        for (let z = 0; z < h; z++)
+            for (let x = 0; x < w; x++) {
+                const seen = new Set<number>();
+                for (let dz = -1; dz <= 1; dz++)
+                    for (let dx = -1; dx <= 1; dx++) {
+                        const a = x + dx;
+                        const b = z + dz;
+                        if (a >= 0 && b >= 0 && a < w && b < h && tex[b * w + a] !== TEX_HOLE)
+                            seen.add(tex[b * w + a]!);
+                    }
+                expect(seen.size).toBeLessThanOrEqual(8);
+            }
+        // A changed cell takes a texture one of its neighbours has; the blob then drops no blend.
+        const before = Uint32Array.from({ length: w * h }, (_, i) => 100 + i);
+        for (let i = 0; i < tex.length; i++) if (tex[i] !== before[i] && i !== 0) expect(before).toContain(tex[i]);
+        const stats = { reducedChunks: 0 };
+        const L = layer(w, h, 0, (x, z) => tex[z * w + x]!);
+        buildPs2TerrainBlob(L, { stats });
+        expect(stats.reducedChunks).toBe(0);
+        // Nothing to do within the limit.
+        const few = Uint32Array.from([1, 2, 3, 4, 5, 6, 7, 8, 1]);
+        expect(limitWindowTextures(few, 3, 3)).toBe(0);
     });
 });
