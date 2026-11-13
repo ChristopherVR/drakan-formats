@@ -520,6 +520,8 @@ function convertLayer(
     const L = source.type === LAYER_TYPE_WATER ? cropWaterLayer(source) : source;
     const nc = L.width * L.height;
     const cellTexLeft = new Uint32Array(nc);
+    // Floors and ceilings: the PS2 hole / invisible bits of each triangle (water layers: whole-cell holes only, below).
+    const triangleBits = new Uint8Array(nc);
     const cache = new Map<number, number>();
     for (let c = 0; c < nc; c++) {
         const l = L.cellTexLeft[c]!;
@@ -528,14 +530,8 @@ function convertLayer(
         // keeps the water instead: the PC cell is water in one half (shore cells on a diagonal), and turning it into a hole
         // left stair-stepped gaps in pools and streams (418 cells in Ruined Village); the hole cell is also drawn by the water pass.
         const half = (l === TEX_HOLE) !== (r === TEX_HOLE);
-        const ref =
-            L.type === LAYER_TYPE_WATER && half
-                ? l === TEX_HOLE
-                    ? r
-                    : l
-                : l === TEX_HOLE || r === TEX_HOLE
-                  ? TEX_HOLE
-                  : l;
+        const ref = L.type === LAYER_TYPE_WATER ? (half ? (l === TEX_HOLE ? r : l) : l) : ps2CellRef(l, r);
+        if (L.type !== LAYER_TYPE_WATER) triangleBits[c] = ps2TriangleBits(l, r);
         if (ref === TEX_HOLE || ref === TEX_INVISIBLE) {
             cellTexLeft[c] = ref;
             continue;
@@ -557,7 +553,12 @@ function convertLayer(
     if (lim > 0) limitLayerTextures(cellTexLeft, L.width, L.height, lim);
     // Collision belongs to the platform conversion, not the optional opaque/shading rewrite in the pipeline.
     // Native PS2 collision skips triangles on 0x40/0x80 even when the texture reference is a hole sentinel.
-    const cellFlags = L.cellFlags.map((flags, c) => (flags & ~0xc0) | (cellTexLeft[c] === TEX_HOLE ? 0xc0 : 0));
+    // Floors and ceilings carry the PC's per-triangle holes in the PS2 triangle bits (see `ps2TriangleBits`).
+    const cellFlags = L.cellFlags.map((flags, c) =>
+        L.type === LAYER_TYPE_WATER
+            ? (flags & ~0xf0) | (cellTexLeft[c] === TEX_HOLE ? 0xc0 : 0)
+            : (flags & ~0xf0) | triangleBits[c]!,
+    );
     return {
         ...L,
         heights:
@@ -688,6 +689,38 @@ function triangleVertices(w: number, x: number, z: number, backslash: boolean): 
 }
 
 const isHoleRef = (t: number): boolean => t === TEX_HOLE || t === TEX_INVISIBLE;
+
+/** PS2 cell bits that remove the first / second triangle of a cell (draw and collision). */
+export const CELL_HOLE_FIRST = 0x40;
+export const CELL_HOLE_SECOND = 0x80;
+/** PS2 cell bits that make the first / second triangle invisible (collision kept). */
+export const CELL_INVISIBLE_FIRST = 0x10;
+export const CELL_INVISIBLE_SECOND = 0x20;
+
+/**
+ * PS2 hole and invisible bits of a floor or ceiling cell from the PC's two triangle refs. The PC gives each triangle its
+ * own ref; the PS2 keeps one ref per cell and marks each triangle on its own: 0x40 / 0x80 remove the first / second
+ * triangle from drawing and collision (seen in game), 0x10 / 0x20 mark it invisible (the disc's own use; not seen in game).
+ * The disc has 0xc0 on every hole cell, 0x30 on every invisible cell and about 10,600 textured cells with only 0x40 or
+ * only 0x80. The first triangle is the PC left one (a-c-d with the diagonal bit set, else a-c-b: `layerHeightAt`, PAL
+ * 15a2f0). Turning a cell with one hole triangle into a whole hole took the other, drawn triangle with it: cave walls
+ * and ceilings showed the sky colour through triangular gaps (Grimstone Mines 741 such cells, 11,400 in the campaign).
+ */
+export function ps2TriangleBits(left: number, right: number): number {
+    const bits = (t: number, hole: number, inv: number): number =>
+        t === TEX_HOLE ? hole : t === TEX_INVISIBLE ? inv : 0;
+    return bits(left, CELL_HOLE_FIRST, CELL_INVISIBLE_FIRST) | bits(right, CELL_HOLE_SECOND, CELL_INVISIBLE_SECOND);
+}
+
+/**
+ * The one PS2 ref of a floor or ceiling cell: the left triangle's texture, or the right one's when the left has none; a
+ * hole only when both triangles are holes, invisible when neither has a texture. `ps2TriangleBits` removes the rest.
+ */
+export function ps2CellRef(left: number, right: number): number {
+    if (!isHoleRef(left)) return left;
+    if (!isHoleRef(right)) return right;
+    return left === TEX_HOLE && right === TEX_HOLE ? TEX_HOLE : TEX_INVISIBLE;
+}
 
 /**
  * A water layer cut down to the cells around its water triangles. The PS2 water pass draws every cell of a water layer, so the

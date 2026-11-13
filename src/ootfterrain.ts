@@ -426,13 +426,16 @@ export async function convertTerrainTextures(
  * 253k : 141k : 16k : 16k : 15k : 15k on the PAL discs, 7.0k : 1.4k : 0.7k : 0.7k : 0.8k : 0.8k in Ruined Village), so they are
  * carried over. Native collision tests skip the two triangles for flags 0x40 / 0x80 (PAL 15a2f0); texture sentinels
  * alone do not remove collision. Full holes therefore require 0xc0. Invisible cells use 0x30 on the disc and retain
- * collision. PC bit 1 is dropped. `DRAKAN_TERRAIN_CELLBITS` (default 0x0d) overrides the carried source bits only.
+ * collision. A converted layer's own triangle bits (0x40 / 0x80 / 0x10 / 0x20 on a cell with one hole or invisible triangle,
+ * `ps2TriangleBits`) are kept. PC bit 1 is dropped. `DRAKAN_TERRAIN_CELLBITS` (default 0x0d) overrides the carried source bits only.
  */
 export function ps2CellFlags(L: TerrainLayer, mask = cellBitsMask()): Uint16Array {
     const out = new Uint16Array(L.cellFlags.length);
     for (let c = 0; c < out.length; c++) {
         const ref = L.cellTexLeft[c]!;
-        const special = ref === TEX_HOLE ? 0xc0 : ref === TEX_INVISIBLE ? 0x30 : 0;
+        // A converted layer already carries per-triangle bits (`ps2TriangleBits`): a cell with one hole triangle keeps them.
+        const own = L.source === 'ps2' ? L.cellFlags[c]! & 0xf0 : 0;
+        const special = ref === TEX_HOLE ? 0xc0 : ref === TEX_INVISIBLE ? 0x30 | own : own;
         out[c] = 0xff00 | (L.cellFlags[c]! & mask) | special;
     }
     return out;

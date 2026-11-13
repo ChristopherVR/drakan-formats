@@ -29,6 +29,10 @@ import {
     splitPs2Terrain,
     ps2ClassTables,
     ps2VertexMask,
+    ps2TriangleBits,
+    ps2CellRef,
+    layerHeightAt,
+    CELL_SIZE,
     resolvePcPath,
     signedDegrees,
     writeObjectList,
@@ -534,10 +538,11 @@ describe('PC -> PS2 conversion', () => {
         const converted = convertPcLevel(pc, { template: { header: h, classes }, textureFallback: 0x00090042 });
         const layer = converted.terrain[0]!;
         // Direct conversion (also used with terrainShading:false) must already have native collision semantics.
-        expect([...layer.cellFlags].slice(0, 3)).toEqual([0x0d, 0xc1, 1]);
+        // Invisible cells get the disc's 0x30 (which keeps collision); PC bits 0x10..0x80 are dropped.
+        expect([...layer.cellFlags].slice(0, 3)).toEqual([0x0d, 0xc1, 0x31]);
         expect([...terrain.cellFlags].slice(0, 3)).toEqual([0xcd, 1, 0xc1]); // source untouched
         const direct = parsePs2Terrain(writePs2Terrain([layer], () => new Uint8Array(16)))[0]!;
-        expect([...direct.cellFlags].slice(0, 3)).toEqual([0x0d, 0xc1, 1]);
+        expect([...direct.cellFlags].slice(0, 3)).toEqual([0x0d, 0xc1, 0x31]);
         layer.cellFlags = ps2CellFlags(layer, 0x0d);
         const payload = writePs2Terrain([layer], () => new Uint8Array(16));
         const native = await SrscReader.fromBytes(buildPs2Srsc([{ type: 1, id: 0, sub: 0, data: payload }]));
@@ -547,6 +552,66 @@ describe('PC -> PS2 conversion', () => {
         expect(serialized.cellFlags[1]! & 0xc0).toBe(0xc0);
         expect(serialized.cellFlags[2]! & 0xc0).toBe(0);
         expect([...ps2CellFlags(layer, 0)].slice(0, 3)).toEqual([0xff00, 0xffc0, 0xff30]);
+    });
+
+    it('keeps the drawn triangle of a cell with one hole triangle and removes only the other one', async () => {
+        const { pc, h, classes } = await fixture();
+        const L = pc.terrain[0]!;
+        const T = L.cellTexLeft[0]!;
+        // cell 0: hole | texture, 1: texture | hole, 2: invisible | texture, 3: texture | invisible, 4: hole | invisible
+        const pairs: [number, number][] = [
+            [TEX_HOLE, T],
+            [T, TEX_HOLE],
+            [TEX_INVISIBLE, T],
+            [T, TEX_INVISIBLE],
+            [TEX_HOLE, TEX_INVISIBLE],
+        ];
+        pairs.forEach(([l, r], c) => {
+            L.cellTexLeft[c] = l;
+            L.cellTexRight[c] = r;
+            L.cellFlags[c] = c === 1 ? 1 : 0; // cell 1 has the other diagonal
+        });
+        const conv = convertPcLevel(pc, { template: { header: h, classes }, textureFallback: 0x00090042 }).terrain[0]!;
+        const mapped = conv.cellTexLeft[5]!; // an untouched textured cell: what T maps to
+        expect([...conv.cellTexLeft].slice(0, 5)).toEqual([mapped, mapped, mapped, mapped, TEX_INVISIBLE]);
+        expect([...conv.cellFlags].slice(0, 5)).toEqual([0x40, 0x81, 0x10, 0x20, 0x60]);
+        // The terrain shading pass keeps the triangle bits; whole holes and invisible cells as before.
+        expect([...ps2CellFlags(conv, 0x0d)].slice(0, 5)).toEqual([0xff40, 0xff81, 0xff10, 0xff20, 0xff70]);
+        // Collision follows the PC: the hole triangle has none, the drawn one keeps it (both diagonals).
+        const back = parsePs2Terrain(writePs2Terrain([{ ...conv, cellFlags: ps2CellFlags(conv) }], ps2BlobFor))[0]!;
+        const { originX, originZ, heights } = back;
+        const y = (cx: number, fx: number, fz: number) =>
+            layerHeightAt(back, (originX + cx + fx) * CELL_SIZE, (originZ + fz) * CELL_SIZE);
+        // diagonal b-c (bit 0 clear): the left (first) triangle is a-b-c, near the top-left corner.
+        expect(y(0, 0.2, 0.2)).toBeNaN();
+        expect(y(0, 0.8, 0.8)).not.toBeNaN();
+        // diagonal a-d (bit 0 set): the right (second) triangle is a-d-b, above the diagonal.
+        expect(y(1, 0.8, 0.2)).toBeNaN();
+        expect(y(1, 0.2, 0.8)).not.toBeNaN();
+        expect(heights.length).toBe(L.heights.length);
+        // The textured half draws: the cell is in the chunk draw data and counts as solid for the adjacency mask.
+        expect(conv.vertexMask[0]! & 8).toBe(8);
+        expect(ps2TriangleBits(TEX_HOLE, TEX_HOLE)).toBe(0xc0);
+        expect(ps2TriangleBits(TEX_INVISIBLE, TEX_INVISIBLE)).toBe(0x30);
+        expect(ps2TriangleBits(T, T)).toBe(0);
+        expect(ps2CellRef(TEX_HOLE, TEX_HOLE)).toBe(TEX_HOLE);
+        expect(ps2CellRef(TEX_INVISIBLE, TEX_HOLE)).toBe(TEX_INVISIBLE);
+        expect(ps2CellRef(TEX_HOLE, 7)).toBe(7);
+        expect(ps2CellRef(5, 7)).toBe(5);
+    });
+
+    it('leaves water layers on whole-cell holes (the water pass draws every cell)', async () => {
+        const { pc, h, classes } = await fixture();
+        const floor = pc.terrain[0]!;
+        const water = { ...floor, index: 1, id: 8, name: 'water', type: 2 };
+        water.cellTexLeft = floor.cellTexLeft.slice();
+        water.cellTexRight = floor.cellTexRight.slice();
+        water.cellFlags = floor.cellFlags.slice();
+        water.cellTexLeft[0] = TEX_HOLE;
+        pc.terrain = [floor, water];
+        const conv = convertPcLevel(pc, { template: { header: h, classes }, textureFallback: 0x00090042 }).terrain[1]!;
+        expect(conv.cellTexLeft[0]).not.toBe(TEX_HOLE);
+        expect(conv.cellFlags[0]! & 0xf0).toBe(0);
     });
 
     it('moves water vertex kinds into the PS2 water range and clears them on other layers', async () => {
