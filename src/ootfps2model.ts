@@ -13,11 +13,17 @@
  *   placement; it is drawn with the disc model of the named Drakan 2 class (textures copied byte for byte) while it still
  *   collides with its OotF model (`OotfAssetBuilder.useDiscModel`, ootfdiscmodel.ts). The disc model must have the PC model's size and origin
  *   (`discModelMismatch`), or the OotF model is kept and the reason is reported: a skeleton must stay on its spike.
+ * - Flames: a placed OotF flame (engine class 20, the burning part of a torch, sconce or brazier) keeps its class, light,
+ *   sound and messages, but burns with the particle fire of the named Drakan 2 torch class instead of the OotF flame card:
+ *   its `Fire Particles` names that torch's fire generator, its model becomes the disc's invisible particle carrier and the
+ *   object moves to the foot of the OotF flame, where Drakan 2 torches keep their origin (`ootfflames.ts`).
+ * - Effects: a converted OotF class keeps everything but the named class references (`fields`), which become those of the
+ *   named Drakan 2 class: an exploding barrel goes off with the Drakan 2 barrel's explosion (flash, fire, debris, sound).
  * - Rynn and Arokh are always the disc's (the player class and the player's dragon are name-mapped); NPCs have no disc
  *   counterpart.
  */
 
-export type Ps2ModelCategory = 'enemies' | 'weapons' | 'props';
+export type Ps2ModelCategory = 'enemies' | 'weapons' | 'props' | 'flames' | 'effects';
 
 export interface Ps2ModelSubstitution {
     category: Ps2ModelCategory;
@@ -39,8 +45,13 @@ export interface Ps2ModelSubstitution {
      * ends after the same number of blows as in the original. Every other value is the disc class's.
      */
     healthUntilFlee?: boolean;
-    /** Props: the ODB stem of the Drakan 2 class (`MOUNTAON`) whose model is copied. */
+    /** Props: the ODB stem of the Drakan 2 class (`MOUNTAON`) whose model is copied; flames: of the torch class. */
     odb?: string;
+    /**
+     * Effects: the class reference fields copied from the Drakan 2 class: `name` (the same field in both classes) or
+     * `Drakan 2 field>OotF field`.
+     */
+    fields?: readonly string[];
     /** Props: the PC model name the OotF class must show (classes of one name show different models in some levels). */
     pcModel?: string;
     /** Props: stretch the disc model onto the OotF model's box (a remake a little larger or smaller than the original). */
@@ -105,6 +116,28 @@ const prop = (
     ...(defaultOff ? { defaultOff } : {}),
     ...(fit ? { fit } : {}),
 });
+const flame = (pc: string, label: string): Ps2ModelSubstitution => ({
+    category: 'flames',
+    ootf: pc,
+    odb: 'WORLDCON',
+    ps2: 'OTF Wall Torch',
+    label,
+    why: FLAME_WHY,
+});
+const FLAME_WHY =
+    "Burns with the particle fire of Drakan 2's own Order of the Flame wall torch (Surdana) in place of the flat OotF flame card, at the foot of the OotF flame; the light, sound and on / off messages stay the OotF flame's.";
+const effect = (pc: string, odb: string, ps2: string, fields: string[], label: string, why: string) => ({
+    category: 'effects' as const,
+    ootf: pc,
+    odb,
+    ps2,
+    fields,
+    label,
+    why,
+});
+const BARREL_FIELD = 'Explosion Generator>Smoke Generator';
+const BARREL_WHY =
+    "Goes off with the Drakan 2 explosive barrel's explosion (flash, fireball, debris and sound) in its free smoke generator slot: the converted OotF explosion drew only the barrel staves, its fire parts showed nothing. The OotF explosion still runs beside it, so the blast and its damage to Rynn and enemies stay the OotF barrel's.";
 const SKELETON_WHY =
     'Drakan 2 ships a remade Mountain World skeleton of the same name, pose, size and origin (about 1,000 triangles against 140).';
 const BRIDGE_WHY =
@@ -217,6 +250,14 @@ export const DEFAULT_PS2_MODEL_SUBSTITUTIONS: readonly Ps2ModelSubstitution[] = 
     ),
     prop('Wine Keg', 'WineBarrel01(H)', 'MOUNTAON', 'Wine Keg (Surdana)', 'Wine keg', KEG_WHY, false, true),
     prop('winecask', 'WineBarrel01(H)', 'MOUNTAON', 'Wine Keg (Surdana)', 'Wine keg', KEG_WHY, false, true),
+    flame('Sconce Flame', 'Wall sconce flame'), // also "SconceFlame" (names compare without spaces)
+    flame('Torch Flame', 'Standing torch flame'),
+    flame('Standing Torch Flame', 'Standing torch flame'),
+    flame('Hanging Flame', 'Hanging torch flame'),
+    flame('Hanging Torch Flame', 'Hanging torch flame'),
+    flame('banner flame', 'Banner torch flame'),
+    effect('Barrel (explode)', 'MOUNTAON', 'TNT Barrel', [BARREL_FIELD], 'Exploding barrel', BARREL_WHY),
+    effect('Barrel (Exploding)', 'MOUNTAON', 'TNT Barrel', [BARREL_FIELD], 'Exploding barrel', BARREL_WHY),
 ];
 
 export type EnemyAnimations = 'drakan2' | 'ootf';
@@ -251,7 +292,7 @@ export class Ps2ModelMapError extends Error {}
 /** Class names compare like the class planner does: case and punctuation ignored. */
 export const modelKey = (name: string): string => name.toLowerCase().replace(/[^a-z0-9]+/g, '');
 
-const CATEGORIES: readonly Ps2ModelCategory[] = ['enemies', 'weapons', 'props'];
+const CATEGORIES: readonly Ps2ModelCategory[] = ['enemies', 'weapons', 'props', 'flames', 'effects'];
 
 /** Turn user edits (a parsed JSON file) into swap options over the default table. */
 export function ps2ModelSwapFromEdits(edits: unknown, base: Ps2ModelSwapOptions = {}): Ps2ModelSwapOptions {
@@ -280,15 +321,23 @@ export function ps2ModelSwapFromEdits(edits: unknown, base: Ps2ModelSwapOptions 
             continue;
         }
         const odb = (row as { odb?: unknown }).odb;
-        if (category === 'props' && (typeof odb !== 'string' || !odb))
-            throw new Ps2ModelMapError(`row ${i + 1}: a props row needs "odb" (the Drakan 2 database, e.g. MOUNTAON)`);
+        const needsOdb = category === 'props' || category === 'flames' || category === 'effects';
+        if (needsOdb && (typeof odb !== 'string' || !odb))
+            throw new Ps2ModelMapError(
+                `row ${i + 1}: a ${category} row needs "odb" (the Drakan 2 database, e.g. ${category === 'flames' ? 'WORLDCON' : 'MOUNTAON'})`,
+            );
+        const fields = (row as { fields?: unknown }).fields;
+        const fieldList = Array.isArray(fields) ? fields.filter((f): f is string => typeof f === 'string' && !!f) : [];
+        if (category === 'effects' && !fieldList.length)
+            throw new Ps2ModelMapError(`row ${i + 1}: an effects row needs "fields" (class reference field names)`);
         extra.push({
             category,
             ootf: row.ootf,
             ps2: row.ps2,
             label: row.label ?? row.ootf,
             why: 'user mapping',
-            ...(category === 'props' ? { odb: odb as string } : {}),
+            ...(needsOdb ? { odb: odb as string } : {}),
+            ...(category === 'effects' ? { fields: fieldList } : {}),
         });
     }
     return { ...base, off, on, extra };
@@ -323,6 +372,10 @@ export interface Ps2ModelPlan {
      * apply).
      */
     prop(name: string, pcModelName: string): Ps2ModelSubstitution | null;
+    /** The Drakan 2 flame row for this PC class (an engine class 20 flame), or null. */
+    flame(name: string): Ps2ModelSubstitution | null;
+    /** The Drakan 2 effects row for this PC class, or null. */
+    effect(name: string): Ps2ModelSubstitution | null;
     /** The swapped enemy gets the health after which its Order of the Flame class flees (`healthUntilFlee`, disc clips only). */
     enemyHealthUntilFlee(name: string): boolean;
 }
@@ -367,6 +420,14 @@ export function planPs2Models(o: Ps2ModelSwapOptions = {}): Ps2ModelPlan {
             const r = on.get(modelKey(name));
             if (r?.category !== 'props' || !r.odb) return null;
             return !r.pcModel || modelKey(r.pcModel) === modelKey(pcModelName) ? r : null;
+        },
+        flame: (name) => {
+            const r = on.get(modelKey(name));
+            return r?.category === 'flames' && r.odb ? r : null;
+        },
+        effect: (name) => {
+            const r = on.get(modelKey(name));
+            return r?.category === 'effects' && r.odb && r.fields?.length ? r : null;
         },
     };
 }

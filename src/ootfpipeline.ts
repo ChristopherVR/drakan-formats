@@ -103,7 +103,13 @@ import {
     pcInterfaceMusic,
 } from './ootfmusic.ts';
 import { buildOotfMusicPack, type OotfMusicPack } from './ootfdmusic.ts';
-import { addAutoPlayStomp, applyPuzzleLogic, pcFieldNumber, relayDetectorSequences } from './ootfpuzzle.ts';
+import {
+    addAutoPlayStomp,
+    applyPuzzleLogic,
+    pcFieldNumber,
+    relayDetectorSequences,
+    setNamedParam,
+} from './ootfpuzzle.ts';
 import { hideLightMarkers } from './ootfmarkers.ts';
 import { pcTransitionSequences, relayExitSequences } from './ootfexitseq.ts';
 import {
@@ -148,6 +154,7 @@ import {
     pcDefaultsSkipped,
     setSynthesizedDefaults,
     levelPropertiesParams,
+    patchRecordModel,
     planClassMapping,
     type ClassPlan,
     type PcClassIn,
@@ -193,7 +200,17 @@ import {
 import { buildRig, invertMat12, localToWorld, mat12ToQuat, mulMat12 } from './skeleton.ts';
 import { bindBasis, convertPcAnimToPs2 } from './ootfcreature.ts';
 import { sampleClip } from './anim.ts';
-import { MOD_CHARACTER, parseModel } from './model.ts';
+import { MOD_CHARACTER, parseModel, parseModelName } from './model.ts';
+import {
+    FLAME_CARRIER_MODEL,
+    FLAME_FIRE_FIELD,
+    FLAME_RFL,
+    FLAME_SMALL_TORCH,
+    flameFoot,
+    flameOffset,
+    isSmallFlame,
+    moveClassRef,
+} from './ootfflames.ts';
 import { SSD_SEQUENCE } from './resources.ts';
 import {
     type HandHold,
@@ -1049,6 +1066,10 @@ export async function convertOotfLevels(
             .map((r) => modelKey(r.ootf)),
     );
     const propNotes = new Set<string>();
+    /** Converted flame classes (`dbIndex:classId`) that burn with Drakan 2 fire: their objects move to the flame foot. */
+    const flameClasses = new Set<string>();
+    /** Per converted flame class: its fields and the candle fire its small placements name (ootfflames.ts). */
+    const smallFlameFire = new Map<string, { fields: OdbClass['fields']; fire: number }>();
     let culling: LevelCulling | null = null;
     if (opt.models !== false && opt.classes !== false && hostOk) {
         await stage('models', async () => {
@@ -1598,6 +1619,106 @@ export async function convertOotfLevels(
             const bowAim = buildBowAimMetadata(plan, (key) => sourceByKey.get(key));
             if (bowAim.text) res.files['gameplay/bows.ini'] = strToU8(bowAim.text);
             res.warnings.push(...bowAim.warnings);
+            // Drakan 2 particle fire for converted flames (ootfps2model.ts flames rows, ootfflames.ts): the class names the fire
+            // generator of the row's Drakan 2 torch and shows the invisible particle carrier; its objects move to the flame foot.
+            if (hostOk && ps2.hostMod) {
+                const hostMod = ps2.hostMod;
+                const flameRows = plan.synthesized.filter((x) => x.rfl === FLAME_RFL && modelSwap.flame(x.name));
+                const effectRows = plan.synthesized.filter((x) => modelSwap.effect(x.name));
+                let carrier: { id: number; bounds: Uint8Array } | null | undefined;
+                const fires = new Map<string, number | string>();
+                /** A class reference field of a Drakan 2 class, named from database `to`; a string says why not. */
+                const discRef = async (odbStem: string, clsName: string, field: string, to: string) => {
+                    const key = `${odbStem}|${modelKey(clsName)}|${field}|${to}`;
+                    if (!fires.has(key)) {
+                        const stem = odbStem.toUpperCase();
+                        const odb = ps2.odbs.get(stem);
+                        const cls = odb
+                            ? [...(await parseOdbClasses(odb)).values()].find(
+                                  (c) => modelKey(c.name) === modelKey(clsName),
+                              )
+                            : undefined;
+                        const j = cls?.fields?.findIndex((f) => f.name.trim() === field) ?? -1;
+                        const ref =
+                            cls && j >= 0 ? moveClassRef(cls.data?.[j] ?? 0, stem, to, containerStem, indexIn) : null;
+                        fires.set(
+                            key,
+                            ref ??
+                                (cls
+                                    ? `the ${field} of ${clsName} cannot be named from ${to}`
+                                    : `no class "${clsName}" in ${stem}`),
+                        );
+                    }
+                    return fires.get(key)!;
+                };
+                const indexIn = (a: string, b: string): number | null => {
+                    if (a === b) return 0;
+                    for (const m of ps2.dbFiles?.get(a)?.text.matchAll(/^(\d+)\s+(.+?)\s*$/gm) ?? [])
+                        if (odbStemForDependency(m[2]!) === b) return Number(m[1]);
+                    return null;
+                };
+                for (const x of flameRows) {
+                    const row = modelSwap.flame(x.name)!;
+                    const stem = x.file.replace(/\.ODB$/i, '');
+                    if (carrier === undefined) {
+                        carrier = null;
+                        const odb = ps2.odbs.get(hostStem);
+                        for (const e of hostMod.entries) {
+                            if (e.type !== 0x0200) continue;
+                            if (parseModelName(await hostMod.readRaw(e)).name !== FLAME_CARRIER_MODEL) continue;
+                            // The bounds block of a disc class that carries the model (a projectile).
+                            const user = odb
+                                ? [...(await parseOdbClasses(odb)).values()].find(
+                                      (c) => c.model?.db === 0 && c.model.id === e.id,
+                                  )
+                                : undefined;
+                            const rec = user
+                                ? odb!.entries.find((r) => r.type === ODB_CLASS_TYPE && r.id === user.id)
+                                : undefined;
+                            const body = rec ? splitClassRecord(await odb!.readRaw(rec)).body : null;
+                            if (body && body.length >= 80) carrier = { id: e.id, bounds: body.slice(16, 80) };
+                            break;
+                        }
+                    }
+                    const fire = await discRef(row.odb ?? '', row.ps2, FLAME_FIRE_FIELD, stem);
+                    if (typeof fire === 'string' || !carrier) {
+                        res.warnings.push(
+                            `drakan 2 fire for ${x.name} not used: ${typeof fire === 'string' ? fire : `no ${FLAME_CARRIER_MODEL} model in ${hostStem}`}`,
+                        );
+                        continue;
+                    }
+                    x.record = patchRecordModel(x.record, { id: carrier.id, db: 0 }, carrier.bounds);
+                    x.cls = { ...x.cls, model: { id: carrier.id, db: 0 } };
+                    res.warnings.push(...setSynthesizedDefaults(x, [[FLAME_FIRE_FIELD, fire]]));
+                    flameClasses.add(`${x.dbIndex}:${x.classId}`);
+                    const candle = await discRef('WORLDCON', FLAME_SMALL_TORCH, FLAME_FIRE_FIELD, stem);
+                    if (typeof candle === 'number')
+                        smallFlameFire.set(`${x.dbIndex}:${x.classId}`, { fields: x.cls.fields, fire: candle });
+                    modelSwapsUsed.set(modelKey(x.name), { ...row, ootf: x.name });
+                }
+                // Drakan 2 effects (ootfps2model.ts effects rows): the named class references become the Drakan 2 class's.
+                for (const x of effectRows) {
+                    const row = modelSwap.effect(x.name)!;
+                    const stem = x.file.replace(/\.ODB$/i, '');
+                    const edits: [string, number][] = [];
+                    const notes: string[] = [];
+                    for (const f of row.fields ?? []) {
+                        // "Drakan 2 field>OotF field" copies into another field of the converted class.
+                        const [from, to = from] = f.split('>').map((x) => x.trim()) as [string, string?];
+                        const own = x.cls.fields?.some((g) => g.name.trim() === to);
+                        const ref = own ? await discRef(row.odb ?? '', row.ps2, from, stem) : `${x.name} has no ${to}`;
+                        if (typeof ref === 'string') notes.push(ref);
+                        else edits.push([to, ref]);
+                    }
+                    if (notes.length) {
+                        res.warnings.push(`drakan 2 effect for ${x.name} not used: ${notes.join('; ')}`);
+                        continue;
+                    }
+                    // A class edited before (a puzzle default) keeps that value; the reference fields are not among them.
+                    res.warnings.push(...setSynthesizedDefaults(x, edits));
+                    modelSwapsUsed.set(modelKey(x.name), { ...row, ootf: x.name });
+                }
+            }
         }
         if (plan && opt.models !== false && hostOk) {
             const drawOwner = (file: string, db: number) => {
@@ -2903,6 +3024,46 @@ export async function convertOotfLevels(
                 }
             });
         }
+        if (flameClasses.size)
+            await stage(`flames ${pc.path}`, async () => {
+                // The Drakan 2 fire, light and sound start at the object's origin: put it at the foot of the OotF flame card.
+                const pcIdOf = new Map([...(parts.objectIdMap ?? new Map<number, number>())].map(([a, b]) => [b, a]));
+                const feet = new Map<OdbClass, [number, number, number] | null>();
+                let moved = 0;
+                let candles = 0;
+                for (const o of lvl.objects.objects) {
+                    if (!flameClasses.has(`${o.dbIndex}:${o.classId}`)) continue;
+                    const srcObj = pc.list.objects.find((x) => x.id === (pcIdOf.get(o.id) ?? o.id));
+                    const pcCls = srcObj ? pc.classes.get(srcObj.dbIndex)?.get(srcObj.classId) : undefined;
+                    const ow = pcCls ? ownerOf.get(pcCls) : undefined;
+                    if (!pcCls?.model || !ow) continue;
+                    if (!feet.has(pcCls)) {
+                        const m = await builder.readPcModel(ow, pcCls.model.db, pcCls.model.id);
+                        feet.set(pcCls, m ? flameFoot(m.positions) : null);
+                    }
+                    const foot = feet.get(pcCls);
+                    const d = foot ? flameOffset(o, foot) : null;
+                    if (!d) {
+                        res.warnings.push(
+                            `${title}: flame ${o.id} stays at its origin (tilted with its flame far from the origin, or no flame model)`,
+                        );
+                        continue;
+                    }
+                    o.pos = [o.pos[0] + d[0], o.pos[1] + d[1], o.pos[2] + d[2]];
+                    moved++;
+                    const small = smallFlameFire.get(`${o.dbIndex}:${o.classId}`);
+                    if (
+                        small &&
+                        isSmallFlame(o) &&
+                        setNamedParam(lvl.objects, o, small.fields, FLAME_FIRE_FIELD, small.fire)
+                    )
+                        candles++;
+                }
+                if (moved)
+                    log(
+                        `${title}: ${moved} flame(s) moved to the foot of their flame for the Drakan 2 fire, ${candles} small one(s) burn as candles`,
+                    );
+            });
         // Last change of object flags: dynamic lights of a class with the "Light Source" cube are not drawn (ootfmarkers.ts).
         await stage(`markers ${pc.path}`, async () => {
             const hidden = hideLightMarkers(

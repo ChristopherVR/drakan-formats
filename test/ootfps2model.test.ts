@@ -30,8 +30,10 @@ describe('Drakan 2 model table', () => {
         for (const r of DEFAULT_PS2_MODEL_SUBSTITUTIONS) {
             expect(seen.has(modelKey(r.ootf))).toBe(false);
             seen.add(modelKey(r.ootf));
-            expect(['enemies', 'weapons', 'props']).toContain(r.category);
+            expect(['enemies', 'weapons', 'props', 'flames', 'effects']).toContain(r.category);
+            if (r.category === 'effects') expect(r.odb && r.fields?.length).toBeTruthy();
             if (r.category === 'props') expect(r.odb && r.pcModel).toBeTruthy();
+            if (r.category === 'flames') expect(r.odb).toBeTruthy();
             expect(r.why.length).toBeGreaterThan(10);
             expect(`${r.label} ${r.why}`).not.toMatch(/—/);
             if (r.scene) {
@@ -62,7 +64,9 @@ describe('Drakan 2 model table', () => {
         expect(effectiveModelSubstitutions({ table, on: ['demo'] }).length).toBe(1);
         expect(effectiveModelSubstitutions({ enabled: false })).toEqual([]);
         expect(
-            effectiveModelSubstitutions({ categoriesOff: ['weapons', 'props'] }).every((r) => r.category === 'enemies'),
+            effectiveModelSubstitutions({ categoriesOff: ['weapons', 'props', 'flames', 'effects'] }).every(
+                (r) => r.category === 'enemies',
+            ),
         ).toBe(true);
         expect(effectiveModelSubstitutions({ off: ['LONG SWORD'] }).some((r) => r.ootf === 'Long Sword')).toBe(false);
     });
@@ -243,5 +247,63 @@ describe('Drakan 2 prop models', () => {
         fitVertices(v, { min: [0, 0, 0], max: [1, 1, 1] }, { min: [-1, 0, 0], max: [1, 0.5, 2] });
         expect(Array.from(v.positions)).toEqual([-1, 0, 0, 1, 0.5, 2]);
         expect(boxOf(v.positions).max).toEqual([1, 0.5, 2]);
+    });
+});
+
+describe('Drakan 2 flames', () => {
+    it('answers for the OotF flame classes, compares names without spaces, and switches off per row or category', () => {
+        const plan = planPs2Models();
+        for (const n of ['Sconce Flame', 'SconceFlame', 'Torch Flame', 'Standing Torch Flame', 'Hanging Flame'])
+            expect(plan.flame(n)).toMatchObject({ category: 'flames', odb: 'WORLDCON', ps2: 'OTF Wall Torch' });
+        expect(plan.flame('Torch Base')).toBeNull();
+        expect(plan.prop('Torch Flame', 'TFlame01')).toBeNull();
+        expect(planPs2Models({ categoriesOff: ['flames'] }).flame('Torch Flame')).toBeNull();
+        expect(planPs2Models({ off: ['Torch Flame'] }).flame('Torch Flame')).toBeNull();
+        expect(planPs2Models({ off: ['Torch Flame'] }).flame('Sconce Flame')).not.toBeNull();
+        expect(
+            planPs2Models(ps2ModelSwapFromEdits([{ ootf: 'Hanging Flame', ps2: null }])).flame('Hanging Flame'),
+        ).toBeNull();
+        expect(() =>
+            ps2ModelSwapFromEdits([{ ootf: 'Brazier Flame', ps2: 'Wartok Firepot', category: 'flames' }]),
+        ).toThrow(Ps2ModelMapError);
+        const user = planPs2Models(
+            ps2ModelSwapFromEdits([
+                { ootf: 'Brazier Flame', ps2: 'Wartok Firepot', category: 'flames', odb: 'WORLDCON' },
+            ]),
+        );
+        expect(user.flame('Brazier Flame')?.ps2).toBe('Wartok Firepot');
+    });
+});
+
+describe('Drakan 2 effects', () => {
+    it('names the Drakan 2 barrel explosion for both OotF exploding barrels, and switches off', () => {
+        const plan = planPs2Models();
+        for (const n of ['Barrel (explode)', 'Barrel (Exploding)'])
+            expect(plan.effect(n)).toMatchObject({
+                odb: 'MOUNTAON',
+                ps2: 'TNT Barrel',
+                fields: ['Explosion Generator>Smoke Generator'],
+            });
+        expect(plan.effect('Barrel')).toBeNull();
+        expect(plan.flame('Barrel (explode)')).toBeNull();
+        expect(planPs2Models({ categoriesOff: ['effects'] }).effect('Barrel (explode)')).toBeNull();
+        expect(
+            planPs2Models(ps2ModelSwapFromEdits([{ ootf: 'Barrel (explode)', ps2: null }])).effect('Barrel (explode)'),
+        ).toBeNull();
+        expect(() =>
+            ps2ModelSwapFromEdits([{ ootf: 'Crate', ps2: 'TNT Barrel', category: 'effects', odb: 'MOUNTAON' }]),
+        ).toThrow(Ps2ModelMapError);
+        const user = planPs2Models(
+            ps2ModelSwapFromEdits([
+                {
+                    ootf: 'Crate',
+                    ps2: 'TNT Barrel',
+                    category: 'effects',
+                    odb: 'MOUNTAON',
+                    fields: ['Explosion Generator'],
+                },
+            ]),
+        );
+        expect(user.effect('Crate')?.fields).toEqual(['Explosion Generator']);
     });
 });

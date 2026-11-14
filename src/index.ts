@@ -45,6 +45,7 @@ export * from './ootftext.ts';
 export * from './ootfsource.ts';
 export * from './ootfmusic.ts';
 export * from './ootfmarkers.ts';
+export * from './ootfflames.ts';
 export * from './ootfdmusic.ts';
 export * from './ootfpuzzle.ts';
 export * from './ootfmap.ts';
