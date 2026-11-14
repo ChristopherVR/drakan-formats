@@ -377,6 +377,16 @@ const OWN_DEFAULTS_RFL: ReadonlySet<number> = new Set([51, 104, 111]);
  * Damage x speed / 2048 (handler 0x45a148), less than a barrel's 5 health.
  */
 const PC_DEFAULTS_RFL: ReadonlySet<number> = new Set([16]);
+/**
+ * PC defaults `keepsPcDefaults` leaves at the PS2 class's value. A Rigid Body's health: the body takes its own hits off it
+ * (0x45ede0 from the hit handler, terrain bounces included) and is removed at 0, and the PC "Explosion Generator" it would
+ * shatter with is a class reference that is not carried, so a PC boulder with health 50 (Alwarren, Islands Night) would
+ * vanish after a few bounces instead of staying immortal as on the disc class.
+ */
+const PC_DEFAULTS_SKIP: ReadonlyMap<number, ReadonlySet<string>> = new Map([[16, new Set(['health (-1 = immortal)'])]]);
+export function pcDefaultsSkipped(rfl: number | undefined): ReadonlySet<string> | undefined {
+    return rfl === undefined ? undefined : PC_DEFAULTS_SKIP.get(rfl);
+}
 export function keepsPcDefaults(rfl: number | undefined): boolean {
     if (rfl !== undefined && PC_DEFAULTS_RFL.has(rfl)) return true;
     return rfl !== undefined && !OWN_DEFAULTS_RFL.has(rfl) && ENGINE_CLASSES.get(rfl)?.kind === 'logic';

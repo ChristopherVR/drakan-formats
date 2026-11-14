@@ -156,6 +156,8 @@ export interface ConvertOptions {
      * keeps the PS2 defaults otherwise (cloned classes already merge the PC defaults, so nothing changes for them).
      */
     keepPcDefaults?: (pcClass: OdbClass, target: ClassTarget) => boolean;
+    /** Field names (lower case) of a class whose PC default `keepPcDefaults` must not carry. */
+    keepPcDefaultsSkip?: (pcClass: OdbClass) => ReadonlySet<string> | undefined;
     /**
      * For a PC class that has no PS2 target: a note when leaving it out is the intended outcome (`deliberateOmission`,
      * ootfcoverage.ts). Its objects are counted in `omittedClasses`, not in `unmappedClasses`.
@@ -446,6 +448,7 @@ export function convertPcLevel(pc: PcLevel, opt: ConvertOptions): Ps2LevelParts 
             // Fields the object leaves at its PC class default: the PS2 class of the same name may default differently
             // (Alwarren's "count down to zero" counts Off down and On up on the PC, the PS2 "Count down to Zero" the reverse).
             const given = new Set(pcSpecs.map((s) => s.name.trim().toLowerCase()));
+            for (const k of opt.keepPcDefaultsSkip?.(pcCls!) ?? []) given.add(k);
             const taken = new Set(specs.map((s) => s.fieldIndex));
             pcCls!.fields?.forEach((pf, k) => {
                 const key = pf.name.trim().toLowerCase();

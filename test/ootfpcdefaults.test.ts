@@ -2,7 +2,7 @@
 // unless the object carries the PC default explicitly (Alwarren's "count down to zero": PC Off decrements, PS2 Off increments).
 import { describe, expect, it } from 'vitest';
 import { convertPcLevel, encodeString, objectParamSpecs, type ClassTarget } from '../src/index.ts';
-import { keepsPcDefaults } from '../src/ootfclass.ts';
+import { keepsPcDefaults, pcDefaultsSkipped } from '../src/ootfclass.ts';
 import type { LvlHeader, LvlObject } from '../src/lvl.ts';
 import type { OdbClass } from '../src/odb.ts';
 import type { PcLevel } from '../src/pc.ts';
@@ -121,5 +121,44 @@ describe('PC class defaults of name-mapped classes', () => {
             false,
             false,
         ]);
+    });
+});
+
+describe('PC class defaults of name-mapped Rigid Bodies', () => {
+    const boulder = (name: string, data: number[]): OdbClass => ({
+        id: 1079,
+        name,
+        rflClass: 16,
+        runtimeClass: 0x10010,
+        group: 1,
+        fields: [
+            { type: T_FLOAT, name: 'Friction' },
+            { type: T_INT, name: 'Health (-1 = immortal)' },
+            { type: T_INT, name: 'Damage (per lu/s)' },
+            { type: T_ENUM, name: 'Damage Player' },
+        ],
+        data,
+    });
+    const pc = boulder('Boulder', [f32(0.2), 50, 5, 1]);
+    const ps2 = boulder('Boulder', [f32(2), 0xffffffff, 1, 0]);
+    const target: ClassTarget = { dbIndex: 3, classId: 1079, cls: ps2 };
+    const lv = level(pc, [object(2762)]);
+    lv.classes.get(2)!.set(3369, pc);
+
+    it('carries damage and friction but leaves the disc class immortal', () => {
+        const r = convertPcLevel(lv, {
+            template: { header: lv.header, classes: new Map([[3, new Map([[1079, ps2]])]]) },
+            textureFallback: 0,
+            resolveClass: () => target,
+            keepPcDefaults: (c, t) => keepsPcDefaults(c.rflClass) && t === target,
+            keepPcDefaultsSkip: (c) => pcDefaultsSkipped(c.rflClass),
+        });
+        const got = Object.fromEntries(
+            objectParamSpecs(r.objects.objects.find((o) => o.id === 2762)!).map((s) => [s.name, s.value]),
+        );
+        expect(got['Damage (per lu/s)']).toBe(5);
+        expect(got['Damage Player']).toBe(1);
+        expect(got['Friction']).toBeCloseTo(0.2);
+        expect('Health (-1 = immortal)' in got).toBe(false);
     });
 });
