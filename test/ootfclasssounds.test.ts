@@ -93,6 +93,12 @@ describe('class-default sounds', () => {
         expect(matchClassSounds(pc, other).unmatched).toEqual(['Bang Hinges Sound', 'Death Sounds']);
     });
 
+    it('keeps the template pickup sound', () => {
+        const item = cls('Sword', 14, [[T_SOUND, 'Picked Up Sound']], [0x20005]);
+        const tplItem = cls('Club', 14, [[T_SOUND, 'Picked Up Sound']], [0xc4]);
+        expect(matchClassSounds(item, tplItem)).toEqual({ fields: [], unmatched: [] });
+    });
+
     it('clears a template sound where the PC field has none', () => {
         const silent = cls('Door', 19, [[T_SOUND, 'Close Stop Sound']], [0]);
         expect(matchClassSounds(silent, tpl).fields).toEqual([

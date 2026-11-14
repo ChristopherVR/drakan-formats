@@ -24,6 +24,14 @@ export const PC_SOUND_FIELD_ALIASES: ReadonlyMap<string, string> = new Map([]);
  */
 export const PC_SOUND_OBJECT_FIELDS: ReadonlyMap<string, string> = new Map([['sound effect object', 'looping sound']]);
 
+/**
+ * Template sound fields that keep the template's value whatever the PC class names (lower case). "Picked Up Sound": an item
+ * whose field names a converted clip never reaches the play call when it is picked up (Ruined Village Long Sword: the
+ * template's 0xc4 plays, the converted clip makes no call at all; the pickup path at 0x3471d4 checks something the
+ * converted clip lacks, not established), so the converted weapons kept the Drakan 2 pickup sound rather than none.
+ */
+export const TEMPLATE_KEPT_SOUND_FIELDS: ReadonlySet<string> = new Set(['picked up sound']);
+
 const norm = (s: string): string => s.trim().toLowerCase();
 
 /**
@@ -85,6 +93,7 @@ export function matchClassSounds(pc: OdbClass, tpl: OdbClass): { fields: ClassSo
     const fields: ClassSoundField[] = [];
     const unmatched: string[] = [];
     for (const { name, refs } of pcClassSoundRefs(pc, true)) {
+        if (TEMPLATE_KEPT_SOUND_FIELDS.has(norm(name))) continue;
         const j = byName.get(norm(name)) ?? byName.get(PC_SOUND_FIELD_ALIASES.get(norm(name)) ?? '');
         if (j === undefined) {
             if (refs.length) unmatched.push(name);
