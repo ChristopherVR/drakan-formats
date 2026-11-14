@@ -99,9 +99,10 @@ describe('class-default sounds', () => {
         expect(matchClassSounds(item, tplItem)).toEqual({ fields: [], unmatched: [] });
     });
 
-    it('clears a template sound where the PC field has none', () => {
+    it('keeps a template sound where the PC field has none, clears it on request', () => {
         const silent = cls('Door', 19, [[T_SOUND, 'Close Stop Sound']], [0]);
-        expect(matchClassSounds(silent, tpl).fields).toEqual([
+        expect(matchClassSounds(silent, tpl).fields).toEqual([]);
+        expect(matchClassSounds(silent, tpl, true).fields).toEqual([
             { name: 'Close Stop Sound', field: 3, array: false, refs: [] },
         ]);
         expect(matchClassSounds(silent, cls('Door', 19, [[T_SOUND, 'Close Stop Sound']], [0])).fields).toEqual([]);

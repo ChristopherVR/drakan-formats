@@ -452,6 +452,11 @@ export interface OotfPipelineOptions {
      * template's sound defaults in every clone, as before.
      */
     classSounds?: boolean;
+    /**
+     * With `classSounds`: a PC sound field without a sound clears the template's (Drakan 2) sound in the clone. Default false:
+     * the clone keeps the Drakan 2 sound there.
+     */
+    classSoundsClear?: boolean;
     sequences?: boolean;
     /**
      * Subtitle lines of the PC voice clips (ootfsubtitles.ts; made on the player's machine from the player's own audio). The
@@ -2235,7 +2240,7 @@ export async function convertOotfLevels(
                         // keeps the template's (that creature's) sound set, so its voice stays one creature's.
                         if (modelSwap.enemy(source.name) === 'drakan2') continue;
                         await builder.registerOwner(ow);
-                        const m = matchClassSounds(source, s.cls);
+                        const m = matchClassSounds(source, s.cls, opt.classSoundsClear === true);
                         if (m.unmatched.length && dbgEnv0['DRAKAN_DBG_CLASSSOUNDS'])
                             log(
                                 `class sounds ${s.name}: no field in "${s.template.name}" for ${m.unmatched.join(', ')}`,
@@ -2393,7 +2398,7 @@ export async function convertOotfLevels(
             }
             if (classSounds.length)
                 log(
-                    `class sounds: ${written} field(s) of ${classSounds.length} converted classes (${cleared} cleared: the PC class plays none there)${conflicts ? `, ${conflicts} field(s) differ between folded PC classes (first kept)` : ''}`,
+                    `class sounds: ${written} field(s) of ${classSounds.length} converted classes (${cleared} cleared: the PC class plays none there, classSoundsClear)${conflicts ? `, ${conflicts} field(s) differ between folded PC classes (first kept)` : ''}`,
                 );
         });
     }

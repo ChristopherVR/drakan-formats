@@ -11,7 +11,7 @@ import type { Synthesized } from './ootfclass.ts';
  * nothing in the clone's database (every converted torch asked for sound 0). The sounds stage converts the PC sounds these
  * fields name and writes the converted ids into the clone, field by field: a PC sound field goes to the template's sound
  * field of the same name (or the name `PC_SOUND_FIELD_ALIASES` gives it). Template sound fields the PC class has no
- * counterpart for keep the template's value, as the other PC defaults do.
+ * counterpart for, or no sound in, keep the template's value (`matchClassSounds` `clear` empties the latter).
  */
 
 /** PC sound field name -> the PS2 field it plays as, where the two schemas name the same sound differently (lower case). */
@@ -81,10 +81,15 @@ export function pcClassSoundRefs(pc: OdbClass, empty = false): { name: string; r
 
 /**
  * The PC sound fields of `pc` that the template `tpl` has a sound field for (same name, else the alias), and the PC sound
- * fields with sounds it has none for (`unmatched`, names only). A PC field without a sound is listed with no refs when the
- * template's field has one: the PC class plays nothing there, so the template's Drakan 2 sound is cleared.
+ * fields with sounds it has none for (`unmatched`, names only). A PC field without a sound keeps the template's Drakan 2
+ * sound (owner's choice: a sound rather than silence); with `clear` it is listed with no refs when the template's field has
+ * one, so the template's sound is cleared as the PC class plays nothing there.
  */
-export function matchClassSounds(pc: OdbClass, tpl: OdbClass): { fields: ClassSoundField[]; unmatched: string[] } {
+export function matchClassSounds(
+    pc: OdbClass,
+    tpl: OdbClass,
+    clear = false,
+): { fields: ClassSoundField[]; unmatched: string[] } {
     const tf = tpl.fields ?? [];
     const byName = new Map<string, number>();
     tf.forEach((f, j) => {
@@ -97,7 +102,7 @@ export function matchClassSounds(pc: OdbClass, tpl: OdbClass): { fields: ClassSo
         const j = byName.get(norm(name)) ?? byName.get(PC_SOUND_FIELD_ALIASES.get(norm(name)) ?? '');
         if (j === undefined) {
             if (refs.length) unmatched.push(name);
-        } else if (refs.length || tpl.data?.[j])
+        } else if (refs.length || (clear && tpl.data?.[j]))
             fields.push({ name, field: j, array: fieldIsIndirect(tf[j]!.type), refs });
     }
     return { fields, unmatched };
