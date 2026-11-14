@@ -175,6 +175,8 @@ describe('Drakan 2 prop models', () => {
         expect(plan.prop('Skeleton', 'Skeleton01')).toBeNull(); // the same class name with another model
         expect(plan.prop('Skeleton Hanging', 'Skeleton04')?.compose?.align).toBe('top'); // hung from the OotF chain
         expect(plan.prop('Spiked Torso', 'Torso on Spike01(h)')).toBeNull(); // off by default
+        expect(plan.prop('Hanging torso', 'HangingTorso2(H)')).toBeNull(); // off by default
+        expect(plan.prop('Hanging Guy', 'HangingBody2(H)')?.compose?.align).toBe('top');
         expect(planPs2Models({ on: ['Spiked Torso'] }).prop('Spiked Torso', 'Torso on Spike01(h)')?.ps2).toBe(
             'Deadguy 01',
         );

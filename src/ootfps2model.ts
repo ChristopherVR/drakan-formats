@@ -219,6 +219,7 @@ const BODY_COMPOSE: readonly [string, string, string, string, string, ComposeOpt
         'Deadguy 02',
         'Hanging torso',
         { replace: [3, 4, 5, 6], align: 'top' },
+        true, // off: in the game the Drakan 2 torso throws its head back and reads as falling off the post
     ],
     ['Cage Body(L)', 'Cage02wPerson(H)', 'WORLDCON', 'Deadguy 03', 'Body in a cage', { replace: [5, 6, 7, 8] }],
     [
