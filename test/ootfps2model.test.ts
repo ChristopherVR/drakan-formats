@@ -173,8 +173,12 @@ describe('Drakan 2 prop models', () => {
         const plan = planPs2Models();
         expect(plan.prop('Skeleton Spike', 'Skeleton05')?.odb).toBe('MOUNTAON');
         expect(plan.prop('Skeleton', 'Skeleton01')).toBeNull(); // the same class name with another model
-        expect(plan.prop('Skeleton Hanging', 'Skeleton04')).toBeNull(); // off by default
-        expect(planPs2Models({ on: ['Skeleton Hanging'] }).prop('Skeleton Hanging', 'Skeleton04')).not.toBeNull();
+        expect(plan.prop('Skeleton Hanging', 'Skeleton04')?.compose?.align).toBe('top'); // hung from the OotF chain
+        expect(plan.prop('Spiked Torso', 'Torso on Spike01(h)')).toBeNull(); // off by default
+        expect(planPs2Models({ on: ['Spiked Torso'] }).prop('Spiked Torso', 'Torso on Spike01(h)')?.ps2).toBe(
+            'Deadguy 01',
+        );
+        expect(plan.prop('Solid Mid Piece', 'SolidSusBridge02(H)')?.bridge?.ropes).toEqual([2]);
         expect(planPs2Models({ categoriesOff: ['props'] }).prop('Skeleton Spike', 'Skeleton05')).toBeNull();
         expect(() => ps2ModelSwapFromEdits([{ ootf: 'Barrel', ps2: 'Barrel', category: 'props' }])).toThrow(
             Ps2ModelMapError,
@@ -379,11 +383,17 @@ describe('refined OotF prop meshes', () => {
 
 describe('new palms and recoloured disc textures', () => {
     it('answers the palm row and the pine row of one class name by PC model', () => {
-        const plan = planPs2Models({ on: ['Large Tree'] });
+        const plan = planPs2Models();
         expect(plan.prop('Large Tree', 'Large Pine(H)')?.ps2).toBe('Pine Tree 01');
-        expect(plan.prop('Large Tree', 'PalmTree_Tall01(H)')?.refine).toBe('palm');
-        expect(planPs2Models().prop('Large Tree', 'PalmTree_Tall01(H)')).toBeNull(); // off by default
+        expect(plan.prop('Large Tree', 'PalmTree_Tall01(H)')?.refine).toBe('crown');
         expect(planPs2Models().prop('Fan Palm 01', 'tropical tree01')?.refine).toBe('palm');
+        // a row name switches one PC model's row of the class only
+        const pineOff = planPs2Models({ off: ['Large Tree|Large Pine(H)'] });
+        expect(pineOff.prop('Large Tree', 'PalmTree_Tall01(H)')?.refine).toBe('crown');
+        expect(pineOff.prop('Large Tree', 'Large Pine(H)')).toBeNull();
+        const palmOff = planPs2Models({ off: ['Large Tree|PalmTree_Tall01(H)'] });
+        expect(palmOff.prop('Large Tree', 'PalmTree_Tall01(H)')).toBeNull();
+        expect(palmOff.prop('Large Tree', 'Large Pine(H)')?.ps2).toBe('Pine Tree 01');
     });
     it('builds a palm: a rounded trunk, curved two-sided fronds with the OotF frond UVs, the same textures', () => {
         // trunk: a square post from y 0 to 2 (texture 0); one frond card at the top (texture 1, with holes)

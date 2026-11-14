@@ -23,6 +23,9 @@
  *   counterpart.
  */
 
+import type { BridgeOptions } from './ootfbridgemodel.ts';
+import type { ComposeOptions } from './ootfpropcompose.ts';
+
 export type Ps2ModelCategory = 'enemies' | 'weapons' | 'props' | 'flames' | 'effects';
 
 export interface Ps2ModelSubstitution {
@@ -62,10 +65,17 @@ export interface Ps2ModelSubstitution {
     /** Props: stretch the disc model onto the OotF model's box (a remake a little larger or smaller than the original). */
     fit?: boolean;
     /**
+     * Props: keep some OotF parts and draw the rest with the disc model of `ps2` (ootfpropcompose.ts `composeBody`): a dead
+     * man on the OotF gallows rope, in the OotF cage or on the OotF spike.
+     */
+    compose?: ComposeOptions;
+    /** Props: a rope bridge piece redrawn with boards and round ropes (ootfbridgemodel.ts `bridgeMesh`). */
+    bridge?: BridgeOptions;
+    /**
      * Props without a Drakan 2 model: draw the OotF model itself refined (`normals`, `pn`, `pn2`, see ootfdiscmodel.ts
      * `refineMesh`) while it collides as converted. `ps2` and `odb` are unused then.
      */
-    refine?: 'normals' | 'pn' | 'pn2' | 'round' | 'palm' | 'smooth' | 'module' | 'beam';
+    refine?: 'normals' | 'pn' | 'pn2' | 'round' | 'palm' | 'smooth' | 'module' | 'beam' | 'crown';
     /** Props: draw only the parts of the disc model that use these entries of its texture list (a crystal without its stand). */
     keepTextures?: readonly number[];
     /** Props: recolour the copied disc textures at convert time (`green`: the Order of the Flame crystal green). */
@@ -162,15 +172,31 @@ const BARREL_WHY =
     "Goes off with the Drakan 2 explosive barrel's explosion (flash, fireball, debris and sound) in its free smoke generator slot: the converted OotF explosion drew only the barrel staves, its fire parts showed nothing. The OotF explosion still runs beside it, so the blast and its damage to Rynn and enemies stay the OotF barrel's.";
 const SKELETON_WHY =
     'Drakan 2 ships a remade Mountain World skeleton of the same name, pose, size and origin (about 1,000 triangles against 140).';
+const HANGING_WHY =
+    'The Drakan 2 hanging skeleton (about 1,000 triangles against 150) hung from the OotF chain, as tall as the OotF skeleton (the Drakan 2 one on its own cable hangs from its chest, about 0.6 units lower). Rynn collides with the OotF skeleton.';
 const BRIDGE_WHY =
-    'The Drakan 2 Restoration rope bridge span has the same length and height as the OotF span but a walkway three times as wide; stretched onto the OotF span, Rynn walks on the OotF planks.';
-/** Bodies on spikes, in cages and hanging: Drakan 2 has no model of them, so the OotF mesh is drawn refined. */
+    'Drakan 2 style rope bridge: the painted OotF walkway becomes separate boards with gaps on two rope stringers, every flat rope a round rope, with the Drakan 2 rope bridge planks and rope; the board tops lie on the OotF walkway, which is still what Rynn walks on and collides with.';
+/** The Drakan 2 rope bridge textures (LEVEL2RE "SusBridge02"): 0 its planks, 1 its post wrap, 2 its rope. */
+const BRIDGE_PIECE: BridgeOptions = {
+    planks: [0, 1],
+    ropes: [2],
+    plankTexture: 0,
+    ropeTexture: 2,
+    retexture: { 0: 0, 1: 1 },
+};
+/** OotF rope bridge pieces drawn in Drakan 2 style: [class, PC model, label, how]. */
+const BRIDGES: readonly [string, string, string, BridgeOptions][] = [
+    ['Bridge 01', 'SusBridge01(H)', 'Rope bridge end', BRIDGE_PIECE],
+    ['SusBridge01', 'SusBridge01(H)', 'Rope bridge end', BRIDGE_PIECE],
+    ['Bridge 03', 'SusBridge03(H)', 'Rope bridge end', BRIDGE_PIECE],
+    ['SusBridge03', 'SusBridge03(H)', 'Rope bridge end', BRIDGE_PIECE],
+    ['Solid Mid Piece', 'SolidSusBridge02(H)', 'Rope bridge span', BRIDGE_PIECE],
+    ['Solid Bridge', 'SolidSusBridge02(H)', 'Rope bridge span', BRIDGE_PIECE],
+    ['Bridge 02', 'SusBridge02(H)', 'Broken rope bridge span', BRIDGE_PIECE],
+    ['Bridge Rope', 'Break-awaySusBridge_rope(H)', 'Rope bridge ropes', { ...BRIDGE_PIECE, planks: [], ropes: [0] }],
+];
+/** Dead bodies with no Drakan 2 model of their pose: the OotF mesh drawn refined. */
 const BODY_REFINE: readonly [string, string, string][] = [
-    ['Spiked Body', 'Body on Spike02(h)', 'Body impaled on a spike'],
-    ['Spiked Torso', 'Torso on Spike01(h)', 'Torso on a spike'],
-    ['Hanging torso', 'HangingTorso2(H)', 'Hanging torso'],
-    ['Cage Body(L)', 'Cage02wPerson(H)', 'Body in a cage'],
-    ['Hanging Guy', 'HangingBody2(H)', 'Hanged man'],
     ['Torture Gyro Victim', 'rackboy', 'Torture wheel victim'],
     ['deadpose1', 'deadpose01', 'Dead villager'],
     ['deadpose2', 'deadpose02', 'Dead villager'],
@@ -179,6 +205,42 @@ const BODY_REFINE: readonly [string, string, string][] = [
 ];
 const BODY_WHY =
     'No Drakan 2 model of a body on a spike, in a cage or hanging exists. Turned on, the OotF mesh is drawn refined (smooth normals, one curved subdivision step that also rounds box-like limbs; the texture layout is kept) while it collides as converted. Off: in Wartok Canyons the refined bodies look nearly the same as the OotF ones (journal 2026-11-14/ootf-d2-models.md).';
+/**
+ * Bodies drawn with a Drakan 2 dead man on the OotF gallows, cage or spike: [class, PC model, ODB, Drakan 2 class, label, how,
+ * off by default]. `replace` lists the OotF model's body textures (its texture-list entries); the rope, beam, cage, chain and
+ * spike stay.
+ */
+const BODY_COMPOSE: readonly [string, string, string, string, string, ComposeOptions, boolean?][] = [
+    ['Hanging Guy', 'HangingBody2(H)', 'WORLDCON', 'Deadguy 03', 'Hanged man', { replace: [1, 4, 5, 6], align: 'top' }],
+    [
+        'Hanging torso',
+        'HangingTorso2(H)',
+        'WORLDCON',
+        'Deadguy 02',
+        'Hanging torso',
+        { replace: [3, 4, 5, 6], align: 'top' },
+    ],
+    ['Cage Body(L)', 'Cage02wPerson(H)', 'WORLDCON', 'Deadguy 03', 'Body in a cage', { replace: [5, 6, 7, 8] }],
+    [
+        'Spiked Torso',
+        'Torso on Spike01(h)',
+        'WORLDCON',
+        'Deadguy 01',
+        'Torso on a spike',
+        { replace: [0, 1, 2, 3, 4, 6] },
+        true, // off: not yet seen in the game (it hangs high on a dark wall)
+    ],
+    [
+        'Spiked Body',
+        'Body on Spike02(h)',
+        'WORLDCON',
+        'Deadguy 03',
+        'Body impaled on a spike',
+        { replace: [0, 3, 4, 5], yaw: 180, bend: { at: 0.5, angle: 125, band: 0.12 } },
+    ],
+];
+const BODY_COMPOSE_WHY =
+    'Drakan 2 has no body on a gallows, in a cage or on a spike, but it has hanging dead men (Deadguy, about 300 to 840 triangles against 100 to 190): the OotF rope, beam, cage or spike stays and the body is the Drakan 2 one, as tall as the OotF body and in its place. Rynn collides with the OotF model.';
 const PINE_WHY =
     'A looser match: the Drakan 2 pine of the same kind (about 700 triangles against 46 vertices), stretched onto the OotF tree; Rynn collides with the OotF tree.';
 const SNOWY_PINE_WHY =
@@ -196,11 +258,13 @@ const TORCHES: readonly [string, string, string, string][] = [
 ];
 const PALM_WHY =
     'Drakan 2 has no palm: a new palm is built at convert time from the OotF one (the trunk rounded with its own bark, every frond a curved, drooping two-sided card with the OotF frond picture); Rynn collides with the OotF palm.';
-/** OotF palms drawn as new palms: [class, PC model, label, off by default (not yet seen in game)]. */
-const PALMS: readonly [string, string, string, boolean][] = [
-    ['Fan Palm 01', 'tropical tree01', 'Fan palm', false],
-    ['Large Tree', 'PalmTree_Tall01(H)', 'Tall palm', true],
-    ['SmallTree', 'PalmTree_Short01(H)', 'Short palm', true],
+const PALM_CROWN_WHY =
+    'Drakan 2 has no palm: the OotF palm is drawn with its trunk rounded and a second ring of its own curved fronds between the first, a little shorter and drooping more, so the crown is twice as full; Rynn collides with the OotF palm.';
+/** OotF palms drawn as new palms: [class, PC model, label, how, off by default]. */
+const PALMS: readonly [string, string, string, 'palm' | 'crown', boolean][] = [
+    ['Fan Palm 01', 'tropical tree01', 'Fan palm', 'palm', false],
+    ['Large Tree', 'PalmTree_Tall01(H)', 'Tall palm', 'crown', false],
+    ['SmallTree', 'PalmTree_Short01(H)', 'Short palm', 'crown', false],
 ];
 const REMAKE_WHY =
     'Drakan 2 has no model of it: a denser, smoother PS2-style model is built at convert time from the OotF one (two steps of Loop subdivision with sharp edges kept, smooth shading, the OotF textures and their layout); Rynn collides with the OotF model.';
@@ -347,36 +411,14 @@ export const DEFAULT_PS2_MODEL_SUBSTITUTIONS: readonly Ps2ModelSubstitution[] = 
     prop('Skeleton05', 'Skeleton05', 'MOUNTAON', 'Skeleton 05 - On Spike', 'Skeleton impaled on a spike', SKELETON_WHY),
     prop('Skeleton07', 'Skeleton07', 'MOUNTAON', 'Skeleton07 - Impaled no spike', 'Impaled skeleton', SKELETON_WHY),
     prop('Skeleton01', 'Skeleton01', 'MOUNTAON', 'Skeleton 01 - Crucified', 'Crucified skeleton', SKELETON_WHY),
-    prop(
-        'Skeleton Hanging',
-        'Skeleton04',
-        'MOUNTAON',
-        'Skeleton 04 - Hanging from chai',
-        'Hanging skeleton',
-        'Same pose, but the Drakan 2 model hangs from a point 0.59 units higher (its origin is at the chest, not at the chain), so it would hang below its chain; off, and the size and origin check refuses it.',
-        true,
-    ),
-    prop('Bridge 02', 'SusBridge02(H)', 'LEVEL2RE', 'SusBridge02', 'Rope bridge span', BRIDGE_WHY, true, true),
-    prop(
-        'Solid Mid Piece',
-        'SolidSusBridge02(H)',
-        'LEVEL2RE',
-        'SolidSusbridge02',
-        'Rope bridge span (solid)',
-        BRIDGE_WHY,
-        true,
-        true,
-    ),
-    prop(
-        'Bridge Rope',
-        'Break-awaySusBridge_rope(H)',
-        'LEVEL2RE',
-        'Break Away Ropes',
-        'Rope bridge ropes',
-        BRIDGE_WHY,
-        true,
-        true,
-    ),
+    ...(['Skeleton Hanging', 'Skeleton04'] as const).map((pc) => ({
+        ...prop(pc, 'Skeleton04', 'MOUNTAON', 'Skeleton 10 - Hanging no cable', 'Hanging skeleton', HANGING_WHY),
+        compose: { replace: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10], align: 'top' as const },
+    })),
+    ...BRIDGES.map(([pc, pcModel, label, bridge]) => ({
+        ...prop(pc, pcModel, 'LEVEL2RE', 'SusBridge02', label, BRIDGE_WHY),
+        bridge,
+    })),
     ...BODY_REFINE.map(([pc, pcModel, label]) => ({
         category: 'props' as const,
         ootf: pc,
@@ -387,6 +429,10 @@ export const DEFAULT_PS2_MODEL_SUBSTITUTIONS: readonly Ps2ModelSubstitution[] = 
         refine: 'round' as const,
         defaultOff: true,
     })),
+    ...BODY_COMPOSE.map(([pc, pcModel, odb, ps2, label, compose, off]) => ({
+        ...prop(pc, pcModel, odb, ps2, label, BODY_COMPOSE_WHY, off === true),
+        compose,
+    })),
     ...ANALOGS.map(([pc, pcModel, odb, ps2, label, why, off]) => prop(pc, pcModel, odb, ps2, label, why, off, true)),
     ...(['Grimstone Crystals 1', 'Grimstone Crystals 2'] as const).map((pc, i) => ({
         ...prop(pc, `GrimCrystal0${i + 1}`, 'LEVEL1ON', 'Crystal Blue', 'Grimstone crystal', CRYSTAL_WHY, false, true),
@@ -394,14 +440,14 @@ export const DEFAULT_PS2_MODEL_SUBSTITUTIONS: readonly Ps2ModelSubstitution[] = 
         tint: 'green' as const,
     })),
     ...TORCHES.map(([pc, pcModel, ps2, label]) => prop(pc, pcModel, 'WORLDCON', ps2, label, TORCH_WHY, false, true)),
-    ...PALMS.map(([pc, pcModel, label, off]) => ({
+    ...PALMS.map(([pc, pcModel, label, refine, off]) => ({
         category: 'props' as const,
         ootf: pc,
         pcModel,
         ps2: '(new palm)',
         label,
-        why: PALM_WHY,
-        refine: 'palm' as const,
+        why: refine === 'crown' ? PALM_CROWN_WHY : PALM_WHY,
+        refine,
         defaultOff: off,
     })),
     ...REMAKES.map(([pc, pcModel, label, refine, why]) => ({
@@ -477,6 +523,7 @@ const REFINE_MODES: readonly NonNullable<Ps2ModelSubstitution['refine']>[] = [
     'smooth',
     'module',
     'beam',
+    'crown',
 ];
 
 /** Turn user edits (a parsed JSON file) into swap options over the default table. */
@@ -543,6 +590,14 @@ export function ps2ModelSwapFromEdits(edits: unknown, base: Ps2ModelSwapOptions 
     return { ...base, off, on, extra };
 }
 
+/**
+ * The name `off` / `on` use for one row: the class name, or for a prop row that names its PC model `class|PC model`, so one
+ * class name's palm and pine rows can be turned on and off apart. A plain class name still switches every row of the class.
+ */
+export function ps2ModelRowName(r: Pick<Ps2ModelSubstitution, 'ootf' | 'category' | 'pcModel'>): string {
+    return r.category === 'props' && r.pcModel ? `${r.ootf}|${r.pcModel}` : r.ootf;
+}
+
 /** The rows a conversion uses: table minus `off` and turned-off categories, `extra` replacing rows of the same class. */
 export function effectiveModelSubstitutions(o: Ps2ModelSwapOptions = {}): Ps2ModelSubstitution[] {
     if (o.enabled === false) return [];
@@ -556,7 +611,8 @@ export function effectiveModelSubstitutions(o: Ps2ModelSwapOptions = {}): Ps2Mod
     for (const r of [...(o.table ?? DEFAULT_PS2_MODEL_SUBSTITUTIONS), ...(o.extra ?? [])]) rows.set(rowKey(r), r);
     return [...rows.values()].filter((r) => {
         const k = modelKey(r.ootf);
-        return !off.has(k) && !cats.has(r.category) && (!r.defaultOff || on.has(k));
+        const row = modelKey(ps2ModelRowName(r));
+        return !off.has(k) && !off.has(row) && !cats.has(r.category) && (!r.defaultOff || on.has(k) || on.has(row));
     });
 }
 

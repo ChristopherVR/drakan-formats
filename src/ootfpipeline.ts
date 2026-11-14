@@ -1,3 +1,5 @@
+import { bridgeMesh } from './ootfbridgemodel.ts';
+import { composeBody } from './ootfpropcompose.ts';
 import { buildBowAimMetadata } from './ootfbowaim.ts';
 import { requireGenericPropDrawLists, requireRigidWeaponDrawLists } from './ootfpropdraw.ts';
 import { holdLinkedDoors } from './ootfdoors.ts';
@@ -1220,6 +1222,44 @@ export async function convertOotfLevels(
                         if ((await builder.refineDrawing(ow, m.db, m.id, row.refine)) !== null) {
                             modelSwapsUsed.set(modelKey(u.cls.name), { ...row, ootf: u.cls.name.trim() });
                             continue;
+                        }
+                    } else if (pcm && row?.bridge) {
+                        // a rope bridge piece with boards and round ropes (ootfbridgemodel.ts)
+                        const disc = await discModelOf(row);
+                        const how = row.bridge;
+                        const nid =
+                            typeof disc === 'string'
+                                ? null
+                                : await builder.composeDrawing(ow, m.db, m.id, disc.src.textures, (mm) =>
+                                      bridgeMesh(mm, mm.textures.length, how),
+                                  );
+                        if (nid !== null) {
+                            modelSwapsUsed.set(modelKey(u.cls.name), { ...row, ootf: u.cls.name.trim() });
+                            continue;
+                        }
+                        const note = `drakan 2 model for ${u.cls.name.trim()} not used: ${typeof disc === 'string' ? disc : 'the bridge could not be built'}`;
+                        if (!propNotes.has(note)) {
+                            propNotes.add(note);
+                            res.warnings.push(note);
+                        }
+                    } else if (pcm && row?.compose) {
+                        // OotF parts kept, the body drawn with a Drakan 2 model (ootfpropcompose.ts)
+                        const disc = await discModelOf(row);
+                        const how = row.compose;
+                        const nid =
+                            typeof disc === 'string'
+                                ? null
+                                : await builder.composeDrawing(ow, m.db, m.id, disc.src.textures, (mm) =>
+                                      composeBody(mm, disc.src.model, mm.textures.length, how),
+                                  );
+                        if (nid !== null) {
+                            modelSwapsUsed.set(modelKey(u.cls.name), { ...row, ootf: u.cls.name.trim() });
+                            continue;
+                        }
+                        const note = `drakan 2 model for ${u.cls.name.trim()} not used: ${typeof disc === 'string' ? disc : 'the composed model could not be built'}`;
+                        if (!propNotes.has(note)) {
+                            propNotes.add(note);
+                            res.warnings.push(note);
                         }
                     } else if (pcm && row) {
                         const disc = await discModelOf(row);

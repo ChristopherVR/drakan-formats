@@ -85,6 +85,15 @@ export function fitVertices(v: { positions: Float32Array; normals: Int8Array }, 
     }
 }
 
+/** Centre of the topmost used vertices (within 1 % of the model's height of its highest point). */
+export function topPoint(positions: Float32Array, used: Iterable<number>): number[] {
+    const u = [...used];
+    const b = boxOf(positions, u);
+    const cut = b.max[1]! - (b.max[1]! - b.min[1]!) * 0.01;
+    const top = u.filter((i) => positions[i * 3 + 1]! >= cut);
+    return [0, 1, 2].map((k) => top.reduce((a, i) => a + positions[i * 3 + k]!, 0) / top.length);
+}
+
 /**
  * A disc strip display list moved behind `vertexOffset` OotF vertices and `textureOffset` OotF textures: a first vertex group
  * that covers the OotF vertices (never loaded by a batch) is prepended, every group a batch loads is the next one, and every
@@ -200,7 +209,7 @@ export function appendTextures(name: Uint8Array, extra: readonly number[]): { re
  * limbs become rounded). `smooth`, `module` and `beam` are the new PS2-style drawings of ootfpropremake.ts (Loop subdivision;
  * the same with fixed open borders for corridor modules; a rebuilt light beam).
  */
-export type RefineMode = 'normals' | 'pn' | 'pn2' | 'round' | 'palm' | 'smooth' | 'module' | 'beam';
+export type RefineMode = 'normals' | 'pn' | 'pn2' | 'round' | 'palm' | 'smooth' | 'module' | 'beam' | 'crown';
 
 interface RMesh {
     positions: number[];

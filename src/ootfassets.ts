@@ -50,6 +50,7 @@ import {
     tintImage,
 } from './ootfdiscmodel.ts';
 import { lightBeamMesh, smoothSubdivide } from './ootfpropremake.ts';
+import { palmCrownMesh } from './ootfpalm.ts';
 import { type Ps2SubstituteTexture, substituteMismatch } from './ootfps2tex.ts';
 
 /**
@@ -1237,6 +1238,27 @@ export class OotfAssetBuilder {
             );
             return null;
         }
+        const ids = this.copyDiscTextures(dTextures);
+        if (!ids) return null;
+        const name = appendTextures(pName, ids).record;
+        m.records = m.records!.map((r) =>
+            r.type === MOD_NAME_RECORD
+                ? { type: r.type, data: name }
+                : r.type === MOD_VERTICES_RECORD
+                  ? { type: r.type, data: drawing.vertices }
+                  : r.type === MOD_DISPLAY_LIST
+                    ? { type: r.type, data: drawing.displayList }
+                    : r,
+        );
+        if (!m.records.some((r) => r.type === MOD_DISPLAY_LIST))
+            m.records.push({ type: MOD_DISPLAY_LIST, data: drawing.displayList });
+        m.disc = true;
+        for (const id of ids) this.useTexture(id, key);
+        return nid;
+    }
+
+    /** Copy disc textures into the output TXD byte for byte (once per disc texture); their ids, or null when out of ids. */
+    private copyDiscTextures(dTextures: DiscModelSource['textures']): number[] | null {
         const ids: number[] = [];
         for (const t of dTextures) {
             const shared = this.ps2TexIds.get(t!.ref.toLowerCase());
@@ -1257,10 +1279,60 @@ export class OotfAssetBuilder {
             this.ps2TexIds.set(t!.ref.toLowerCase(), base);
             ids.push(base);
         }
-        const name = appendTextures(pName, ids).record;
+        return ids;
+    }
+
+    /**
+     * Draw PC model `pcId` as a mesh `build` makes from it (ootfpropcompose.ts: OotF parts kept, Drakan 2 parts and textures
+     * added) while the engine still collides with the converted model: its vertex, polygon and bounds records stay, the built
+     * vertices are appended and the built strip display list replaces the converted one. A built polygon's texture below the
+     * OotF texture count is the OotF one, above it the `textures[texture - count]` disc texture (copied byte for byte). Null
+     * when the model cannot be converted or built (the plain conversion then stands).
+     */
+    async composeDrawing(
+        owner: string,
+        pcDb: number,
+        pcId: number,
+        textures: DiscModelSource['textures'],
+        build: (
+            m: NeutralModel,
+            alpha: (texture: number) => boolean,
+        ) => { positions: Float32Array; normals: Int8Array; polygons: NeutralModel['polygons'] },
+    ): Promise<number | null> {
+        await this.registerOwner(owner);
+        const c = this.resolveContainer(owner, pcDb);
+        if (!c) return null;
+        const key = `${lower(c)}#${pcId}`;
+        const known = this.modelIds.get(key);
+        if (known !== undefined) return this.models.find((m) => m.id === known)?.disc ? known : null;
+        if (textures.some((t) => !t || !t.frames.length)) return null;
+        const nid = await this.addModel(c, pcId, true);
+        if (nid === null) return null;
+        const m = this.models.find((x) => x.id === nid);
+        const pName = m?.records?.find((r) => r.type === MOD_NAME_RECORD)?.data;
+        const pVerts = m?.records?.find((r) => r.type === MOD_VERTICES_RECORD)?.data;
+        if (!m || !pName || !pVerts || m.records?.some((r) => r.type === MOD_CHARACTER)) return null;
+        let drawing: { vertices: Uint8Array; displayList: Uint8Array };
+        try {
+            const alpha = (t: number) => {
+                const id = m.model.textures[t]?.id;
+                return id !== undefined && this.texAlpha.get(id) === true;
+            };
+            const built = build(m.model, alpha);
+            const dl = withDisplayList({ ...m.model, ...built, normalW: undefined, bounds: null });
+            const verts = writePs2ModelRecords(dl.model).find((r) => r.type === MOD_VERTICES_RECORD)!.data;
+            drawing = combineDrawing(pVerts, readVertexRecord(verts), dl.record, 0);
+        } catch (e) {
+            this.report.warnings.push(
+                `model ${key}: composed drawing failed (${e instanceof Error ? e.message : String(e)})`,
+            );
+            return null;
+        }
+        const ids = textures.length ? this.copyDiscTextures(textures) : [];
+        if (!ids) return null;
         m.records = m.records!.map((r) =>
             r.type === MOD_NAME_RECORD
-                ? { type: r.type, data: name }
+                ? { type: r.type, data: appendTextures(pName, ids).record }
                 : r.type === MOD_VERTICES_RECORD
                   ? { type: r.type, data: drawing.vertices }
                   : r.type === MOD_DISPLAY_LIST
@@ -1305,7 +1377,9 @@ export class OotfAssetBuilder {
                       ? smoothSubdivide(m.model, { fixBorders: mode === 'module' })
                       : mode === 'beam'
                         ? lightBeamMesh(m.model)
-                        : refineMesh(m.model, mode);
+                        : mode === 'crown'
+                          ? palmCrownMesh(m.model, alpha)
+                          : refineMesh(m.model, mode);
             const dl = withDisplayList(drawn);
             const verts = writePs2ModelRecords(dl.model).find((r) => r.type === MOD_VERTICES_RECORD)!.data;
             drawing = combineDrawing(pVerts, readVertexRecord(verts), dl.record, 0);
