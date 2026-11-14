@@ -55,6 +55,9 @@ import {
     type PcSoundBank,
 } from './ootfsound.ts';
 import {
+    DEFAULT_TEMPLATE_VOICE_CLEARS,
+    templateVoiceClears,
+    type TemplateVoiceClear,
     matchClassSounds,
     matchSoundObjects,
     pcClassSoundRefs,
@@ -457,6 +460,11 @@ export interface OotfPipelineOptions {
      * the clone keeps the Drakan 2 sound there.
      */
     classSoundsClear?: boolean;
+    /**
+     * With `classSounds`: OotF creatures cloned from a different Drakan 2 creature whose template voices are emptied where the
+     * PC class has none (ootfclasssounds.ts). Default `DEFAULT_TEMPLATE_VOICE_CLEARS`; `[]` keeps every template voice.
+     */
+    templateVoiceClears?: readonly TemplateVoiceClear[];
     sequences?: boolean;
     /**
      * Subtitle lines of the PC voice clips (ootfsubtitles.ts; made on the player's machine from the player's own audio). The
@@ -2240,7 +2248,12 @@ export async function convertOotfLevels(
                         // keeps the template's (that creature's) sound set, so its voice stays one creature's.
                         if (modelSwap.enemy(source.name) === 'drakan2') continue;
                         await builder.registerOwner(ow);
-                        const m = matchClassSounds(source, s.cls, opt.classSoundsClear === true);
+                        const m = matchClassSounds(
+                            source,
+                            s.cls,
+                            opt.classSoundsClear === true,
+                            templateVoiceClears(source.name, opt.templateVoiceClears ?? DEFAULT_TEMPLATE_VOICE_CLEARS),
+                        );
                         if (m.unmatched.length && dbgEnv0['DRAKAN_DBG_CLASSSOUNDS'])
                             log(
                                 `class sounds ${s.name}: no field in "${s.template.name}" for ${m.unmatched.join(', ')}`,

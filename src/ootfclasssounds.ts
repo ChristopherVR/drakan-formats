@@ -32,7 +32,71 @@ export const PC_SOUND_OBJECT_FIELDS: ReadonlyMap<string, string> = new Map([['so
  */
 export const TEMPLATE_KEPT_SOUND_FIELDS: ReadonlySet<string> = new Set(['picked up sound']);
 
+/** Creature voice fields a clear rule (`TemplateVoiceClear`) empties by default. Footsteps are not voices and stay. */
+export const CREATURE_VOICE_FIELDS: readonly string[] = [
+    'I See You Snd',
+    'I Hear You Snd',
+    'Got Hit Sounds',
+    'Damage Reaction Sounds',
+    'Death Sounds',
+    'Death Sound list',
+    'Hit Ground Sound',
+    'Wing Flap Sounds',
+    'Ambient Sounds',
+    'Taunts',
+    'Victory Sound',
+    'Flee Sound',
+    'Crouch (cower) Sound',
+    'Chopped off limb sound',
+    'Being burnt sound',
+    'Sound to play while phasing',
+];
+
+/**
+ * An OotF creature cloned from a different Drakan 2 creature: the template's sounds in `fields` (default
+ * `CREATURE_VOICE_FIELDS`) are emptied unless the PC class has its own sound there (then the PC one plays, as everywhere).
+ * Without a rule a PC field without a sound keeps the template's Drakan 2 sound (owner's choice), which on these classes is
+ * another creature's voice.
+ */
+export interface TemplateVoiceClear {
+    /** OotF class name (case and spacing ignored). */
+    ootf: string;
+    /** The Drakan 2 template it is cloned from, for the reader (not checked). */
+    template?: string;
+    /** Template field names to empty; default `CREATURE_VOICE_FIELDS`. */
+    fields?: readonly string[];
+    why: string;
+}
+
+export const DEFAULT_TEMPLATE_VOICE_CLEARS: readonly TemplateVoiceClear[] = [
+    { ootf: 'Succubus', template: 'Gryphon', why: "A gryphon's death scream and landing thud on a succubus." },
+    {
+        ootf: 'Queen',
+        template: 'Armor Gryphon',
+        why: "A gryphon's alert calls and death scream on the Succubus Queen.",
+    },
+    { ootf: 'Drone', template: 'Blade Dragon (Crow)', why: "A crow's caw, wing flaps and landing on the Drone." },
+    {
+        ootf: 'Crimson Knight',
+        template: 'Invisible Wartock',
+        why: "A Wartok's alert, burning and phasing voice on a knight.",
+    },
+    {
+        ootf: 'Ebon Knight',
+        template: 'Savage Leader - Maulgak',
+        fields: [...CREATURE_VOICE_FIELDS, 'Sound'],
+        why: "Maulgak's own sound and voices on a knight.",
+    },
+];
+
 const norm = (s: string): string => s.trim().toLowerCase();
+const squashName = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
+
+/** The template fields (lower case) the clear rules empty for the PC class `name` (empty set: no rule). */
+export function templateVoiceClears(name: string, rules: readonly TemplateVoiceClear[]): ReadonlySet<string> {
+    const r = rules.find((x) => squashName(x.ootf) === squashName(name));
+    return new Set(r ? (r.fields ?? CREATURE_VOICE_FIELDS).map(norm) : []);
+}
 
 /**
  * The PC class refs of `PC_SOUND_OBJECT_FIELDS` that `tpl` has the sound field for, which the PC class does not fill
@@ -89,6 +153,7 @@ export function matchClassSounds(
     pc: OdbClass,
     tpl: OdbClass,
     clear = false,
+    clearFields: ReadonlySet<string> = new Set(),
 ): { fields: ClassSoundField[]; unmatched: string[] } {
     const tf = tpl.fields ?? [];
     const byName = new Map<string, number>();
@@ -102,8 +167,14 @@ export function matchClassSounds(
         const j = byName.get(norm(name)) ?? byName.get(PC_SOUND_FIELD_ALIASES.get(norm(name)) ?? '');
         if (j === undefined) {
             if (refs.length) unmatched.push(name);
-        } else if (refs.length || (clear && tpl.data?.[j]))
+        } else if (refs.length || ((clear || clearFields.has(norm(tf[j]!.name))) && tpl.data?.[j]))
             fields.push({ name, field: j, array: fieldIsIndirect(tf[j]!.type), refs });
+    }
+    // A clear rule also empties the template's voice fields the PC class does not have at all.
+    for (const want of clearFields) {
+        const j = byName.get(want);
+        if (j === undefined || !tpl.data?.[j] || fields.some((f) => f.field === j)) continue;
+        fields.push({ name: tf[j]!.name.trim(), field: j, array: fieldIsIndirect(tf[j]!.type), refs: [] });
     }
     return { fields, unmatched };
 }

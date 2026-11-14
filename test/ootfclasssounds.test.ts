@@ -2,7 +2,14 @@
 import { describe, expect, it } from 'vitest';
 import { parseClassBody, splitClassRecord, type OdbClass } from '../src/index.ts';
 import { buildPlainClassRecord, type Synthesized } from '../src/ootfclass.ts';
-import { matchClassSounds, matchSoundObjects, pcClassSoundRefs, writeClassSounds } from '../src/ootfclasssounds.ts';
+import {
+    DEFAULT_TEMPLATE_VOICE_CLEARS,
+    matchClassSounds,
+    matchSoundObjects,
+    pcClassSoundRefs,
+    templateVoiceClears,
+    writeClassSounds,
+} from '../src/ootfclasssounds.ts';
 
 const T_INT = 1;
 const T_CLASS = 3;
@@ -91,6 +98,28 @@ describe('class-default sounds', () => {
         ]);
         const other = cls('Door', 19, [[T_SOUND, 'Close Stop Sound']], [0]);
         expect(matchClassSounds(pc, other).unmatched).toEqual(['Bang Hinges Sound', 'Death Sounds']);
+    });
+
+    it("empties another creature's voices on a listed creature, keeps the PC ones", () => {
+        const succubus = cls('Succubus', 100, [[T_SOUND_LIST, 'I See You Snd']], [(1 << 16) | 1, 0x20009]);
+        const gryphon = cls(
+            'Gryphon',
+            100,
+            [
+                [T_SOUND_LIST, 'I See You Snd'],
+                [T_SOUND_LIST, 'Death Sound list'],
+                [T_SOUND, 'Hit Ground Sound'],
+                [T_SOUND_LIST, 'Foot Sound List'],
+            ],
+            [0, 0x1007f, 0x107, 0x30137],
+        );
+        const rule = templateVoiceClears('succubus', DEFAULT_TEMPLATE_VOICE_CLEARS);
+        expect(matchClassSounds(succubus, gryphon, false, rule).fields).toEqual([
+            { name: 'I See You Snd', field: 0, array: true, refs: [0x20009] },
+            { name: 'Death Sound list', field: 1, array: true, refs: [] },
+            { name: 'Hit Ground Sound', field: 2, array: false, refs: [] },
+        ]);
+        expect(templateVoiceClears('Goblin', DEFAULT_TEMPLATE_VOICE_CLEARS).size).toBe(0);
     });
 
     it('keeps the template pickup sound', () => {
