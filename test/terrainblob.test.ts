@@ -9,6 +9,7 @@ import {
     limitLayerTextures,
     limitWindowTextures,
     ps2BlobBuilder,
+    chunkTextureLimit,
     ps2BlobFor,
     ps2LevelTag,
     writePs2Terrain,
@@ -16,6 +17,7 @@ import {
 import {
     LAYER_FLAG_FLAT,
     MAX_CHUNK_TEXTURES,
+    WIDE_CHUNK_TEXTURES,
     buildPs2TerrainBlob,
     planTerrainSlots,
     ps2ChunkSplit,
@@ -170,6 +172,63 @@ describe('buildPs2TerrainBlob', () => {
         // an interior single cell: own texture plus the 7 most used of its 8 neighbours, in first-seen order
         const inner = blob.chunks.find((c) => c.x1 - c.x0 === 1 && c.z1 - c.z0 === 1 && c.x0 > 0 && c.z0 > 0);
         expect(inner?.refs.length).toBe(8);
+    });
+
+    it('keeps the disc chunk grid with wide chunks and draws every cell with the same passes and weights', () => {
+        // 2 x 2 cell patches of 20 textures: every 3 x 3 window sees at most 4, a 12 x 12 chunk up to 20. The disc limit
+        // cuts the chunks; the wide limit (an exe with [general] terrain_wide_chunks) keeps them whole.
+        const W = 24;
+        const H = 24;
+        const L = layer(W, H, 0, (x, z) => 0x90000 + ((((x >> 1) * 7 + (z >> 1) * 3) % 20) >>> 0));
+        const narrow = readPs2Blob(buildPs2TerrainBlob(L));
+        const wide = readPs2Blob(buildPs2TerrainBlob(L, { maxChunkTextures: WIDE_CHUNK_TEXTURES }));
+        expect(WIDE_CHUNK_TEXTURES).toBe(32);
+        expect(wide.chunks).toHaveLength((ps2ChunkSplit(W).length - 1) * (ps2ChunkSplit(H).length - 1));
+        expect(narrow.chunks.length).toBeGreaterThan(4 * wide.chunks.length);
+        for (const c of narrow.chunks) expect(c.refs.length).toBeLessThanOrEqual(MAX_CHUNK_TEXTURES);
+        for (const c of wide.chunks) expect(c.refs.length).toBeLessThanOrEqual(WIDE_CHUNK_TEXTURES);
+        // What a cell draws: the textures whose array marks the cell's top-left vertex as near, with the four corner
+        // weights. It must be the same in both blobs (only the cut and the list order differ).
+        const passes = (blob: typeof wide): Map<number, string> => {
+            const out = new Map<number, string>();
+            for (const c of blob.chunks) {
+                const vw = c.x1 - c.x0 + 1;
+                for (let z = c.z0; z < c.z1; z++) {
+                    for (let x = c.x0; x < c.x1; x++) {
+                        const list: string[] = [];
+                        c.refs.forEach((ref, i) => {
+                            const a = c.arrays[i]!;
+                            const at = (gx: number, gz: number): number => a[(gz - c.z0) * vw + (gx - c.x0)]!;
+                            if ((at(x, z) & 0x10) === 0) return;
+                            const w4 = [at(x, z), at(x + 1, z), at(x, z + 1), at(x + 1, z + 1)].map((v) => v & 0x0f);
+                            list.push(`${ref.toString(16)}:${w4.join(',')}`);
+                        });
+                        out.set(z * W + x, list.sort().join(' '));
+                    }
+                }
+            }
+            return out;
+        };
+        const pn = passes(narrow);
+        const pw = passes(wide);
+        expect(pw.size).toBe(W * H);
+        for (const [cell, list] of pn) expect(pw.get(cell)).toBe(list);
+    });
+
+    it('takes the wide chunk limit from DRAKAN_TERRAIN_CHUNKS=wide only', () => {
+        const env = process.env;
+        const was = env.DRAKAN_TERRAIN_CHUNKS;
+        try {
+            delete env.DRAKAN_TERRAIN_CHUNKS;
+            expect(chunkTextureLimit()).toBe(MAX_CHUNK_TEXTURES);
+            env.DRAKAN_TERRAIN_CHUNKS = 'wide';
+            expect(chunkTextureLimit()).toBe(WIDE_CHUNK_TEXTURES);
+            env.DRAKAN_TERRAIN_CHUNKS = 'repaint';
+            expect(chunkTextureLimit()).toBe(MAX_CHUNK_TEXTURES);
+        } finally {
+            if (was === undefined) delete env.DRAKAN_TERRAIN_CHUNKS;
+            else env.DRAKAN_TERRAIN_CHUNKS = was;
+        }
     });
 
     it('writes a layer without one drawn cell in the empty form, as the disc does', () => {

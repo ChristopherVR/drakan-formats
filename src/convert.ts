@@ -39,6 +39,7 @@ import { pcLevelName, type PcLevel } from './pc.ts';
 import { writeSrsc, type SrscReader } from './srsc.ts';
 import {
     MAX_CHUNK_TEXTURES,
+    WIDE_CHUNK_TEXTURES,
     buildPs2TerrainBlob,
     planTerrainSlots,
     ps2ChunkSplit,
@@ -1086,6 +1087,18 @@ export function limitChunkTextures(tex: Uint32Array, w: number, h: number, max =
     return changed;
 }
 
+/**
+ * Env DRAKAN_TERRAIN_CHUNKS=wide: chunks may list up to {@link WIDE_CHUNK_TEXTURES} textures, for an exe with
+ * `[general] terrain_wide_chunks` on (a pack converted so hangs an exe without it). Otherwise the disc limit of 8.
+ */
+export function chunkTextureLimit(): number {
+    return (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.[
+        'DRAKAN_TERRAIN_CHUNKS'
+    ] === 'wide'
+        ? WIDE_CHUNK_TEXTURES
+        : MAX_CHUNK_TEXTURES;
+}
+
 function repaintChunksEnv(): boolean {
     return (
         (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.[
@@ -1378,13 +1391,14 @@ export const ps2BlobBuilder = (levelTag: number): BlobBuilder => {
             levelTag,
             slot: s,
             stats,
+            maxChunkTextures: chunkTextureLimit(),
             noDrawData: L.type === LAYER_TYPE_WATER,
             heightBeyond: L.type === LAYER_TYPE_WATER ? undefined : ground,
         });
         if (stats.reducedChunks > 0 && !warnedReducedChunks) {
             warnedReducedChunks = true;
             console.warn(
-                `terrain layer ${L.index}: ${stats.reducedChunks} chunk(s) use more than 8 textures; some blends were dropped to stay within the engine limit`,
+                `terrain layer ${L.index}: ${stats.reducedChunks} chunk(s) use more than ${chunkTextureLimit()} textures; some blends were dropped to stay within the engine limit`,
             );
         }
         return blob;

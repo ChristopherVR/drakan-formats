@@ -33,6 +33,14 @@ const MAX_CHUNK = 12;
  * whose neighbours still bring in more textures keeps its own ones and the neighbours' most used ones.
  */
 export const MAX_CHUNK_TEXTURES = 8;
+/**
+ * Most textures one chunk may list for an exe with wide terrain chunks (`[general] terrain_wide_chunks`, switched on by
+ * the pack's `terrain_chunk_textures`): the runtime's function variant reads a 0xa4-byte chunk record with room for 32
+ * refs and gives the mesh drawer 64 group flags (runtime/world/include/world/TerrainChunks.h,
+ * docs/journal/2026-11-14/ootf-wide-chunks.md). Converted layers then keep the disc's 12 x 12 chunk grid almost
+ * everywhere instead of being cut into single cells.
+ */
+export const WIDE_CHUNK_TEXTURES = 32;
 /** Layer definition flag bit: flat layer, no per-vertex normals in the blob. */
 export const LAYER_FLAG_FLAT = 0x04;
 
