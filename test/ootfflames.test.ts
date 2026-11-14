@@ -1,12 +1,20 @@
 // Drakan 2 particle fire for converted OotF flames (ootfflames.ts). Synthetic fixtures only: no game data.
 import { describe, expect, it } from 'vitest';
-import { flameFoot, flameOffset, isSmallFlame, moveClassRef, placedOffset } from '../src/ootfflames.ts';
+import {
+    flameFoot,
+    flameOffset,
+    isSmallFlame,
+    moveClassRef,
+    placedOffset,
+    uprightPolygons,
+} from '../src/ootfflames.ts';
 
 describe('flame foot', () => {
-    it('is the centre across and the lowest point of the flame card', () => {
+    it('is the centre across and a fifth of the way up the flame card', () => {
         // a crossed card 0.05 wide, 0.6 to 0.75 high, 0.05 in front of the origin
         const p = [-0.025, 0.6, 0.05, 0.025, 0.75, 0.05, 0, 0.6, 0.025, 0, 0.75, 0.075];
-        expect(flameFoot(p)).toEqual([0, 0.6, 0.05]);
+        const f = flameFoot(p)!;
+        [0, 0.63, 0.05].forEach((v, i) => expect(f[i]).toBeCloseTo(v, 6));
         expect(flameFoot([])).toBeNull();
     });
 });
@@ -59,5 +67,13 @@ describe('small flames', () => {
         expect(isSmallFlame({ scale: [0.2, 0.2, 0.2] })).toBe(true);
         expect(isSmallFlame({ scale: [0.2, 0.7, 0.2] })).toBe(false);
         expect(isSmallFlame({ scale: null })).toBe(false);
+    });
+});
+
+describe('upright polygons', () => {
+    it('are the cards; a flat ember quad is not one', () => {
+        const pos = [0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 1];
+        const up = uprightPolygons(pos, [{ indices: [0, 1, 2, 3] }, { indices: [4, 5, 6, 7] }]);
+        expect([...up]).toEqual([0]);
     });
 });

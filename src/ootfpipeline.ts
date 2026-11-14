@@ -210,6 +210,8 @@ import {
     flameOffset,
     isSmallFlame,
     moveClassRef,
+    movedClassData,
+    uprightPolygons,
 } from './ootfflames.ts';
 import { SSD_SEQUENCE } from './resources.ts';
 import {
@@ -1080,6 +1082,8 @@ export async function convertOotfLevels(
     const propNotes = new Set<string>();
     /** Converted flame classes (`dbIndex:classId`) that burn with Drakan 2 fire: their objects move to the flame foot. */
     const flameClasses = new Set<string>();
+    /** PC flame classes whose model keeps its flat embers (moved to the flame foot) instead of the particle carrier. */
+    const flameEmbers = new Set<OdbClass>();
     /** Per converted flame class: its fields and the candle fire its small placements name (ootfflames.ts). */
     const smallFlameFire = new Map<string, { fields: OdbClass['fields']; fire: number }>();
     let culling: LevelCulling | null = null;
@@ -1113,6 +1117,22 @@ export async function convertOotfLevels(
                 const ow = ownerOf.get(u.cls);
                 if (!m || !ow) continue;
                 ownerOf.set(u.cls, ow);
+                // A flame that burns with Drakan 2 fire keeps only its flat embers (if any), moved with its object to the
+                // flame foot; a flame of upright cards alone shows the invisible particle carrier instead (ootfflames.ts).
+                if (u.cls.rflClass === FLAME_RFL && modelSwap.flame(u.cls.name)) {
+                    const pcm = await builder.readPcModel(ow, m.db, m.id);
+                    const foot = pcm ? flameFoot(pcm.positions) : null;
+                    const cards = pcm ? uprightPolygons(pcm.positions, pcm.polygons) : null;
+                    if (
+                        pcm &&
+                        foot &&
+                        cards &&
+                        cards.size < pcm.polygons.length &&
+                        (await builder.dropPolygonsOf(ow, m.db, m.id, cards)) &&
+                        (await builder.shiftModel(ow, m.db, m.id, foot))
+                    )
+                        flameEmbers.add(u.cls);
+                }
                 // A Drakan 2 prop model in place of the PC one (ootfps2model.ts, props): the disc model copied into the pack.
                 if (propRows.has(modelKey(u.cls.name))) {
                     const pcm = await builder.readPcModel(ow, m.db, m.id);
@@ -1674,6 +1694,95 @@ export async function convertOotfLevels(
                         if (odbStemForDependency(m[2]!) === b) return Number(m[1]);
                     return null;
                 };
+                // A grown copy of a Drakan 2 torch fire (`fireScale`), made once per row in FX: a model-less FX generator
+                // record holds the disc generator's values (the disc torch generators carry a torch-head model, which drew
+                // as a dark block in the OotF cages), and each particle class it spawns is copied with the scale applied.
+                const fxOdb = ps2Odbs.find((o) => o.file.toUpperCase() === 'FX.ODB');
+                let fxTop = fxOdb
+                    ? Math.max(
+                          0,
+                          ...fxOdb.classes.keys(),
+                          ...plan.synthesized.filter((s) => s.file === fxOdb.file).map((s) => s.classId),
+                      )
+                    : 0;
+                const grownFires = new Map<string, number | string>();
+                const grownFire = async (row: Ps2ModelSubstitution, to: string): Promise<number | string> => {
+                    const scale = row.fireScale ?? 1;
+                    if (scale === 1) return discRef(row.odb ?? '', row.ps2, FLAME_FIRE_FIELD, to);
+                    const key = `${row.odb}|${modelKey(row.ps2)}|${scale}|${to}`;
+                    const known = grownFires.get(key);
+                    if (known !== undefined) return known;
+                    const done = (v: number | string) => (grownFires.set(key, v), v);
+                    if (!fxOdb) return done('no FX database in the template');
+                    const fx = fxOdb.file.replace(/\.ODB$/i, '');
+                    const torchStem = (row.odb ?? '').toUpperCase();
+                    const genRef = await discRef(torchStem, row.ps2, FLAME_FIRE_FIELD, torchStem);
+                    if (typeof genRef === 'string') return done(genRef);
+                    const genStem = containerStem(torchStem, genRef >>> 16);
+                    const genOdb = genStem ? ps2.odbs.get(genStem) : undefined;
+                    const genClasses = genOdb ? await parseOdbClasses(genOdb) : undefined;
+                    const gen = genClasses?.get(genRef & 0xffff);
+                    const fxTemplate = (rfl: number, fieldCount: number) =>
+                        [...fxOdb.classes.entries()].find(
+                            ([id, c]) =>
+                                c.rflClass === rfl && !c.model && c.fields?.length === fieldCount && !!fxOdb.raw?.(id),
+                        );
+                    if (!gen?.fields || !gen.data || !genStem || !genClasses)
+                        return done(`the fire of ${row.ps2} does not read`);
+                    const genTpl = fxTemplate(gen.rflClass ?? -1, gen.fields.length);
+                    if (!genTpl) return done(`FX has no model-less class to copy the fire of ${row.ps2} into`);
+                    const add = (name: string, tpl: [number, OdbClass], data: number[]): number => {
+                        const [tplId, tplCls] = tpl;
+                        const classId = ++fxTop;
+                        const group = fxOdb.group?.(tplId) ?? tplCls.group;
+                        plan!.synthesized.push({
+                            pcKeys: [],
+                            name,
+                            file: fxOdb.file,
+                            dbIndex: fxOdb.dbIndex,
+                            classId,
+                            group,
+                            rfl: tplCls.rflClass ?? 0,
+                            template: { dbIndex: fxOdb.dbIndex, classId: tplId, name: tplCls.name },
+                            record: cloneClassRecord(fxOdb.raw!(tplId)!, name, data),
+                            cls: { ...tplCls, id: classId, name, group, data },
+                            copied: [],
+                            skipped: [],
+                            coverage: 1,
+                        });
+                        return classId;
+                    };
+                    const fromGen = (r: number) => moveClassRef(r, genStem, fx, containerStem, indexIn);
+                    // Particle classes the generator spawns (in its own database) are copied grown; anything else is named.
+                    const copies = new Map<number, number>();
+                    const move = (r: number): number | null => {
+                        if (r >>> 16 === 0) {
+                            const p = genClasses.get(r & 0xffff);
+                            const tpl = p?.fields && p.data ? fxTemplate(p.rflClass ?? -1, p.fields.length) : undefined;
+                            if (p?.fields && p.data && p.rflClass === 43 && tpl) {
+                                let id = copies.get(r);
+                                if (id === undefined) {
+                                    id = add(
+                                        `OotF ${p.name.trim()} x${scale}`.slice(0, 31),
+                                        tpl,
+                                        movedClassData(p.fields, p.data, fromGen, scale),
+                                    );
+                                    copies.set(r, id);
+                                }
+                                return id;
+                            }
+                        }
+                        return fromGen(r);
+                    };
+                    const genId = add(
+                        `OotF fire: ${row.ps2}`.slice(0, 31),
+                        genTpl,
+                        movedClassData(gen.fields, gen.data, move),
+                    );
+                    const ref = moveClassRef(genId, fx, to, containerStem, indexIn);
+                    log(`flames: ${row.ps2} fire grown x${scale} as FX ${genId} (${copies.size} particle classes)`);
+                    return done(ref ?? `FX cannot be named from ${to}`);
+                };
                 for (const x of flameRows) {
                     const row = modelSwap.flame(x.name)!;
                     const stem = x.file.replace(/\.ODB$/i, '');
@@ -1697,15 +1806,18 @@ export async function convertOotfLevels(
                             break;
                         }
                     }
-                    const fire = await discRef(row.odb ?? '', row.ps2, FLAME_FIRE_FIELD, stem);
+                    const fire = await grownFire(row, stem);
                     if (typeof fire === 'string' || !carrier) {
                         res.warnings.push(
                             `drakan 2 fire for ${x.name} not used: ${typeof fire === 'string' ? fire : `no ${FLAME_CARRIER_MODEL} model in ${hostStem}`}`,
                         );
                         continue;
                     }
-                    x.record = patchRecordModel(x.record, { id: carrier.id, db: 0 }, carrier.bounds);
-                    x.cls = { ...x.cls, model: { id: carrier.id, db: 0 } };
+                    const src = x.pcKeys.map((k) => sourceByKey.get(k)).find((c) => !!c);
+                    if (!src || !flameEmbers.has(src)) {
+                        x.record = patchRecordModel(x.record, { id: carrier.id, db: 0 }, carrier.bounds);
+                        x.cls = { ...x.cls, model: { id: carrier.id, db: 0 } };
+                    }
                     res.warnings.push(...setSynthesizedDefaults(x, [[FLAME_FIRE_FIELD, fire]]));
                     flameClasses.add(`${x.dbIndex}:${x.classId}`);
                     const candle = await discRef('WORLDCON', FLAME_SMALL_TORCH, FLAME_FIRE_FIELD, stem);

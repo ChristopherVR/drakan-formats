@@ -255,7 +255,12 @@ describe('Drakan 2 flames', () => {
     it('answers for the OotF flame classes, compares names without spaces, and switches off per row or category', () => {
         const plan = planPs2Models();
         for (const n of ['Sconce Flame', 'SconceFlame', 'Torch Flame', 'Standing Torch Flame', 'Hanging Flame'])
-            expect(plan.flame(n)).toMatchObject({ category: 'flames', odb: 'WORLDCON', ps2: 'OTF Wall Torch' });
+            expect(plan.flame(n)).toMatchObject({
+                category: 'flames',
+                odb: 'WORLDCON',
+                ps2: 'Wartok Torch',
+                fireScale: 1.4,
+            });
         expect(plan.flame('Torch Base')).toBeNull();
         expect(plan.prop('Torch Flame', 'TFlame01')).toBeNull();
         expect(planPs2Models({ categoriesOff: ['flames'] }).flame('Torch Flame')).toBeNull();

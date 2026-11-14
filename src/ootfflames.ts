@@ -15,6 +15,17 @@
 // The Drakan 2 fire does not scale with the object: a flame placed smaller than `FLAME_SMALL_SCALE` (Islands' hanging lamps
 // at 0.2) names the fire of a Drakan 2 candle in its own parameters instead.
 
+import {
+    FIELD_CLASS,
+    FIELD_FLOAT,
+    FIELD_INT,
+    FIELD_MODEL,
+    FIELD_SOUND,
+    FIELD_TEXTURE,
+    fieldBase,
+    fieldIsIndirect,
+    type ClassFieldDef,
+} from './fields.ts';
 import type { LvlObject } from './lvl.ts';
 import { placementYaw } from './ootfpush.ts';
 import { CELL_SIZE } from './terrain.ts';
@@ -36,7 +47,14 @@ export function isSmallFlame(o: Pick<LvlObject, 'scale'>): boolean {
 }
 
 /**
- * Foot of a flame card in model units: the centre of its box across (x, z) and its lowest point (y). Null for no vertices.
+ * Part of the card's height the fire starts above its lowest point: low enough to burn inside the cages and bowls, high
+ * enough that the coal under the card does not hide the base of the fire (Rift Crystal's standing torches).
+ */
+export const FLAME_FOOT_RISE = 0.2;
+
+/**
+ * Foot of a flame card in model units: the centre of its box across (x, z) and `FLAME_FOOT_RISE` of its height above its
+ * lowest point (y). Null for no vertices.
  */
 export function flameFoot(positions: ArrayLike<number>): [number, number, number] | null {
     if (positions.length < 3) return null;
@@ -47,7 +65,7 @@ export function flameFoot(positions: ArrayLike<number>): [number, number, number
             min[k] = Math.min(min[k]!, positions[i + k]!);
             max[k] = Math.max(max[k]!, positions[i + k]!);
         }
-    return [(min[0]! + max[0]!) / 2, min[1]!, (min[2]! + max[2]!) / 2];
+    return [(min[0]! + max[0]!) / 2, min[1]! + FLAME_FOOT_RISE * (max[1]! - min[1]!), (min[2]! + max[2]!) / 2];
 }
 
 /**
@@ -103,4 +121,74 @@ export function flameOffset(
     const d = placedOffset(o, foot);
     if (d || Math.hypot(...foot) > FLAME_TILT_REACH) return d;
     return placedOffset({ rot: [0, o.rot[1] ?? 0, 0], scale: o.scale }, foot);
+}
+
+/** Particle fields a fire scale multiplies (sizes and rise speed, so the flame grows in width and height alike). */
+export const FIRE_SCALED_FIELDS = ['Min Particle Size (wu)', 'Max Particle Size (wu)', 'Release Velocity (lu/s)'];
+/** Integer particle fields the scale multiplies (the flame keeps its density at the larger size). */
+export const FIRE_SCALED_COUNTS = ['Particles Per Second'];
+
+/**
+ * Data of a class copied into another database: every class, model, sound and texture reference (scalar or array) is
+ * named from the new database (`move`, null = not reachable there: 0, or left out of an array); with `scale` the particle
+ * size, rise speed and rate fields grow by that factor. `data` holds the field dwords followed by the arrays they point at.
+ */
+export function movedClassData(
+    fields: readonly ClassFieldDef[],
+    data: readonly number[],
+    move: (ref: number) => number | null,
+    scale = 1,
+): number[] {
+    const out = [...data];
+    const isRef = (t: number) => [FIELD_CLASS, FIELD_MODEL, FIELD_SOUND, FIELD_TEXTURE].includes(fieldBase(t));
+    fields.forEach((f, i) => {
+        const v = out[i];
+        if (v === undefined) return;
+        const name = f.name.trim();
+        if (isRef(f.type)) {
+            if (fieldIsIndirect(f.type)) {
+                const n = v >>> 16;
+                const at = v & 0xffff;
+                const kept = out
+                    .slice(at, at + n)
+                    .map((r) => (r ? move(r) : 0))
+                    .filter((r): r is number => !!r);
+                for (let k = 0; k < n; k++) out[at + k] = kept[k] ?? 0;
+                out[i] = ((kept.length << 16) | at) >>> 0;
+            } else out[i] = v ? (move(v) ?? 0) : 0;
+            return;
+        }
+        if (scale === 1) return;
+        if (fieldBase(f.type) === FIELD_FLOAT && FIRE_SCALED_FIELDS.includes(name)) {
+            const dv = new DataView(new ArrayBuffer(4));
+            dv.setUint32(0, v >>> 0);
+            dv.setFloat32(0, dv.getFloat32(0) * scale);
+            out[i] = dv.getUint32(0);
+        } else if (fieldBase(f.type) === FIELD_INT && FIRE_SCALED_COUNTS.includes(name))
+            out[i] = Math.round((v | 0) * scale);
+    });
+    return out;
+}
+
+/**
+ * Polygons of an OotF flame model that stand upright (the flame cards: normal within about 45 degrees of level). The rest
+ * lie flat: the glowing embers some flames lay over their torch's coal (the standing torches of the Islands levels); they
+ * stay when the cards give way to the Drakan 2 fire.
+ */
+export function uprightPolygons(
+    positions: ArrayLike<number>,
+    polygons: readonly { indices: readonly number[] }[],
+): Set<number> {
+    const up = new Set<number>();
+    polygons.forEach((p, i) => {
+        const v = (k: number) => [positions[k * 3]!, positions[k * 3 + 1]!, positions[k * 3 + 2]!];
+        if (p.indices.length < 3) return up.add(i);
+        const [a, b, c] = [v(p.indices[0]!), v(p.indices[1]!), v(p.indices[2]!)] as [number[], number[], number[]];
+        const u = [b[0]! - a[0]!, b[1]! - a[1]!, b[2]! - a[2]!];
+        const w = [c[0]! - a[0]!, c[1]! - a[1]!, c[2]! - a[2]!];
+        const n = [u[1]! * w[2]! - u[2]! * w[1]!, u[2]! * w[0]! - u[0]! * w[2]!, u[0]! * w[1]! - u[1]! * w[0]!];
+        const len = Math.hypot(n[0]!, n[1]!, n[2]!);
+        if (!(len > 0) || Math.abs(n[1]!) / len < Math.SQRT1_2) up.add(i);
+    });
+    return up;
 }

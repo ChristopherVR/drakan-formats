@@ -52,6 +52,11 @@ export interface Ps2ModelSubstitution {
      * `Drakan 2 field>OotF field`.
      */
     fields?: readonly string[];
+    /**
+     * Flames: the Drakan 2 fire is copied into FX with its particle size, rise speed and rate multiplied by this (the OotF
+     * flame card is larger than a Drakan 2 torch fire); 1 or none names the disc generator itself.
+     */
+    fireScale?: number;
     /** Props: the PC model name the OotF class must show (classes of one name show different models in some levels). */
     pcModel?: string;
     /** Props: stretch the disc model onto the OotF model's box (a remake a little larger or smaller than the original). */
@@ -125,12 +130,15 @@ const flame = (pc: string, label: string): Ps2ModelSubstitution => ({
     category: 'flames',
     ootf: pc,
     odb: 'WORLDCON',
-    ps2: 'OTF Wall Torch',
+    ps2: 'Wartok Torch',
+    fireScale: FLAME_FIRE_SCALE,
     label,
     why: FLAME_WHY,
 });
+/** The OotF flame card is about 110 by 300 world units, the Drakan 2 torch fire about 80 by 220. */
+const FLAME_FIRE_SCALE = 1.4;
 const FLAME_WHY =
-    "Burns with the particle fire of Drakan 2's own Order of the Flame wall torch (Surdana) in place of the flat OotF flame card, at the foot of the OotF flame; the light, sound and on / off messages stay the OotF flame's.";
+    "Burns with the particle fire of Drakan 2's standing torch (Ravenshold), grown to the size of the flat OotF flame card it replaces, at the foot of the OotF flame; the light, sound and on / off messages stay the OotF flame's.";
 const effect = (pc: string, odb: string, ps2: string, fields: string[], label: string, why: string) => ({
     category: 'effects' as const,
     ootf: pc,

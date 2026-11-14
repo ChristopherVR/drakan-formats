@@ -315,6 +315,8 @@ export class OotfAssetBuilder {
     private readonly modelIds = new Map<string, number>();
     /** `container#id` (lower case) -> PC polygon indices left out of that model (`dropPolygonsOf`). */
     private readonly polygonDrops = new Map<string, ReadonlySet<number>>();
+    /** Model key -> offset (model units) taken off every vertex (a flame's embers kept where its object moved from). */
+    private readonly modelShifts = new Map<string, readonly [number, number, number]>();
     /** Models that get the bounds of a pressure plate, with the box's headroom in model units (`requirePlateBox`). */
     private readonly plateBoxKeys = new Map<string, number>();
     /** Models whose lowest bounding sphere is moved down by that many model units (`requireSunkSphere`). */
@@ -555,6 +557,10 @@ export class OotfAssetBuilder {
             return fail(e instanceof ModelError ? e.message : String(e));
         }
         if (!pc) return fail('no such model');
+        const shift = this.modelShifts.get(key);
+        if (shift && !pc.character)
+            // the bounds are rebuilt from the moved vertices
+            pc = { ...pc, positions: pc.positions.map((v, i) => v - shift[i % 3]!), bounds: null };
         if (this.nextModel > 0xffff) return fail('model id space exhausted');
         if (pc.character && this.options.skinned === false) return fail('skinned model (conversion off)');
         let skin: { sk: Skeleton; positions: Float32Array; sphereVerts: Float32Array } | null = null;
@@ -1081,6 +1087,21 @@ export class OotfAssetBuilder {
         const key = c ? `${lower(c)}#${pcId}` : '';
         if (!c || this.modelIds.has(key)) return false;
         this.polygonDrops.set(key, drop);
+        return true;
+    }
+
+    /** Move PC model `pcId` of the container `pcDb` resolves to from `owner` by `-by` (model units) when it is converted. */
+    async shiftModel(
+        owner: string,
+        pcDb: number,
+        pcId: number,
+        by: readonly [number, number, number],
+    ): Promise<boolean> {
+        await this.registerOwner(owner);
+        const c = this.resolveContainer(owner, pcDb);
+        const key = c ? `${lower(c)}#${pcId}` : '';
+        if (!c || this.modelIds.has(key)) return false;
+        this.modelShifts.set(key, by);
         return true;
     }
 
