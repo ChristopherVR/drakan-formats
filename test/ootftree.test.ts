@@ -2,8 +2,11 @@
 import { describe, expect, it } from 'vitest';
 import type { LvlObject, LvlObjectList, OdbClass } from '../src/index.ts';
 import { FLAG_VISIBLE, paramValue } from '../src/lvl.ts';
+import { lowCollisionBounds } from '../src/ootfassets.ts';
 import {
     MOVER_RFL,
+    TRUNK_STEP,
+    fallenButtTop,
     bridgeAxis,
     fallRotation,
     fallingTreeMoverClass,
@@ -139,6 +142,62 @@ describe('falling trees', () => {
         expect(found.map((t) => [t.tree.id, t.toward, t.dir, t.length, t.message])).toEqual([
             [7, '+x', [1, -0], 6000, 1],
         ]);
+    });
+
+    it('groups push-overs on one spot behind the longest and breaks the ones with no gap to bridge', () => {
+        const c = treeClass();
+        const brace = { ...treeClass(), id: 3402, name: 'brace' };
+        const brick = { ...treeClass(), id: 3403, name: 'brick' };
+        const pc = level(
+            [
+                obj(7, 3400, [5500, 1050, 1000], 90),
+                obj(9, 3402, [5510, 1050, 1000], 90),
+                obj(11, 3403, [3000, 1050, 1000], 90),
+            ],
+            [c, brace, brick],
+        );
+        const len = (k: OdbClass) => (k.id === 3400 ? 6000 : k.id === 3402 ? 900 : 800);
+        const found = findFallingTrees(pc, len);
+        expect(found.map((t) => [t.tree.id, t.kind, t.followers.map((f) => f.o.id)])).toEqual([
+            [7, 'bridge', [9]],
+            [11, 'break', []],
+        ]);
+    });
+
+    it('sinks the fallen trunk so its top near the foot is a step over the ground', () => {
+        const pc = level([obj(7, 3400, [5500, 1050, 1000], 90)], [treeClass()]);
+        // A vertex 0.3 lu (614 units) to model -x near the foot: up once the top falls toward +x.
+        const positions = Float32Array.from([-0.3, 0.1, 0, 0, 2.9, 0]);
+        const [t] = findFallingTrees(
+            pc,
+            () => 6000,
+            () => positions,
+        );
+        expect(t!.toward).toBe('+x');
+        expect(fallenButtTop(positions, '+x', 6000)).toBeCloseTo(614.4, 1);
+        expect(t!.sink).toBe(Math.round(1050 + 614.4 - (1000 + TRUNK_STEP)));
+        const m = fallingTreeMoverClass(t!, 4000);
+        const v = (name: string): number => m.data![m.fields!.findIndex((f) => f.name === name)]!;
+        expect(v('Type')).toBe(4);
+        expect(ffrom(v('Slide Distance (lu)'))).toBeCloseTo(-t!.sink / 2048, 5);
+        expect(v('Slide Axis')).toBe(1);
+    });
+
+    it('lets only the low polygons of the roots collide', () => {
+        const model = {
+            name: 'roots',
+            shading: 0,
+            distance: null,
+            textures: [],
+            positions: Float32Array.from([0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.5, 0, 1, 0.5, 0, 0, 0.5, 1]),
+            normals: new Int8Array(18),
+            polygons: [{ indices: [0, 1, 2] }, { indices: [3, 4, 5] }],
+            bounds: null,
+        } as unknown as Parameters<typeof lowCollisionBounds>[0];
+        const b = lowCollisionBounds(model, 0.1);
+        const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
+        expect(dv.getUint16(b.length - 4, true)).toBe(1); // one polygon listed
+        expect(dv.getUint16(b.length - 2, true)).toBe(0); // the low one
     });
 
     it('turns a quarter turn about the axis that tips the top toward the fall', () => {

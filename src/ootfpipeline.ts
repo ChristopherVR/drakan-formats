@@ -5,11 +5,11 @@ import { splitClassRecord } from './odbwrite.ts';
 import { carryStartingInventory } from './ootfstartinventory.ts';
 import {
     GROUND_OBJECT_RFL,
-    STRUCK_PUSH_OVER_MODE,
     fallingTreeMoverClass,
     findFallingTrees,
     freeClassId,
     placeFallingTrees,
+    treeFootProps,
     type FallingTree,
 } from './ootftree.ts';
 import { ootfDebugFlag } from './ootfdebug.ts';
@@ -776,36 +776,71 @@ export async function convertOotfLevels(
             }
         }
     // Trees Rynn fells over a gap (ootftree.ts): each gets a Mover class of its own model, planned with the other classes.
-    const fallingTrees = new Map<PcLevel, { t: FallingTree; mover: { db: number; id: number } }[]>();
+    const fallingTrees = new Map<
+        PcLevel,
+        { t: FallingTree; mover?: { db: number; id: number }; followers?: { db: number; id: number }[] }[]
+    >();
     if (dbgEnv0['OOTF_NO_FALLING_TREES'] !== '1')
         for (const pc of pcs)
             await stage(`falling trees ${pc.path}`, async () => {
                 const lengths = new Map<OdbClass, number>();
+                const positions = new Map<OdbClass, ArrayLike<number>>();
                 for (const o of pc.list.objects) {
                     const cls = pc.classes.get(o.dbIndex)?.get(o.classId);
                     const ow = cls ? ownerOf.get(cls) : undefined;
                     if (cls?.rflClass !== GROUND_OBJECT_RFL || !cls.model || !ow || lengths.has(cls)) continue;
-                    if (pcFieldNumber(pc, o, 'Push Over Mode') !== STRUCK_PUSH_OVER_MODE) continue;
+                    if (!pcFieldNumber(pc, o, 'Push Over Mode')) continue;
                     const m = await builder.readPcModel(ow, cls.model.db, cls.model.id);
                     const box = m ? modelBoxOf(m.positions) : null;
                     if (box) lengths.set(cls, box.max[1]);
+                    if (m) positions.set(cls, m.positions);
                 }
                 const sign = dbgEnv0['OOTF_TREE_TURN_SIGN'] === '-1' ? -1 : 1;
-                const list: { t: FallingTree; mover: { db: number; id: number } }[] = [];
-                for (const t of findFallingTrees(pc, (c) => lengths.get(c))) {
+                const list: {
+                    t: FallingTree;
+                    mover?: { db: number; id: number };
+                    followers?: { db: number; id: number }[];
+                }[] = [];
+                for (const t of findFallingTrees(
+                    pc,
+                    (c) => lengths.get(c),
+                    (c) => positions.get(c),
+                )) {
                     const table = pc.classes.get(t.tree.dbIndex)!;
-                    const id = freeClassId(table);
-                    const cls = fallingTreeMoverClass(t, id, sign);
-                    table.set(id, cls);
-                    const ow = owner(pc, t.tree.dbIndex);
-                    if (ow) {
-                        ownerOf.set(cls, ow);
-                        ownedClasses.set(ownedClassKey(ow, id), cls);
+                    const plan = (member: { o: LvlObject; cls: OdbClass }): { db: number; id: number } => {
+                        const tab = pc.classes.get(member.o.dbIndex)!;
+                        const id = freeClassId(tab);
+                        const cls = fallingTreeMoverClass(t, id, sign, member);
+                        tab.set(id, cls);
+                        const ow = owner(pc, member.o.dbIndex);
+                        if (ow) {
+                            ownerOf.set(cls, ow);
+                            ownedClasses.set(ownedClassKey(ow, id), cls);
+                        }
+                        used.set(`${pc.path}|${member.o.dbIndex}:${id}`, { db: member.o.dbIndex, id, cls, pc });
+                        return { db: member.o.dbIndex, id };
+                    };
+                    void table;
+                    if (t.kind === 'break') {
+                        list.push({ t });
+                        log(`push-over ${pc.path}: ${t.tree.id} "${t.cls.name.trim()}" breaks at a blow (no gap to bridge)`);
+                        continue;
                     }
-                    used.set(`${pc.path}|${t.tree.dbIndex}:${id}`, { db: t.tree.dbIndex, id, cls, pc });
-                    list.push({ t, mover: { db: t.tree.dbIndex, id } });
+                    const mover = plan({ o: t.tree, cls: t.cls });
+                    const followers = t.followers.map((f) => plan(f));
+                    list.push({ t, mover, followers });
+                    // Roots at the foot: only their low polygons collide, so Rynn walks over them onto the trunk.
+                    for (const f of treeFootProps(pc, t)) {
+                        if (t.followers.some((x) => x.o === f.o)) continue;
+                        const fow = ownerOf.get(f.cls);
+                        if (fow && f.cls.model)
+                            await builder.requireLowCollision(fow, f.cls.model.db, f.cls.model.id, f.maxY);
+                        log(
+                            `falling tree ${pc.path}: ${f.o.id} "${f.cls.name.trim()}" at its foot collides up to ${Math.round(f.maxY)}`,
+                        );
+                    }
                     log(
-                        `falling tree ${pc.path}: ${t.tree.id} "${t.cls.name.trim()}" falls toward model ${t.toward} (world ${t.dir.map((v) => v.toFixed(2)).join(', ')}), ${Math.round(t.length)} long`,
+                        `falling tree ${pc.path}: ${t.tree.id} "${t.cls.name.trim()}" falls toward model ${t.toward} (world ${t.dir.map((v) => v.toFixed(2)).join(', ')}), ${Math.round(t.length)} long, sinks ${t.sink}${t.followers.length ? `, with ${t.followers.map((f) => f.o.id).join(', ')}` : ''}`,
                     );
                 }
                 if (list.length) fallingTrees.set(pc, list);
@@ -2553,11 +2588,37 @@ export async function convertOotfLevels(
                         ? { mapPixel: (x: number, z: number) => mapPixelOf(levelMaps.get(pc.path)!.spec, x, z) }
                         : {}),
                 });
-                const trees = (fallingTrees.get(pc) ?? []).flatMap(({ t, mover }) => {
-                    const target = resolverFor(pc)?.(mover.db, mover.id);
-                    if (!target)
+                const trees = (fallingTrees.get(pc) ?? []).flatMap(({ t, mover, followers }) => {
+                    if (!mover) return [{ t }];
+                    const resolve = (m: { db: number; id: number }) => {
+                        const target = resolverFor(pc)?.(m.db, m.id);
+                        return target ? { dbIndex: target.dbIndex, classId: target.classId, target } : null;
+                    };
+                    const lead = resolve(mover);
+                    if (!lead) {
                         res.warnings.push(`${title}: falling tree ${t.tree.id}: its Mover class was not planned`);
-                    return target ? [{ t, mover: { dbIndex: target.dbIndex, classId: target.classId } }] : [];
+                        return [];
+                    }
+                    const fm = (followers ?? []).map(resolve);
+                    // The PC "Hit Ground Sound" of the tree plays as the Mover's stop sound, when it was converted.
+                    const hit = pcFieldNumber(pc, t.tree, 'Hit Ground Sound');
+                    const stopSound = hit
+                        ? mapResource('sound', hit, {
+                              pc,
+                              ownerDb: t.tree.dbIndex,
+                              classId: t.tree.classId,
+                              field: 'Hit Ground Sound',
+                              target: lead.target,
+                          })
+                        : null;
+                    return [
+                        {
+                            t,
+                            mover: { dbIndex: lead.dbIndex, classId: lead.classId },
+                            followerMovers: fm.flatMap((x) => (x ? [{ dbIndex: x.dbIndex, classId: x.classId }] : [])),
+                            ...(stopSound ? { stopSound } : {}),
+                        },
+                    ];
                 });
                 if (trees.length) {
                     // The level's own converted Visibility Toggler (engine 121) shows each hidden falling Mover.

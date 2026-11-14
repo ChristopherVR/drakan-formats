@@ -374,9 +374,12 @@ const OWN_DEFAULTS_RFL: ReadonlySet<number> = new Set([51, 104, 111]);
  * Non-logic engine classes whose objects also keep their PC class defaults on a same-named PS2 class. Rigid Bodies (16): a
  * PC "Boulder" maps onto the disc's "Boulder" (RESOURES), whose "Damage (per lu/s)" is 1 and "Damage Player" off, so the
  * Ruined Village boulders (PC 50 and on) rolled into the explosive barrels without setting them off: the body's hit sends
- * Damage x speed / 2048 (handler 0x45a148), less than a barrel's 5 health.
+ * Damage x speed / 2048 (handler 0x45a148), less than a barrel's 5 health. Ground Objects (17): the disc's "Barrel",
+ * "Crate" and "Crate Short" have 5 health where the PC ones have 10 or 20 (Islands, Alwarren, Islands Night, Ruined Village,
+ * Wartok Canyons, Grimstone Mines, Grotto: 77 objects), so they broke at the first blow; the campaign audit of 14 November
+ * found no other scalar default of a name-mapped Ground Object that differs.
  */
-const PC_DEFAULTS_RFL: ReadonlySet<number> = new Set([16]);
+const PC_DEFAULTS_RFL: ReadonlySet<number> = new Set([16, 17]);
 /**
  * PC defaults `keepsPcDefaults` leaves at the PS2 class's value. A Rigid Body's health: the body takes its own hits off it
  * (0x45ede0 from the hit handler, terrain bounces included) and is removed at 0, and the PC "Explosion Generator" it would

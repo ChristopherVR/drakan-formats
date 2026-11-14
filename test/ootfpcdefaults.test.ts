@@ -111,7 +111,7 @@ describe('PC class defaults of name-mapped classes', () => {
 
     it('leaves objects alone without the hook, and limits it to logic classes other than Stomp Players and markers, and Rigid Bodies', () => {
         expect(params(convert([object(672)], false), 672)).toEqual({});
-        expect([7, 62, 61, 121, 136, 16].map(keepsPcDefaults)).toEqual([true, true, true, true, true, true]);
+        expect([7, 62, 61, 121, 136, 16, 17].map(keepsPcDefaults)).toEqual([true, true, true, true, true, true, true]);
         expect([51, 104, 111, 33, 34, 19, undefined].map(keepsPcDefaults)).toEqual([
             false,
             false,

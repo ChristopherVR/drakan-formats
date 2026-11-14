@@ -149,6 +149,27 @@ function plateBounds(model: NeutralModel, headroom: number): Uint8Array {
 }
 
 /**
+ * Bounds that collide only with the polygons lying wholly at or below model height `maxY` (one box around them): the roots
+ * at the foot of a felled tree (ootftree.ts), whose flares stand higher than the PS2 Rynn steps, so she can walk over the
+ * low roots onto the fallen trunk as the PC level means. With no such polygon the model does not collide at all.
+ */
+export function lowCollisionBounds(model: NeutralModel, maxY: number): Uint8Array {
+    const keep: number[] = [];
+    const pts: number[] = [];
+    model.polygons.forEach((p, i) => {
+        if (!p.indices.every((v) => model.positions[v * 3 + 1]! <= maxY)) return;
+        keep.push(i);
+        for (const v of p.indices)
+            pts.push(model.positions[v * 3]!, model.positions[v * 3 + 1]!, model.positions[v * 3 + 2]!);
+    });
+    const out = synthesizeBounds(Float32Array.from(pts.length ? pts : [0, 0, 0]), keep.length);
+    const dv = new DataView(out.buffer, out.byteOffset, out.byteLength);
+    const at = out.length - keep.length * 2;
+    keep.forEach((pi, k) => dv.setUint16(at + k * 2, pi, true));
+    return out;
+}
+
+/**
  * The sphere bounds of a push block (ootfpush.ts) with their lowest sphere moved `depth` model units down, or null when the
  * bounds are no sphere hierarchy. The PS2 Rigid Body rests on terrain and does not follow a plate that sinks under it; its
  * own contact query (0x459a30) must still find the sunk tile, or the plate is free to rise again under the block.
@@ -232,6 +253,8 @@ export class OotfAssetBuilder {
     private readonly plateBoxKeys = new Map<string, number>();
     /** Models whose lowest bounding sphere is moved down by that many model units (`requireSunkSphere`). */
     private readonly sunkSphereKeys = new Map<string, number>();
+    /** Model key -> highest model y (lu) whose polygons still collide (`lowCollisionBounds`). */
+    private readonly lowCollisionKeys = new Map<string, number>();
     private readonly models: {
         id: number;
         model: NeutralModel;
@@ -597,6 +620,11 @@ export class OotfAssetBuilder {
             if (records)
                 records = [...writePs2ModelRecords(out), ...records.filter((r) => r.type === MOD_DISPLAY_LIST)];
         }
+        if (!skin && this.lowCollisionKeys.has(key)) {
+            out = { ...out, bounds: lowCollisionBounds(out, this.lowCollisionKeys.get(key)!) };
+            if (records)
+                records = [...writePs2ModelRecords(out), ...records.filter((r) => r.type === MOD_DISPLAY_LIST)];
+        }
         const sunk =
             !skin && out.bounds && this.sunkSphereKeys.has(key)
                 ? sinkLowestSphere(out.bounds, this.sunkSphereKeys.get(key)!)
@@ -939,6 +967,19 @@ export class OotfAssetBuilder {
             key,
             Math.max(this.plateBoxKeys.get(key) ?? 0, (Math.max(0, sink) + PLATE_BOX_HEADROOM) / 2048),
         );
+        return true;
+    }
+
+    /**
+     * Let only the polygons of a rigid model at or below model height `maxY` (world units) collide (`lowCollisionBounds`).
+     * Call before the model is added; false when the reference does not resolve or the model was already converted.
+     */
+    async requireLowCollision(owner: string, pcDb: number, pcId: number, maxY: number): Promise<boolean> {
+        await this.registerOwner(owner);
+        const c = this.resolveContainer(owner, pcDb);
+        const key = c ? `${lower(c)}#${pcId}` : '';
+        if (!c || this.modelIds.has(key)) return false;
+        this.lowCollisionKeys.set(key, Math.min(this.lowCollisionKeys.get(key) ?? Infinity, maxY / 2048));
         return true;
     }
 
