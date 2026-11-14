@@ -10,8 +10,8 @@
  * - Weapons: the PC weapon class keeps its PC data (damage, reach, effects); only its model becomes the disc weapon's model
  *   (a model of the host container, so the class names it in place).
  * - Props: a placed OotF object (skeletons, a wine keg ...) keeps its class (collision type, health, messages) and its
- *   placement; only its model becomes the disc model of the named Drakan 2 class, copied into the pack with its textures
- *   byte for byte (`OotfAssetBuilder.useDiscModel`). The disc model must have the PC model's size and origin
+ *   placement; it is drawn with the disc model of the named Drakan 2 class (textures copied byte for byte) while it still
+ *   collides with its OotF model (`OotfAssetBuilder.useDiscModel`, ootfdiscmodel.ts). The disc model must have the PC model's size and origin
  *   (`discModelMismatch`), or the OotF model is kept and the reason is reported: a skeleton must stay on its spike.
  * - Rynn and Arokh are always the disc's (the player class and the player's dragon are name-mapped); NPCs have no disc
  *   counterpart.
@@ -43,6 +43,8 @@ export interface Ps2ModelSubstitution {
     odb?: string;
     /** Props: the PC model name the OotF class must show (classes of one name show different models in some levels). */
     pcModel?: string;
+    /** Props: stretch the disc model onto the OotF model's box (a remake a little larger or smaller than the original). */
+    fit?: boolean;
 }
 
 const tock = (pc: string, ps2: string, label: string): Ps2ModelSubstitution => ({
@@ -91,6 +93,7 @@ const prop = (
     label: string,
     why: string,
     defaultOff = false,
+    fit = false,
 ): Ps2ModelSubstitution => ({
     category: 'props',
     ootf: pc,
@@ -100,11 +103,14 @@ const prop = (
     label,
     why,
     ...(defaultOff ? { defaultOff } : {}),
+    ...(fit ? { fit } : {}),
 });
 const SKELETON_WHY =
     'Drakan 2 ships a remade Mountain World skeleton of the same name, pose, size and origin (about 1,000 triangles against 140).';
+const BRIDGE_WHY =
+    'The Drakan 2 Restoration rope bridge span has the same length and height as the OotF span but a walkway three times as wide; stretched onto the OotF span, Rynn walks on the OotF planks.';
 const KEG_WHY =
-    'The Drakan 2 Surdana wine keg is a remake of the same keg (945 triangles against 72), same size and origin.';
+    'The Drakan 2 Surdana wine keg is a remake of the same keg (945 triangles against 72) with the same origin; it is 0.1 units deeper, so it is stretched onto the OotF keg, and Rynn collides with the OotF keg.';
 
 export const DEFAULT_PS2_MODEL_SUBSTITUTIONS: readonly Ps2ModelSubstitution[] = [
     tock('Troll Leather', 'LeatherWartock : Center', 'Leather Wartok'),
@@ -188,8 +194,29 @@ export const DEFAULT_PS2_MODEL_SUBSTITUTIONS: readonly Ps2ModelSubstitution[] = 
         'Same pose, but the Drakan 2 model hangs from a point 0.59 units higher (its origin is at the chest, not at the chain), so it would hang below its chain; off, and the size and origin check refuses it.',
         true,
     ),
-    prop('Wine Keg', 'WineBarrel01(H)', 'MOUNTAON', 'Wine Keg (Surdana)', 'Wine keg', KEG_WHY, true),
-    prop('winecask', 'WineBarrel01(H)', 'MOUNTAON', 'Wine Keg (Surdana)', 'Wine keg', KEG_WHY, true),
+    prop('Bridge 02', 'SusBridge02(H)', 'LEVEL2RE', 'SusBridge02', 'Rope bridge span', BRIDGE_WHY, true, true),
+    prop(
+        'Solid Mid Piece',
+        'SolidSusBridge02(H)',
+        'LEVEL2RE',
+        'SolidSusbridge02',
+        'Rope bridge span (solid)',
+        BRIDGE_WHY,
+        true,
+        true,
+    ),
+    prop(
+        'Bridge Rope',
+        'Break-awaySusBridge_rope(H)',
+        'LEVEL2RE',
+        'Break Away Ropes',
+        'Rope bridge ropes',
+        BRIDGE_WHY,
+        true,
+        true,
+    ),
+    prop('Wine Keg', 'WineBarrel01(H)', 'MOUNTAON', 'Wine Keg (Surdana)', 'Wine keg', KEG_WHY, false, true),
+    prop('winecask', 'WineBarrel01(H)', 'MOUNTAON', 'Wine Keg (Surdana)', 'Wine keg', KEG_WHY, false, true),
 ];
 
 export type EnemyAnimations = 'drakan2' | 'ootf';

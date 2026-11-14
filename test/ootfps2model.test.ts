@@ -13,6 +13,16 @@ import {
     ps2ModelSwapFromEdits,
 } from '../src/ootfps2model.ts';
 import type { PcFileSource } from '../src/pc.ts';
+import {
+    appendTextures,
+    boxOf,
+    combineDrawing,
+    fitVertices,
+    readVertexRecord,
+    writeVertexRecord,
+} from '../src/ootfdiscmodel.ts';
+import { decodeDisplayList, expandTriangles, withDisplayList } from '../src/ootfdisplaylist.ts';
+import { writePs2ModelRecords } from '../src/ootfmodel.ts';
 
 describe('Drakan 2 model table', () => {
     it('names each pair once, with a category and a reason, and every enemy pair is the planner alias', () => {
@@ -174,48 +184,64 @@ describe('Drakan 2 prop models', () => {
         ).toMatch(/origin along y/);
         expect(discModelMismatch(spike, { min: [-0.1, 0, -0.1], max: [0.1, 0.3, 0.1] })).toMatch(/size along y/);
     });
-    it('copies a disc model with its textures renumbered and reuses it for the same PC model', async () => {
-        const b = new OotfAssetBuilder(src, { firstModelId: 7000, firstTextureId: 900 });
-        const name = new Uint8Array([2, 0, 0x41, 0, 2, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 5, 0, 0, 0, 7, 0, 5, 0]);
-        const disc = {
-            records: [
-                { type: 0x0200, data: name },
-                { type: 0x0203, data: new Uint8Array(2) },
-                { type: 0x0211, data: new Uint8Array(4) },
-            ],
-            model: {
-                name: 'A',
-                shading: 2,
-                distance: null,
-                textures: [],
-                positions: new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]),
-                normals: new Int8Array(9),
-                polygons: [{ flags: 0, texture: 0, indices: [0, 1, 2], uvs: [0, 0, 1, 0, 0, 1] }],
-                bounds: null,
-            },
+    it('draws the disc model behind the OotF vertices and textures, keeping the OotF ones for collision', () => {
+        const tri = (t: number, a: number, b: number, c: number) => ({
+            flags: 0,
+            texture: t,
+            indices: [a, b, c],
+            uvs: [0, 0, 1, 0, 0, 1],
+        });
+        const disc = withDisplayList({
+            name: 'D',
+            shading: 2,
+            distance: null,
             textures: [
-                { ref: 'X/X.TXD#5', frames: [new Uint8Array(40)], hasAlpha: false },
-                { ref: 'Y/Y.TXD#7', frames: [new Uint8Array(40), new Uint8Array(40)], hasAlpha: true },
+                { id: 1, db: 0 },
+                { id: 2, db: 0 },
             ],
-        };
-        const id = await b.useDiscModel('Lvl/Lvl', 0, 5, disc);
-        expect(id).toBe(7000);
-        expect(b.mapModelRef(0, 5, 'Lvl/Lvl')).toBe(7000);
-        expect(await b.useDiscModel('Lvl/Lvl', 0, 5, disc)).toBe(7000);
-        const out = b.entries(1);
-        const n = out.models.find((m) => m.type === 0x0200)!.data;
-        const dv = new DataView(n.buffer, n.byteOffset, n.byteLength);
+            positions: new Float32Array([0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 2]),
+            normals: new Int8Array([0, 127, 0, 0, 127, 0, 0, 127, 0, 0, 127, 0]),
+            polygons: [tri(0, 0, 1, 2), tri(1, 0, 2, 3)],
+            bounds: null,
+        });
+        const discVerts = readVertexRecord(writePs2ModelRecords(disc.model).find((r) => r.type === 0x0203)!.data);
+        const ootf = writeVertexRecord({
+            positions: new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1]),
+            normals: new Int8Array(15),
+            w: new Uint8Array(5).fill(0x7f),
+        });
+        const out = combineDrawing(ootf, discVerts, disc.record, 3);
+        const v = readVertexRecord(out.vertices);
+        expect(v.positions.length / 3).toBe(8 + discVerts.positions.length / 3); // 5 OotF vertices padded to 8
+        expect(Array.from(v.positions.slice(0, 15))).toEqual([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1]);
+        const before = decodeDisplayList(disc.record);
+        const after = decodeDisplayList(out.displayList);
+        expect(after.groups.length).toBe(before.groups.length + 1);
+        expect(after.batches.map((b) => b.texture)).toEqual(before.batches.map((b) => b.texture + 3));
+        expect(after.batches.flatMap((b) => b.loads.map((l) => l.group))).toEqual(
+            before.batches.flatMap((b) => b.loads.map((l) => l.group + 1)),
+        );
+        // the triangles drawn are the disc's, read from the appended vertices
+        const pos = (vs: Float32Array, t: { vertices: number[] }) =>
+            t.vertices.map((i) => Array.from(vs.slice(i * 3, i * 3 + 3)));
+        expect(expandTriangles(after).map((t) => pos(v.positions, t))).toEqual(
+            expandTriangles(before).map((t) => pos(discVerts.positions, t)),
+        );
+    });
+    it('appends texture refs to the name record and stretches a model onto a box', () => {
+        const name = new Uint8Array([2, 0, 0x41, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 5, 0, 3, 0]);
+        const r = appendTextures(name, [900, 901]);
+        expect(r.before).toBe(1);
+        const dv = new DataView(r.record.buffer);
         expect([
-            dv.getUint16(16, true),
-            dv.getUint16(18, true),
+            dv.getUint32(12, true),
             dv.getUint16(20, true),
-            dv.getUint16(22, true),
-        ]).toEqual([900, 0, 901, 0]);
-        expect(out.textures.map((t) => t.id)).toEqual([900, 901, 902]);
-        expect(b.requireDisplayList(7000)).toBe(true);
-        // per-triangle collision: one box listing the model's polygon
-        expect(b.modelBounds(7000)?.length).toBe(64);
-        // no display list: refused, the OotF model is converted instead
-        expect(await b.useDiscModel('Lvl/Lvl', 0, 6, { ...disc, records: disc.records.slice(0, 2) })).toBeNull();
+            dv.getUint16(24, true),
+            dv.getUint16(26, true),
+        ]).toEqual([3, 900, 901, 0]);
+        const v = { positions: new Float32Array([0, 0, 0, 1, 1, 1]), normals: new Int8Array([0, 0, 127, 127, 0, 0]) };
+        fitVertices(v, { min: [0, 0, 0], max: [1, 1, 1] }, { min: [-1, 0, 0], max: [1, 0.5, 2] });
+        expect(Array.from(v.positions)).toEqual([-1, 0, 0, 1, 0.5, 2]);
+        expect(boxOf(v.positions).max).toEqual([1, 0.5, 2]);
     });
 });

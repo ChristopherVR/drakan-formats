@@ -1058,10 +1058,11 @@ export async function convertOotfLevels(
                                 box.min[k] = Math.min(box.min[k]!, p[i + k]!);
                                 box.max[k] = Math.max(box.max[k]!, p[i + k]!);
                             }
-                        const why = typeof disc === 'string' ? disc : discModelMismatch(box, disc.box);
+                        // A fitted row is stretched onto the OotF box, so only rows drawn as they are must already fit.
+                        const why = typeof disc === 'string' ? disc : row.fit ? null : discModelMismatch(box, disc.box);
                         const nid =
                             why === null && typeof disc !== 'string'
-                                ? await builder.useDiscModel(ow, m.db, m.id, disc.src)
+                                ? await builder.useDiscModel(ow, m.db, m.id, disc.src, { fit: row.fit === true })
                                 : null;
                         if (nid !== null) {
                             modelSwapsUsed.set(modelKey(u.cls.name), { ...row, ootf: u.cls.name.trim() });
