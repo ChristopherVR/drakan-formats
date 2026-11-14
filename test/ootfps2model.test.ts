@@ -5,6 +5,7 @@ import { PC_CLASS_ALIASES } from '../src/ootfclass.ts';
 import {
     DEFAULT_PS2_MODEL_SUBSTITUTIONS,
     Ps2ModelMapError,
+    discModelMismatch,
     effectiveModelSubstitutions,
     healthUntilFlee,
     modelKey,
@@ -19,7 +20,8 @@ describe('Drakan 2 model table', () => {
         for (const r of DEFAULT_PS2_MODEL_SUBSTITUTIONS) {
             expect(seen.has(modelKey(r.ootf))).toBe(false);
             seen.add(modelKey(r.ootf));
-            expect(['enemies', 'weapons']).toContain(r.category);
+            expect(['enemies', 'weapons', 'props']).toContain(r.category);
+            if (r.category === 'props') expect(r.odb && r.pcModel).toBeTruthy();
             expect(r.why.length).toBeGreaterThan(10);
             expect(`${r.label} ${r.why}`).not.toMatch(/—/);
             if (r.scene) {
@@ -49,9 +51,9 @@ describe('Drakan 2 model table', () => {
         expect(effectiveModelSubstitutions({ table }).length).toBe(0); // default-off rows stay off
         expect(effectiveModelSubstitutions({ table, on: ['demo'] }).length).toBe(1);
         expect(effectiveModelSubstitutions({ enabled: false })).toEqual([]);
-        expect(effectiveModelSubstitutions({ categoriesOff: ['weapons'] }).every((r) => r.category === 'enemies')).toBe(
-            true,
-        );
+        expect(
+            effectiveModelSubstitutions({ categoriesOff: ['weapons', 'props'] }).every((r) => r.category === 'enemies'),
+        ).toBe(true);
         expect(effectiveModelSubstitutions({ off: ['LONG SWORD'] }).some((r) => r.ootf === 'Long Sword')).toBe(false);
     });
 
@@ -144,5 +146,76 @@ describe('health of a swapped enemy whose Drakan 2 class never flees', () => {
         expect(healthUntilFlee(undefined, 20)).toBeNull();
         expect(healthUntilFlee(35, [20])).toBeNull();
         expect(healthUntilFlee(Number.NaN, 20)).toBeNull();
+    });
+});
+
+describe('Drakan 2 prop models', () => {
+    const src: PcFileSource = { read: async () => null, list: async () => [] };
+    it('answers only for the PC model a row names, and leaves default-off rows off', () => {
+        const plan = planPs2Models();
+        expect(plan.prop('Skeleton Spike', 'Skeleton05')?.odb).toBe('MOUNTAON');
+        expect(plan.prop('Skeleton', 'Skeleton01')).toBeNull(); // the same class name with another model
+        expect(plan.prop('Skeleton Hanging', 'Skeleton04')).toBeNull(); // off by default
+        expect(planPs2Models({ on: ['Skeleton Hanging'] }).prop('Skeleton Hanging', 'Skeleton04')).not.toBeNull();
+        expect(planPs2Models({ categoriesOff: ['props'] }).prop('Skeleton Spike', 'Skeleton05')).toBeNull();
+        expect(() => ps2ModelSwapFromEdits([{ ootf: 'Barrel', ps2: 'Barrel', category: 'props' }])).toThrow(
+            Ps2ModelMapError,
+        );
+    });
+    it('refuses a disc model of another size or with its origin elsewhere', () => {
+        const spike = { min: [-0.048, 0, -0.099], max: [0.047, 0.581, 0.058] };
+        expect(discModelMismatch(spike, { min: [-0.043, 0, -0.099], max: [0.049, 0.581, 0.094] })).toBeNull();
+        // the hanging skeleton: same size, origin at the chest instead of the chain
+        expect(
+            discModelMismatch(
+                { min: [-0.045, -0.842, -0.039], max: [0.045, -0.002, 0.042] },
+                { min: [-0.035, -0.267, -0.023], max: [0.035, 0.592, 0.046] },
+            ),
+        ).toMatch(/origin along y/);
+        expect(discModelMismatch(spike, { min: [-0.1, 0, -0.1], max: [0.1, 0.3, 0.1] })).toMatch(/size along y/);
+    });
+    it('copies a disc model with its textures renumbered and reuses it for the same PC model', async () => {
+        const b = new OotfAssetBuilder(src, { firstModelId: 7000, firstTextureId: 900 });
+        const name = new Uint8Array([2, 0, 0x41, 0, 2, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 5, 0, 0, 0, 7, 0, 5, 0]);
+        const disc = {
+            records: [
+                { type: 0x0200, data: name },
+                { type: 0x0203, data: new Uint8Array(2) },
+                { type: 0x0211, data: new Uint8Array(4) },
+            ],
+            model: {
+                name: 'A',
+                shading: 2,
+                distance: null,
+                textures: [],
+                positions: new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]),
+                normals: new Int8Array(9),
+                polygons: [{ flags: 0, texture: 0, indices: [0, 1, 2], uvs: [0, 0, 1, 0, 0, 1] }],
+                bounds: null,
+            },
+            textures: [
+                { ref: 'X/X.TXD#5', frames: [new Uint8Array(40)], hasAlpha: false },
+                { ref: 'Y/Y.TXD#7', frames: [new Uint8Array(40), new Uint8Array(40)], hasAlpha: true },
+            ],
+        };
+        const id = await b.useDiscModel('Lvl/Lvl', 0, 5, disc);
+        expect(id).toBe(7000);
+        expect(b.mapModelRef(0, 5, 'Lvl/Lvl')).toBe(7000);
+        expect(await b.useDiscModel('Lvl/Lvl', 0, 5, disc)).toBe(7000);
+        const out = b.entries(1);
+        const n = out.models.find((m) => m.type === 0x0200)!.data;
+        const dv = new DataView(n.buffer, n.byteOffset, n.byteLength);
+        expect([
+            dv.getUint16(16, true),
+            dv.getUint16(18, true),
+            dv.getUint16(20, true),
+            dv.getUint16(22, true),
+        ]).toEqual([900, 0, 901, 0]);
+        expect(out.textures.map((t) => t.id)).toEqual([900, 901, 902]);
+        expect(b.requireDisplayList(7000)).toBe(true);
+        // per-triangle collision: one box listing the model's polygon
+        expect(b.modelBounds(7000)?.length).toBe(64);
+        // no display list: refused, the OotF model is converted instead
+        expect(await b.useDiscModel('Lvl/Lvl', 0, 6, { ...disc, records: disc.records.slice(0, 2) })).toBeNull();
     });
 });

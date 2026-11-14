@@ -160,10 +160,16 @@ import { type Ps2TextureSwapOptions, effectiveSubstitutions, resolvePs2Substitut
 import {
     type Ps2ModelSwapOptions,
     classCompanionRef,
+    discModelMismatch,
+    effectiveModelSubstitutions,
     healthUntilFlee,
     modelKey,
     planPs2Models,
+    type Ps2ModelSubstitution,
 } from './ootfps2model.ts';
+import { readPs2Neutral } from './ootfmodel.ts';
+import { TXD_ENTRY_TYPE } from './txd.ts';
+import type { DiscModelSource } from './ootfassets.ts';
 import { ownModelClasses } from './ootfownmodel.ts';
 import { REFERENCE_ENGINES, deliberateOmission, pcParamAlias } from './ootfcoverage.ts';
 import { loadPcLevel, parsePcOdbClasses, pcLevelName, resolvePcPath, type PcFileSource, type PcLevel } from './pc.ts';
@@ -187,7 +193,7 @@ import {
 import { buildRig, invertMat12, localToWorld, mat12ToQuat, mulMat12 } from './skeleton.ts';
 import { bindBasis, convertPcAnimToPs2 } from './ootfcreature.ts';
 import { sampleClip } from './anim.ts';
-import { MOD_CHARACTER } from './model.ts';
+import { MOD_CHARACTER, parseModel } from './model.ts';
 import { SSD_SEQUENCE } from './resources.ts';
 import {
     type HandHold,
@@ -271,7 +277,11 @@ function sceneFootPoint(pc: PcLevel, seq: PcSequence): [number, number, number] 
             .filter((x) => x.type === 0 && x.payload.length >= 28)
             .map((x) => {
                 const dv = new DataView(x.payload.buffer, x.payload.byteOffset, x.payload.byteLength);
-                return [dv.getFloat32(16, true), dv.getFloat32(20, true), dv.getFloat32(24, true)] as [number, number, number];
+                return [dv.getFloat32(16, true), dv.getFloat32(20, true), dv.getFloat32(24, true)] as [
+                    number,
+                    number,
+                    number,
+                ];
             });
         const last = keys[keys.length - 1];
         if (!last) continue;
@@ -289,7 +299,8 @@ const EXIT_SCENE_SKIP = /volcano\.lvl$/i;
  * showed was the runtime's loading-screen hold, not the level (journal 2026-11-09/ootf-book-scene.md).
  */
 const bookSceneOn = (): boolean =>
-    (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_BOOK_SCENE'] !== '0';
+    (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.['OOTF_BOOK_SCENE'] !==
+    '0';
 /**
  * Aspect a level of flat picture scenes is shown at: the PC game's only one. `OOTF_PICTURE_FILL=1` writes `4:3 fill`
  * instead (the runtime then cuts the top and bottom so the picture fills a wide window; off by default, see the journal
@@ -927,6 +938,82 @@ export async function convertOotfLevels(
                     if (ref) ps2WeaponCompanions.set(modelKey(c.name), ref);
                 }
     }
+    // Drakan 2 prop models (ootfps2model.ts, props): the disc model of a named class, read once with its textures.
+    const discModels = new Map<
+        string,
+        Promise<{ src: DiscModelSource; box: { min: number[]; max: number[] } } | string>
+    >();
+    const discFile = async (stem: string, ext: 'MOD' | 'TXD'): Promise<SrscReader | null> => {
+        const hosted = ps2.hostFiles?.get(stem);
+        if (hosted) return ext === 'MOD' ? hosted.mod : hosted.txd;
+        if (stem === hostStem) return (ext === 'MOD' ? ps2.hostMod : ps2.hostTxd) ?? null;
+        if (ext === 'MOD' && ps2.mods?.get(stem)) return ps2.mods.get(stem)!;
+        const dir = ps2.dbFiles?.get(stem)?.dir.replace(/^[^/]+\//, '');
+        const bytes = dir && ps2.readPs2Txd ? await ps2.readPs2Txd(`${dir}/${stem}.${ext}`) : null;
+        return bytes ? SrscReader.fromBytes(bytes) : null;
+    };
+    const discTxds = new Map<string, Promise<SrscReader | null>>();
+    const discModelOf = (row: Ps2ModelSubstitution) => {
+        const k = `${row.odb}|${modelKey(row.ps2)}`;
+        let p = discModels.get(k);
+        if (!p) {
+            p = (async () => {
+                const stem = (row.odb ?? '').toUpperCase();
+                const odb = ps2.odbs.get(stem);
+                if (!odb) return `no ${stem}.ODB`;
+                const cls = [...(await parseOdbClasses(odb)).values()].find(
+                    (c) => modelKey(c.name) === modelKey(row.ps2),
+                );
+                if (!cls?.model) return `no class "${row.ps2}" with a model in ${stem}`;
+                const mStem = containerStem(stem, cls.model.db);
+                const mod = mStem ? await discFile(mStem, 'MOD') : null;
+                if (!mStem || !mod) return `the model container of "${row.ps2}" is not available`;
+                const id = cls.model.id;
+                const records: { type: number; data: Uint8Array }[] = [];
+                for (const e of mod.entries)
+                    if (e.id === id && e.type >= 0x0200 && e.type < 0x0300)
+                        records.push({ type: e.type, data: await mod.readRaw(e) });
+                const parsed = await parseModel(mod, id).catch(() => null);
+                const model = await readPs2Neutral(mod, id).catch(() => null);
+                if (!parsed || !model) return `model ${mStem}#${id} does not read`;
+                const textures: DiscModelSource['textures'] = [];
+                for (const t of parsed.textures) {
+                    const tStem = containerStem(mStem, t.db);
+                    let txd = tStem ? discTxds.get(tStem) : undefined;
+                    if (tStem && !txd) discTxds.set(tStem, (txd = discFile(tStem, 'TXD')));
+                    const r = txd ? await txd : null;
+                    const frames: Uint8Array[] = [];
+                    for (let n = t.id; r && frames.length < 64 && n <= 0xffff; n++) {
+                        const e = r.find(TXD_ENTRY_TYPE, n);
+                        if (!e) break;
+                        const b = (await r.read(e)).data;
+                        if (frames.length && !((b[37] ?? 0) & 0x20)) break;
+                        frames.push(b);
+                    }
+                    if (!frames.length) return `texture ${t.db}:${t.id} of ${mStem}#${id} is not available`;
+                    const dir = ps2.dbFiles?.get(tStem!)?.dir.replace(/^[^/]+\//, '') ?? tStem;
+                    const key = new DataView(frames[0]!.buffer, frames[0]!.byteOffset).getUint32(20, true);
+                    textures.push({
+                        ref: `${dir}/${tStem}.TXD#${t.id}`,
+                        frames,
+                        hasAlpha: key !== 0xffffffff || ((frames[0]![37] ?? 0) & 0x02) !== 0,
+                    });
+                }
+                return {
+                    src: { records, model, textures },
+                    box: { min: [...parsed.bounds.min], max: [...parsed.bounds.max] },
+                };
+            })();
+            discModels.set(k, p);
+        }
+        return p;
+    };
+    const propRows = new Set(
+        effectiveModelSubstitutions(opt.ps2Models)
+            .filter((r) => r.category === 'props')
+            .map((r) => modelKey(r.ootf)),
+    );
+    const propNotes = new Set<string>();
     let culling: LevelCulling | null = null;
     if (opt.models !== false && opt.classes !== false && hostOk) {
         await stage('models', async () => {
@@ -958,6 +1045,35 @@ export async function convertOotfLevels(
                 const ow = ownerOf.get(u.cls);
                 if (!m || !ow) continue;
                 ownerOf.set(u.cls, ow);
+                // A Drakan 2 prop model in place of the PC one (ootfps2model.ts, props): the disc model copied into the pack.
+                if (propRows.has(modelKey(u.cls.name))) {
+                    const pcm = await builder.readPcModel(ow, m.db, m.id);
+                    const row = pcm ? modelSwap.prop(u.cls.name, pcm.name) : null;
+                    if (pcm && row) {
+                        const disc = await discModelOf(row);
+                        const p = pcm.positions;
+                        const box = { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };
+                        for (let i = 0; i + 2 < p.length; i += 3)
+                            for (let k = 0; k < 3; k++) {
+                                box.min[k] = Math.min(box.min[k]!, p[i + k]!);
+                                box.max[k] = Math.max(box.max[k]!, p[i + k]!);
+                            }
+                        const why = typeof disc === 'string' ? disc : discModelMismatch(box, disc.box);
+                        const nid =
+                            why === null && typeof disc !== 'string'
+                                ? await builder.useDiscModel(ow, m.db, m.id, disc.src)
+                                : null;
+                        if (nid !== null) {
+                            modelSwapsUsed.set(modelKey(u.cls.name), { ...row, ootf: u.cls.name.trim() });
+                            continue;
+                        }
+                        const note = `drakan 2 model for ${u.cls.name.trim()} not used: ${why ?? 'its OotF model is already converted for another class'}`;
+                        if (!propNotes.has(note)) {
+                            propNotes.add(note);
+                            res.warnings.push(note);
+                        }
+                    }
+                }
                 // A Drakan 2 weapon model in place of the PC one (ootfps2model.ts): a model of the host's own MOD.
                 const swap = [14, 39, 79].includes(u.cls.rflClass ?? -1) ? modelSwap.weapon(u.cls.name) : null;
                 const native = swap ? ps2WeaponModels.get(modelKey(swap.ps2)) : undefined;
@@ -2398,7 +2514,9 @@ export async function convertOotfLevels(
                     classOf: ps2Class,
                     soundRef: (o, ref, field) => {
                         const src = pc.list.objects.find((x) => x.id === o.id);
-                        const target = plan?.synthesized.find((x) => x.dbIndex === o.dbIndex && x.classId === o.classId);
+                        const target = plan?.synthesized.find(
+                            (x) => x.dbIndex === o.dbIndex && x.classId === o.classId,
+                        );
                         return src && target
                             ? mapResource('sound', ref, {
                                   pc,
@@ -2527,12 +2645,17 @@ export async function convertOotfLevels(
                         res.warnings,
                         title,
                     );
-                    if (id !== null) console.warn(`sequences ${title}: ${refs.length} own sequence(s) started by Stomp Player ${id}`);
+                    if (id !== null)
+                        console.warn(
+                            `sequences ${title}: ${refs.length} own sequence(s) started by Stomp Player ${id}`,
+                        );
                     // Its scene pans a camera over flat pictures that fill a 4:3 screen at the PC field of view; a wider
                     // view runs past their edges, so the level is shown at 4:3 (manifest `level_aspect`).
                     if (id !== null)
                         (res.levelAspect ??= {})[title] =
-                            dbgEnv0['OOTF_PICTURE_FILL'] === '1' ? `${PICTURE_SCENE_ASPECT} fill` : PICTURE_SCENE_ASPECT;
+                            dbgEnv0['OOTF_PICTURE_FILL'] === '1'
+                                ? `${PICTURE_SCENE_ASPECT} fill`
+                                : PICTURE_SCENE_ASPECT;
                 }
             });
         }
@@ -2630,7 +2753,9 @@ export async function convertOotfLevels(
                 // when it was relayed (journal 2026-11-12/ootf-church-cinematic.md); OOTF_EXIT_SCENES=all relays it for a test.
                 const exitScenesOff = EXIT_SCENE_SKIP.test(pc.path) && dbgEnv0['OOTF_EXIT_SCENES'] !== 'all';
                 if (exitScenesOff && pcTransitionSequences(pc).length)
-                    res.warnings.push(`exits ${title}: exit sequence not played (known to stall the engine in this level)`);
+                    res.warnings.push(
+                        `exits ${title}: exit sequence not played (known to stall the engine in this level)`,
+                    );
                 if (sequencePlayer?.t.cls.fields && timerClass?.cls.fields && !isAutoPlayLevel(pc) && !exitScenesOff) {
                     const lengths = new Map<string, Map<number, number>>();
                     const parsed = new Map<string, Map<number, PcSequence>>();
@@ -2647,7 +2772,10 @@ export async function convertOotfLevels(
                                 if (e.type !== SSD_SEQUENCE) continue;
                                 try {
                                     const seq = parsePcSequence(e.id, e.sub, (await reader!.read(e)).data);
-                                    m.set(e.id, Math.max(0, ...seq.actors.flatMap((x) => x.actions.map((y) => y.time))));
+                                    m.set(
+                                        e.id,
+                                        Math.max(0, ...seq.actors.flatMap((x) => x.actions.map((y) => y.time))),
+                                    );
                                     p.set(e.id, seq);
                                 } catch {
                                     // an unreadable sequence was reported by the sequence stage
@@ -2671,7 +2799,11 @@ export async function convertOotfLevels(
                             classId: sequencePlayer.t.classId,
                             fields: sequencePlayer.t.cls.fields,
                         },
-                        timer: { dbIndex: timerClass.t.dbIndex, classId: timerClass.t.classId, fields: timerClass.cls.fields },
+                        timer: {
+                            dbIndex: timerClass.t.dbIndex,
+                            classId: timerClass.t.classId,
+                            fields: timerClass.cls.fields,
+                        },
                         mapSequence: (o, ref) => {
                             const ow = owner(pc, o.dbIndex);
                             return ow ? (seqIds.get(`${pc.path}|${ow}|${ref >>> 0}`) ?? null) : null;
@@ -2698,7 +2830,9 @@ export async function convertOotfLevels(
                     for (const r of relays) {
                         const exit = lvl.objects.objects.find((o) => o.id === r.exitId);
                         if (r.reofferId !== null && exit)
-                            (res.oneWayExits ??= []).push(`${title} @ ${exit.pos.map((v) => Math.round(v)).join(', ')}`);
+                            (res.oneWayExits ??= []).push(
+                                `${title} @ ${exit.pos.map((v) => Math.round(v)).join(', ')}`,
+                            );
                     }
                     for (const r of relays)
                         console.warn(
@@ -2781,7 +2915,8 @@ export async function convertOotfLevels(
                 const pcCls = src ? pc.classes.get(src.dbIndex)?.get(src.classId) : undefined;
                 if (!src || !pcCls || !modelSwap.enemyHealthUntilFlee(pcCls.name)) continue;
                 const ps2Cls = classes.get(o.dbIndex)?.get(o.classId);
-                if (!ps2Cls?.fields || modelKey(ps2Cls.name) !== modelKey(modelSwap.enemyTarget(pcCls.name) ?? '')) continue;
+                if (!ps2Cls?.fields || modelKey(ps2Cls.name) !== modelKey(modelSwap.enemyTarget(pcCls.name) ?? ''))
+                    continue;
                 const pcSpecs = objectParamSpecs(src);
                 const pcValue = (name: string): unknown => {
                     const own = pcSpecs.find((sp) => sp.name === name);
@@ -2790,15 +2925,26 @@ export async function convertOotfLevels(
                     return i >= 0 ? classFieldDefault(pcCls, i) : undefined;
                 };
                 const pcHealth = pcValue('Initial Health');
-                const health = typeof pcHealth === 'number' && pcHealth <= 0 ? null : healthUntilFlee(pcHealth, pcValue('Flee Health Limit'));
+                const health =
+                    typeof pcHealth === 'number' && pcHealth <= 0
+                        ? null
+                        : healthUntilFlee(pcHealth, pcValue('Flee Health Limit'));
                 const fieldIndex = ps2Cls.fields.findIndex((f) => f.name === 'Initial Health');
                 if (health === null || fieldIndex < 0) continue;
                 const specs = objectParamSpecs(o).filter((sp) => sp.name !== 'Initial Health');
-                specs.push({ fieldIndex, type: ps2Cls.fields[fieldIndex]!.type, name: 'Initial Health', value: health });
+                specs.push({
+                    fieldIndex,
+                    type: ps2Cls.fields[fieldIndex]!.type,
+                    name: 'Initial Health',
+                    value: health,
+                });
                 setObjectParams(parts.objects, o.id, specs);
                 set++;
             }
-            if (set) res.warnings.push(`${pc.path}: ${set} creature(s) of a Drakan 2 class that never flees got the health until the PC one flees`);
+            if (set)
+                res.warnings.push(
+                    `${pc.path}: ${set} creature(s) of a Drakan 2 class that never flees got the health until the PC one flees`,
+                );
         }
         {
             // PC levels place a few creatures already dead (Ruined Village's grunt with Initial Health -50, dead slaves with 0) and the

@@ -98,6 +98,17 @@ export interface BuiltAssets {
 
 const lower = (s: string): string => s.toLowerCase();
 const MOD_DISPLAY_LIST = 0x0211;
+const MOD_NAME_RECORD = 0x0200;
+
+/** A Drakan 2 model read from the disc for `OotfAssetBuilder.useDiscModel`. */
+export interface DiscModelSource {
+    /** Every record of the model (0x0200, 0x0203, 0x0204, 0x0207, 0x0211), bodies as on the disc. */
+    records: { type: number; data: Uint8Array }[];
+    /** The model in neutral form (as read from the disc). */
+    model: NeutralModel;
+    /** Per 0x0200 texture list entry: the texture's record bodies (first frame, then its frames), or null when not found. */
+    textures: ({ ref: string; frames: Uint8Array[]; hasAlpha: boolean } | null)[];
+}
 const DEFAULT_DISPLAY_LIST = /tree|birch/i;
 
 /**
@@ -226,6 +237,8 @@ export class OotfAssetBuilder {
         /** Skinned: the model's clips in `anims`. */
         clips?: number[];
         key: string;
+        /** A Drakan 2 model copied from the disc (`useDiscModel`): its records and textures stay the disc's. */
+        disc?: true;
     }[] = [];
     /** Converted creature clips for the host ADB. */
     private readonly anims: { id: number; info: Uint8Array; data: Uint8Array }[] = [];
@@ -616,6 +629,7 @@ export class OotfAssetBuilder {
         if (!existing) return false; // Native/template models belong to their original MOD and are never rewritten here.
         if (existing.records?.some((r) => r.type === MOD_CHARACTER))
             return existing.records.some((r) => r.type === MOD_DISPLAY_LIST); // Never rebuild a skeleton as a rigid model.
+        if (existing.disc) return existing.records?.some((r) => r.type === MOD_DISPLAY_LIST) === true;
         if (existing.model.polygons.length > 0 && !existing.records?.some((r) => r.type === MOD_DISPLAY_LIST)) {
             const dl = rigidDisplayList(existing.model);
             existing.model = dl.model;
@@ -919,7 +933,10 @@ export class OotfAssetBuilder {
         const c = this.resolveContainer(owner, pcDb);
         const key = c ? `${lower(c)}#${pcId}` : '';
         if (!c || this.modelIds.has(key)) return false;
-        this.plateBoxKeys.set(key, Math.max(this.plateBoxKeys.get(key) ?? 0, (Math.max(0, sink) + PLATE_BOX_HEADROOM) / 2048));
+        this.plateBoxKeys.set(
+            key,
+            Math.max(this.plateBoxKeys.get(key) ?? 0, (Math.max(0, sink) + PLATE_BOX_HEADROOM) / 2048),
+        );
         return true;
     }
 
@@ -975,6 +992,84 @@ export class OotfAssetBuilder {
         if (!key || (this.modelIds.has(key) && this.modelIds.get(key) !== nativeId)) return false;
         this.modelIds.set(key, nativeId);
         return true;
+    }
+
+    /**
+     * Copy a Drakan 2 model from the disc (ootfps2model.ts, props) in place of PC model `pcId` of the container `pcDb` resolves to
+     * from `owner`: the model's records (vertices, polygons, strip display list) are the disc's, its bounds are one box over its
+     * triangles that lists them all (per-triangle collision, as the PC props have), its textures are copied
+     * byte for byte (so the Drakan 2 HD pack replaces them) and its texture list is renumbered to the copies. Returns the new id,
+     * or null when the reference does not resolve, the PC model was already converted or the disc model is unusable (no
+     * display list, skinned, a texture missing).
+     */
+    async useDiscModel(owner: string, pcDb: number, pcId: number, disc: DiscModelSource): Promise<number | null> {
+        await this.registerOwner(owner);
+        const c = this.resolveContainer(owner, pcDb);
+        if (!c) return null;
+        const key = `${lower(c)}#${pcId}`;
+        const known = this.modelIds.get(key);
+        if (known !== undefined) return this.models.find((m) => m.id === known)?.disc ? known : null;
+        const recs = disc.records;
+        const name = recs.find((r) => r.type === MOD_NAME_RECORD);
+        if (!name || recs.some((r) => r.type === MOD_CHARACTER) || !recs.some((r) => r.type === MOD_DISPLAY_LIST))
+            return null;
+        if (disc.textures.some((t) => !t || !t.frames.length)) return null;
+        if (this.nextModel > 0xffff) return null;
+        const ids: number[] = [];
+        for (const t of disc.textures) {
+            const shared = this.ps2TexIds.get(t!.ref.toLowerCase());
+            if (shared !== undefined) {
+                ids.push(shared);
+                continue;
+            }
+            if (this.nextTex + t!.frames.length - 1 > 0xffff) return null;
+            const base = this.nextTex;
+            t!.frames.forEach((body, i) => {
+                this.texBodies.push({ id: base + i, body });
+                this.texAlpha.set(base + i, t!.hasAlpha);
+                this.report.textures.converted++;
+                this.report.textures.bytes += body.length;
+            });
+            this.nextTex += t!.frames.length;
+            this.texFrames.set(base, t!.frames.length);
+            this.ps2TexIds.set(t!.ref.toLowerCase(), base);
+            ids.push(base);
+        }
+        // 0x0200 ends with the texture list (u16 id, u16 db per entry): renumber it to the copies, db 0.
+        const body = name.data.slice();
+        const dv = new DataView(body.buffer, body.byteOffset, body.byteLength);
+        const at = body.length - ids.length * 4;
+        if (at < 4 || dv.getUint32(at - 4, true) !== ids.length) return null;
+        ids.forEach((id, i) => {
+            dv.setUint16(at + i * 4, id, true);
+            dv.setUint16(at + i * 4 + 2, 0, true);
+        });
+        // Collision follows the drawn triangles, as the PC props' polygon lists do: the disc's own bounds of these props are solid
+        // boxes, and a lying skeleton made solid kept Rynn off the armour that lies on it (journal 2026-11-14/ootf-d2-models.md).
+        const used = new Set(disc.model.polygons.flatMap((q) => q.indices));
+        const pts = Float32Array.from([...used].flatMap((v) => [0, 1, 2].map((k) => disc.model.positions[v * 3 + k]!)));
+        const bounds = used.size ? synthesizeBounds(pts, disc.model.polygons.length) : null;
+        if (!bounds) return null;
+        const records = recs.map((r) =>
+            r.type === MOD_NAME_RECORD
+                ? { type: r.type, data: body }
+                : r.type === MOD_BOUNDS
+                  ? { type: r.type, data: bounds }
+                  : r,
+        );
+        if (!records.some((r) => r.type === MOD_BOUNDS)) records.push({ type: MOD_BOUNDS, data: bounds });
+        const nid = this.nextModel++;
+        this.modelIds.set(key, nid);
+        for (const id of ids) this.useTexture(id, key);
+        this.models.push({
+            id: nid,
+            model: { ...disc.model, textures: ids.map((id) => ({ id, db: 0 })), bounds },
+            records,
+            key,
+            disc: true,
+        });
+        this.report.models.converted++;
+        return nid;
     }
 
     /**

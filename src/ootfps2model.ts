@@ -9,11 +9,15 @@
  *   disc rig (the converter's earlier behaviour). A row turned off converts the PC model with its own rig instead.
  * - Weapons: the PC weapon class keeps its PC data (damage, reach, effects); only its model becomes the disc weapon's model
  *   (a model of the host container, so the class names it in place).
+ * - Props: a placed OotF object (skeletons, a wine keg ...) keeps its class (collision type, health, messages) and its
+ *   placement; only its model becomes the disc model of the named Drakan 2 class, copied into the pack with its textures
+ *   byte for byte (`OotfAssetBuilder.useDiscModel`). The disc model must have the PC model's size and origin
+ *   (`discModelMismatch`), or the OotF model is kept and the reason is reported: a skeleton must stay on its spike.
  * - Rynn and Arokh are always the disc's (the player class and the player's dragon are name-mapped); NPCs have no disc
  *   counterpart.
  */
 
-export type Ps2ModelCategory = 'enemies' | 'weapons';
+export type Ps2ModelCategory = 'enemies' | 'weapons' | 'props';
 
 export interface Ps2ModelSubstitution {
     category: Ps2ModelCategory;
@@ -35,6 +39,10 @@ export interface Ps2ModelSubstitution {
      * ends after the same number of blows as in the original. Every other value is the disc class's.
      */
     healthUntilFlee?: boolean;
+    /** Props: the ODB stem of the Drakan 2 class (`MOUNTAON`) whose model is copied. */
+    odb?: string;
+    /** Props: the PC model name the OotF class must show (classes of one name show different models in some levels). */
+    pcModel?: string;
 }
 
 const tock = (pc: string, ps2: string, label: string): Ps2ModelSubstitution => ({
@@ -74,6 +82,29 @@ const weapon = (pc: string, ps2: string, label: string, why: string): Ps2ModelSu
     label,
     why,
 });
+
+const prop = (
+    pc: string,
+    pcModel: string,
+    odb: string,
+    ps2: string,
+    label: string,
+    why: string,
+    defaultOff = false,
+): Ps2ModelSubstitution => ({
+    category: 'props',
+    ootf: pc,
+    pcModel,
+    odb,
+    ps2,
+    label,
+    why,
+    ...(defaultOff ? { defaultOff } : {}),
+});
+const SKELETON_WHY =
+    'Drakan 2 ships a remade Mountain World skeleton of the same name, pose, size and origin (about 1,000 triangles against 140).';
+const KEG_WHY =
+    'The Drakan 2 Surdana wine keg is a remake of the same keg (945 triangles against 72), same size and origin.';
 
 export const DEFAULT_PS2_MODEL_SUBSTITUTIONS: readonly Ps2ModelSubstitution[] = [
     tock('Troll Leather', 'LeatherWartock : Center', 'Leather Wartok'),
@@ -119,6 +150,46 @@ export const DEFAULT_PS2_MODEL_SUBSTITUTIONS: readonly Ps2ModelSubstitution[] = 
     weapon('Heavy Bow', 'Wood Bow:  Long', 'Heavy bow', 'Shares the long bow model in Order of the Flame.'),
     weapon('Speed Bow', 'Wood Bow:  Long', 'Speed bow', 'Shares the long bow model in Order of the Flame.'),
     weapon('Arrows', 'Wood Bow - Arrow Short', 'Arrow quiver', 'The plain quiver every Drakan 2 arrow pickup uses.'),
+    prop(
+        'Skeleton',
+        'Skeleton02',
+        'MOUNTAON',
+        'Skeleton 02 - Laying On Ground',
+        'Skeleton lying on the ground',
+        SKELETON_WHY,
+    ),
+    prop(
+        'Skeleton02',
+        'Skeleton02',
+        'MOUNTAON',
+        'Skeleton 02 - Laying On Ground',
+        'Skeleton lying on the ground',
+        SKELETON_WHY,
+    ),
+    prop('Skeleton Torso', 'Skeleton06', 'MOUNTAON', 'Skeleton 06 - Torso', 'Skeleton torso', SKELETON_WHY),
+    prop('Skeleton06', 'Skeleton06', 'MOUNTAON', 'Skeleton 06 - Torso', 'Skeleton torso', SKELETON_WHY),
+    prop(
+        'Skeleton Spike',
+        'Skeleton05',
+        'MOUNTAON',
+        'Skeleton 05 - On Spike',
+        'Skeleton impaled on a spike',
+        SKELETON_WHY,
+    ),
+    prop('Skeleton05', 'Skeleton05', 'MOUNTAON', 'Skeleton 05 - On Spike', 'Skeleton impaled on a spike', SKELETON_WHY),
+    prop('Skeleton07', 'Skeleton07', 'MOUNTAON', 'Skeleton07 - Impaled no spike', 'Impaled skeleton', SKELETON_WHY),
+    prop('Skeleton01', 'Skeleton01', 'MOUNTAON', 'Skeleton 01 - Crucified', 'Crucified skeleton', SKELETON_WHY),
+    prop(
+        'Skeleton Hanging',
+        'Skeleton04',
+        'MOUNTAON',
+        'Skeleton 04 - Hanging from chai',
+        'Hanging skeleton',
+        'Same pose, but the Drakan 2 model hangs from a point 0.59 units higher (its origin is at the chest, not at the chain), so it would hang below its chain; off, and the size and origin check refuses it.',
+        true,
+    ),
+    prop('Wine Keg', 'WineBarrel01(H)', 'MOUNTAON', 'Wine Keg (Surdana)', 'Wine keg', KEG_WHY, true),
+    prop('winecask', 'WineBarrel01(H)', 'MOUNTAON', 'Wine Keg (Surdana)', 'Wine keg', KEG_WHY, true),
 ];
 
 export type EnemyAnimations = 'drakan2' | 'ootf';
@@ -153,7 +224,7 @@ export class Ps2ModelMapError extends Error {}
 /** Class names compare like the class planner does: case and punctuation ignored. */
 export const modelKey = (name: string): string => name.toLowerCase().replace(/[^a-z0-9]+/g, '');
 
-const CATEGORIES: readonly Ps2ModelCategory[] = ['enemies', 'weapons'];
+const CATEGORIES: readonly Ps2ModelCategory[] = ['enemies', 'weapons', 'props'];
 
 /** Turn user edits (a parsed JSON file) into swap options over the default table. */
 export function ps2ModelSwapFromEdits(edits: unknown, base: Ps2ModelSwapOptions = {}): Ps2ModelSwapOptions {
@@ -181,7 +252,17 @@ export function ps2ModelSwapFromEdits(edits: unknown, base: Ps2ModelSwapOptions 
             on.push(row.ootf); // the table's own row, turned on
             continue;
         }
-        extra.push({ category, ootf: row.ootf, ps2: row.ps2, label: row.label ?? row.ootf, why: 'user mapping' });
+        const odb = (row as { odb?: unknown }).odb;
+        if (category === 'props' && (typeof odb !== 'string' || !odb))
+            throw new Ps2ModelMapError(`row ${i + 1}: a props row needs "odb" (the Drakan 2 database, e.g. MOUNTAON)`);
+        extra.push({
+            category,
+            ootf: row.ootf,
+            ps2: row.ps2,
+            label: row.label ?? row.ootf,
+            why: 'user mapping',
+            ...(category === 'props' ? { odb: odb as string } : {}),
+        });
     }
     return { ...base, off, on, extra };
 }
@@ -210,6 +291,11 @@ export interface Ps2ModelPlan {
     weapon(name: string): Ps2ModelSubstitution | null;
     /** The Drakan 2 class an enemy row names for this PC class (scene-only props use its model and rig), or null. */
     enemyTarget(name: string): string | null;
+    /**
+     * The Drakan 2 prop row for this PC class showing PC model `pcModelName`, or null (a row naming another PC model does not
+     * apply).
+     */
+    prop(name: string, pcModelName: string): Ps2ModelSubstitution | null;
     /** The swapped enemy gets the health after which its Order of the Flame class flees (`healthUntilFlee`, disc clips only). */
     enemyHealthUntilFlee(name: string): boolean;
 }
@@ -250,6 +336,11 @@ export function planPs2Models(o: Ps2ModelSwapOptions = {}): Ps2ModelPlan {
             const r = on.get(modelKey(name));
             return r?.category === 'weapons' ? r : null;
         },
+        prop: (name, pcModelName) => {
+            const r = on.get(modelKey(name));
+            if (r?.category !== 'props' || !r.odb) return null;
+            return !r.pcModel || modelKey(r.pcModel) === modelKey(pcModelName) ? r : null;
+        },
     };
 }
 
@@ -265,4 +356,30 @@ export function classCompanionRef(raw: Uint8Array): number {
     const dv = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
     const at = 2 + dv.getUint16(0, true) + 10;
     return at + 4 <= raw.length ? dv.getUint32(at, true) : 0;
+}
+
+/** Axis aligned box of a model, model units. */
+export interface PropBox {
+    min: readonly number[];
+    max: readonly number[];
+}
+
+/**
+ * Why a disc model cannot stand in for a PC prop model (null = it can): on every axis its extent and its box centre must lie
+ * within `tolerance` of the largest extent of the two models. Objects keep their OotF placement, so a model of another size
+ * or with its origin elsewhere would float, sink into the ground or leave its spike.
+ */
+export function discModelMismatch(pc: PropBox, disc: PropBox, tolerance = 0.2): string | null {
+    const ext = (b: PropBox, k: number) => b.max[k]! - b.min[k]!;
+    const mid = (b: PropBox, k: number) => (b.max[k]! + b.min[k]!) / 2;
+    const size = Math.max(ext(pc, 0), ext(pc, 1), ext(pc, 2), ext(disc, 0), ext(disc, 1), ext(disc, 2));
+    if (!(size > 0)) return 'empty model';
+    const axis = ['x', 'y', 'z'];
+    for (let k = 0; k < 3; k++) {
+        const d = Math.abs(ext(pc, k) - ext(disc, k)) / size;
+        if (d > tolerance) return `size along ${axis[k]} differs by ${Math.round(d * 100)} % of the model`;
+        const c = Math.abs(mid(pc, k) - mid(disc, k)) / size;
+        if (c > tolerance) return `origin along ${axis[k]} differs by ${Math.round(c * 100)} % of the model`;
+    }
+    return null;
 }
