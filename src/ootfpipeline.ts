@@ -869,7 +869,9 @@ export async function convertOotfLevels(
                     void table;
                     if (t.kind === 'break') {
                         list.push({ t });
-                        log(`push-over ${pc.path}: ${t.tree.id} "${t.cls.name.trim()}" breaks at a blow (no gap to bridge)`);
+                        log(
+                            `push-over ${pc.path}: ${t.tree.id} "${t.cls.name.trim()}" breaks at a blow (no gap to bridge)`,
+                        );
                         continue;
                     }
                     const mover = plan({ o: t.tree, cls: t.cls });
@@ -1182,7 +1184,11 @@ export async function convertOotfLevels(
                         const why = typeof disc === 'string' ? disc : row.fit ? null : discModelMismatch(box, disc.box);
                         const nid =
                             why === null && typeof disc !== 'string'
-                                ? await builder.useDiscModel(ow, m.db, m.id, disc.src, { fit: row.fit === true })
+                                ? await builder.useDiscModel(ow, m.db, m.id, disc.src, {
+                                      fit: row.fit === true,
+                                      keepTextures: row.keepTextures,
+                                      tint: row.tint,
+                                  })
                                 : null;
                         if (nid !== null) {
                             modelSwapsUsed.set(modelKey(u.cls.name), { ...row, ootf: u.cls.name.trim() });

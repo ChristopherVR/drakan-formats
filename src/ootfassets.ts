@@ -37,7 +37,7 @@ import {
 } from './ootftex.ts';
 import { type PcFileSource, type PcLevel, resolvePcPath } from './pc.ts';
 import { SrscReader } from './srsc.ts';
-import { TXD_ENTRY_TYPE } from './txd.ts';
+import { TXD_ENTRY_TYPE, decodeTxd } from './txd.ts';
 import {
     type RefineMode,
     appendTextures,
@@ -45,7 +45,9 @@ import {
     combineDrawing,
     fitVertices,
     readVertexRecord,
+    palmMesh,
     refineMesh,
+    tintImage,
 } from './ootfdiscmodel.ts';
 import { type Ps2SubstituteTexture, substituteMismatch } from './ootfps2tex.ts';
 
@@ -1159,7 +1161,7 @@ export class OotfAssetBuilder {
         pcDb: number,
         pcId: number,
         disc: DiscModelSource,
-        opt: { fit?: boolean } = {},
+        opt: { fit?: boolean; keepTextures?: readonly number[]; tint?: 'green' } = {},
     ): Promise<number | null> {
         await this.registerOwner(owner);
         const c = this.resolveContainer(owner, pcDb);
@@ -1168,11 +1170,49 @@ export class OotfAssetBuilder {
         const known = this.modelIds.get(key);
         if (known !== undefined) return this.models.find((m) => m.id === known)?.disc ? known : null;
         const rec = (type: number) => disc.records.find((r) => r.type === type)?.data;
-        const dVerts = rec(MOD_VERTICES_RECORD);
-        const dList = rec(MOD_DISPLAY_LIST);
+        let dVerts = rec(MOD_VERTICES_RECORD);
+        let dList = rec(MOD_DISPLAY_LIST);
+        let dModel = disc.model;
+        let dTextures = disc.textures;
+        if (opt.keepTextures?.length) {
+            // Only the parts of the disc model drawn with these textures (the crystal without its stand): its display list is
+            // rebuilt from the kept polygons, as the converter builds lists for its own models.
+            const keep = opt.keepTextures;
+            try {
+                const kept = {
+                    ...disc.model,
+                    textures: keep.map((i) => disc.model.textures[i]!),
+                    polygons: disc.model.polygons
+                        .filter((q) => keep.includes(q.texture))
+                        .map((q) => ({ ...q, texture: keep.indexOf(q.texture) })),
+                };
+                const dl = withDisplayList(kept);
+                dModel = dl.model;
+                dVerts = writePs2ModelRecords(dl.model).find((r) => r.type === MOD_VERTICES_RECORD)!.data;
+                dList = dl.record;
+                dTextures = keep.map((i) => disc.textures[i] ?? null);
+            } catch {
+                return null;
+            }
+        }
         if (!rec(MOD_NAME_RECORD) || !dVerts || !dList || disc.records.some((r) => r.type === MOD_CHARACTER))
             return null;
-        if (disc.textures.some((t) => !t || !t.frames.length)) return null;
+        if (dTextures.some((t) => !t || !t.frames.length)) return null;
+        if (opt.tint) {
+            try {
+                dTextures = dTextures.map((t) => ({
+                    ref: `${t!.ref}:${opt.tint}`,
+                    hasAlpha: t!.hasAlpha,
+                    frames: t!.frames.map((f, i) => {
+                        const body = encodePs2Texture(tintImage(decodeTxd(f), opt.tint!)).body;
+                        if (i > 0) body[37] = body[37]! | PC_TEX_NEXT_FRAME;
+                        return body;
+                    }),
+                }));
+            } catch {
+                return null;
+            }
+        }
         const nid = await this.addModel(c, pcId, true);
         if (nid === null) return null;
         const m = this.models.find((x) => x.id === nid);
@@ -1184,7 +1224,7 @@ export class OotfAssetBuilder {
         try {
             const dv = readVertexRecord(dVerts);
             if (opt.fit) {
-                const dUsed = new Set(disc.model.polygons.flatMap((q) => q.indices));
+                const dUsed = new Set(dModel.polygons.flatMap((q) => q.indices));
                 const pUsed = new Set(m.model.polygons.flatMap((q) => q.indices));
                 fitVertices(dv, boxOf(dv.positions, dUsed), boxOf(m.model.positions, pUsed));
             }
@@ -1197,7 +1237,7 @@ export class OotfAssetBuilder {
             return null;
         }
         const ids: number[] = [];
-        for (const t of disc.textures) {
+        for (const t of dTextures) {
             const shared = this.ps2TexIds.get(t!.ref.toLowerCase());
             if (shared !== undefined) {
                 ids.push(shared);
@@ -1253,7 +1293,11 @@ export class OotfAssetBuilder {
         if (!m || !pVerts || m.records?.some((r) => r.type === MOD_CHARACTER)) return null;
         let drawing: { vertices: Uint8Array; displayList: Uint8Array };
         try {
-            const dl = withDisplayList(refineMesh(m.model, mode));
+            const alpha = (t: number) => {
+                const id = m.model.textures[t]?.id;
+                return id !== undefined && this.texAlpha.get(id) === true;
+            };
+            const dl = withDisplayList(mode === 'palm' ? palmMesh(m.model, alpha) : refineMesh(m.model, mode));
             const verts = writePs2ModelRecords(dl.model).find((r) => r.type === MOD_VERTICES_RECORD)!.data;
             drawing = combineDrawing(pVerts, readVertexRecord(verts), dl.record, 0);
         } catch (e) {

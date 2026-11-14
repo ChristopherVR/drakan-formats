@@ -18,8 +18,10 @@ import {
     boxOf,
     combineDrawing,
     fitVertices,
+    palmMesh,
     refineMesh,
     readVertexRecord,
+    tintImage,
     writeVertexRecord,
 } from '../src/ootfdiscmodel.ts';
 import { decodeDisplayList, expandTriangles, withDisplayList } from '../src/ootfdisplaylist.ts';
@@ -29,8 +31,9 @@ describe('Drakan 2 model table', () => {
     it('names each pair once, with a category and a reason, and every enemy pair is the planner alias', () => {
         const seen = new Set<string>();
         for (const r of DEFAULT_PS2_MODEL_SUBSTITUTIONS) {
-            expect(seen.has(modelKey(r.ootf))).toBe(false);
-            seen.add(modelKey(r.ootf));
+            const k = modelKey(r.ootf) + (r.category === 'props' ? `|${modelKey(r.pcModel ?? '')}` : '');
+            expect(seen.has(k)).toBe(false);
+            seen.add(k);
             expect(['enemies', 'weapons', 'props', 'flames', 'effects']).toContain(r.category);
             if (r.category === 'effects') expect(r.odb && r.fields?.length).toBeTruthy();
             if (r.category === 'props') expect(r.pcModel && (r.odb || r.refine)).toBeTruthy();
@@ -371,5 +374,51 @@ describe('refined OotF prop meshes', () => {
             ),
         ).toBe(true);
         expect(refineMesh(tent, 'pn2').polygons.length).toBe(32);
+    });
+});
+
+describe('new palms and recoloured disc textures', () => {
+    it('answers the palm row and the pine row of one class name by PC model', () => {
+        const plan = planPs2Models({ on: ['Large Tree'] });
+        expect(plan.prop('Large Tree', 'Large Pine(H)')?.ps2).toBe('Pine Tree 01');
+        expect(plan.prop('Large Tree', 'PalmTree_Tall01(H)')?.refine).toBe('palm');
+        expect(planPs2Models().prop('Large Tree', 'PalmTree_Tall01(H)')).toBeNull(); // off by default
+        expect(planPs2Models().prop('Fan Palm 01', 'tropical tree01')?.refine).toBe('palm');
+    });
+    it('builds a palm: a rounded trunk, curved two-sided fronds with the OotF frond UVs, the same textures', () => {
+        // trunk: a square post from y 0 to 2 (texture 0); one frond card at the top (texture 1, with holes)
+        const positions = new Float32Array([
+            -0.1, 0, -0.1, 0.1, 0, -0.1, 0.1, 2, -0.1, -0.1, 2, -0.1, 0.1, 0, 0.1, 0.1, 2, 0.1, -0.1, 0, 0.1, -0.1, 2,
+            0.1, 0, 2, -0.05, 0, 2, 0.05, 1, 2, 0.05, 1, 2, -0.05,
+        ]);
+        const quad = (t: number, i: number[]) => ({ flags: 0, texture: t, indices: i, uvs: [0, 0, 1, 0, 1, 1, 0, 1] });
+        const m = {
+            positions,
+            normals: new Int8Array(positions.length),
+            polygons: [
+                quad(0, [0, 1, 2, 3]),
+                quad(0, [1, 4, 5, 2]),
+                quad(0, [4, 6, 7, 5]),
+                quad(0, [6, 0, 3, 7]),
+                quad(1, [8, 9, 10, 11]),
+            ],
+        };
+        const r = palmMesh(m, (t) => t === 1);
+        const trunk = r.polygons.filter((p) => p.texture === 0);
+        const frond = r.polygons.filter((p) => p.texture === 1);
+        expect(trunk.length).toBe(4 * 2 * 4); // four quads, two triangles each, split in four
+        expect(frond.length).toBe(6 * 2 * 2);
+        // the frond tip droops below the crown
+        const tipY = Math.min(...frond.flatMap((p) => p.indices.map((i) => r.positions[i * 3 + 1]!)));
+        expect(tipY).toBeLessThan(2);
+        // its UVs stay inside the card's UV rectangle
+        expect(frond.every((p) => p.uvs.every((v) => v >= 0 && v <= 1))).toBe(true);
+    });
+    it('recolours a picture green, keeping brightness order and alpha', () => {
+        const img = { width: 2, height: 1, rgba: new Uint8Array([200, 200, 255, 255, 40, 40, 60, 0]) };
+        const t = tintImage(img, 'green');
+        expect(t.rgba[1]!).toBeGreaterThan(t.rgba[0]!);
+        expect(t.rgba[1]!).toBeGreaterThan(t.rgba[5]!);
+        expect([t.rgba[3], t.rgba[7]]).toEqual([255, 0]);
     });
 });

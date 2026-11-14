@@ -65,7 +65,11 @@ export interface Ps2ModelSubstitution {
      * Props without a Drakan 2 model: draw the OotF model itself refined (`normals`, `pn`, `pn2`, see ootfdiscmodel.ts
      * `refineMesh`) while it collides as converted. `ps2` and `odb` are unused then.
      */
-    refine?: 'normals' | 'pn' | 'pn2' | 'round';
+    refine?: 'normals' | 'pn' | 'pn2' | 'round' | 'palm';
+    /** Props: draw only the parts of the disc model that use these entries of its texture list (a crystal without its stand). */
+    keepTextures?: readonly number[];
+    /** Props: recolour the copied disc textures at convert time (`green`: the Order of the Flame crystal green). */
+    tint?: 'green';
 }
 
 const tock = (pc: string, ps2: string, label: string): Ps2ModelSubstitution => ({
@@ -175,7 +179,24 @@ const PINE_WHY =
 const SNOWY_PINE_WHY =
     'A looser match: the Drakan 2 snowy pine (about 700 triangles against 46 vertices), stretched onto the OotF tree; Rynn collides with the OotF tree.';
 const CRYSTAL_WHY =
-    'A looser match: the Drakan 2 Cathedral crystal (908 triangles against 9 vertices, nearly the same proportions), stretched onto the OotF crystal; off: it is blue-white where the Grimstone crystals are green, which looks wrong in the mines.';
+    'A looser match: the crystal of the Drakan 2 Cathedral crystal (908 triangles against 9 vertices, nearly the same proportions) without its stand, its texture recoloured to the Order of the Flame green at convert time, stretched onto the OotF crystal; Rynn collides with the OotF crystal.';
+const TORCH_WHY =
+    'A looser match: the Drakan 2 Wartok torch of the same kind (300 to 430 triangles against 40 to 44 vertices), stretched onto the OotF torch; the OotF flame burns on it and Rynn collides with the OotF torch.';
+/** OotF torch holders and their Drakan 2 analog: [class, PC model, Drakan 2 class (WORLDCON), label]. */
+const TORCHES: readonly [string, string, string, string][] = [
+    ['Torch Base', 'gtorchp(H)', 'Wartok Torch', 'Standing torch'],
+    ['Standing Torch Base', 'gtorchp(h)', 'Wartok Torch', 'Standing torch'],
+    ['Sconce', 'TSconce01', 'Wartok Wall Torch', 'Wall sconce'],
+    ['Sconce Base', 'TSconce01', 'Wartok Wall Torch', 'Wall sconce'],
+];
+const PALM_WHY =
+    'Drakan 2 has no palm: a new palm is built at convert time from the OotF one (the trunk rounded with its own bark, every frond a curved, drooping two-sided card with the OotF frond picture); Rynn collides with the OotF palm.';
+/** OotF palms drawn as new palms: [class, PC model, label, off by default (not yet seen in game)]. */
+const PALMS: readonly [string, string, string, boolean][] = [
+    ['Fan Palm 01', 'tropical tree01', 'Fan palm', false],
+    ['Large Tree', 'PalmTree_Tall01(H)', 'Tall palm', true],
+    ['SmallTree', 'PalmTree_Short01(H)', 'Short palm', true],
+];
 /**
  * Looser Drakan 2 analogs (same kind of object, another name and size), stretched onto the OotF model: [class, PC model, ODB,
  * Drakan 2 class, label, why, off by default].
@@ -202,8 +223,6 @@ const ANALOGS: readonly [string, string, string, string, string, string, boolean
         SNOWY_PINE_WHY,
         false,
     ],
-    ['Grimstone Crystals 1', 'GrimCrystal01', 'LEVEL1ON', 'Crystal Blue', 'Grimstone crystal', CRYSTAL_WHY, true],
-    ['Grimstone Crystals 2', 'GrimCrystal02', 'LEVEL1ON', 'Crystal Blue', 'Grimstone crystal', CRYSTAL_WHY, true],
 ];
 const KEG_WHY =
     'The Drakan 2 Surdana wine keg is a remake of the same keg (945 triangles against 72) with the same origin; it is 0.1 units deeper, so it is stretched onto the OotF keg, and Rynn collides with the OotF keg.';
@@ -322,6 +341,22 @@ export const DEFAULT_PS2_MODEL_SUBSTITUTIONS: readonly Ps2ModelSubstitution[] = 
         defaultOff: true,
     })),
     ...ANALOGS.map(([pc, pcModel, odb, ps2, label, why, off]) => prop(pc, pcModel, odb, ps2, label, why, off, true)),
+    ...(['Grimstone Crystals 1', 'Grimstone Crystals 2'] as const).map((pc, i) => ({
+        ...prop(pc, `GrimCrystal0${i + 1}`, 'LEVEL1ON', 'Crystal Blue', 'Grimstone crystal', CRYSTAL_WHY, false, true),
+        keepTextures: [2],
+        tint: 'green' as const,
+    })),
+    ...TORCHES.map(([pc, pcModel, ps2, label]) => prop(pc, pcModel, 'WORLDCON', ps2, label, TORCH_WHY, false, true)),
+    ...PALMS.map(([pc, pcModel, label, off]) => ({
+        category: 'props' as const,
+        ootf: pc,
+        pcModel,
+        ps2: '(new palm)',
+        label,
+        why: PALM_WHY,
+        refine: 'palm' as const,
+        defaultOff: off,
+    })),
     prop('Wine Keg', 'WineBarrel01(H)', 'MOUNTAON', 'Wine Keg (Surdana)', 'Wine keg', KEG_WHY, false, true),
     prop('winecask', 'WineBarrel01(H)', 'MOUNTAON', 'Wine Keg (Surdana)', 'Wine keg', KEG_WHY, false, true),
     flame('Sconce Flame', 'Wall sconce flame'), // also "SconceFlame" (names compare without spaces)
@@ -385,9 +420,12 @@ export function ps2ModelSwapFromEdits(edits: unknown, base: Ps2ModelSwapOptions 
         }
         if (typeof row.ps2 !== 'string' || !modelKey(row.ps2))
             throw new Ps2ModelMapError(`row ${i + 1}: "ps2" must be a Drakan 2 class name or null`);
-        const known = (base.table ?? DEFAULT_PS2_MODEL_SUBSTITUTIONS).find(
-            (r) => modelKey(r.ootf) === modelKey(row.ootf!),
-        );
+        const table = base.table ?? DEFAULT_PS2_MODEL_SUBSTITUTIONS;
+        const same = (r: Ps2ModelSubstitution) => modelKey(r.ootf) === modelKey(row.ootf!);
+        // a class name can have several prop rows (by PC model): the one naming this Drakan 2 class, else the first
+        const known =
+            table.find((r) => same(r) && typeof row.ps2 === 'string' && modelKey(r.ps2) === modelKey(row.ps2)) ??
+            table.find(same);
         const category = row.category ?? known?.category ?? 'weapons';
         if (!CATEGORIES.includes(category)) throw new Ps2ModelMapError(`row ${i + 1}: unknown category ${category}`);
         const refine = (row as { refine?: unknown }).refine;
@@ -398,9 +436,10 @@ export function ps2ModelSwapFromEdits(edits: unknown, base: Ps2ModelSwapOptions 
                 refine !== 'normals' &&
                 refine !== 'pn' &&
                 refine !== 'pn2' &&
-                refine !== 'round'
+                refine !== 'round' &&
+                refine !== 'palm'
             )
-                throw new Ps2ModelMapError(`row ${i + 1}: "refine" must be normals, pn, pn2 or round`);
+                throw new Ps2ModelMapError(`row ${i + 1}: "refine" must be normals, pn, pn2, round or palm`);
             extra.push({
                 ...known,
                 refine: (refine as Ps2ModelSubstitution['refine']) ?? known.refine,
@@ -441,12 +480,15 @@ export function effectiveModelSubstitutions(o: Ps2ModelSwapOptions = {}): Ps2Mod
     const off = new Set((o.off ?? []).map(modelKey));
     const on = new Set((o.on ?? []).map(modelKey));
     const cats = new Set(o.categoriesOff ?? []);
+    // Prop rows are per class and PC model (one class name shows a pine in one level and a palm in another).
+    const rowKey = (r: Ps2ModelSubstitution) =>
+        modelKey(r.ootf) + (r.category === 'props' && r.pcModel ? `|${modelKey(r.pcModel)}` : '');
     const rows = new Map<string, Ps2ModelSubstitution>();
-    for (const r of [...(o.table ?? DEFAULT_PS2_MODEL_SUBSTITUTIONS), ...(o.extra ?? [])])
-        rows.set(modelKey(r.ootf), r);
-    return [...rows.entries()]
-        .filter(([k, r]) => !off.has(k) && !cats.has(r.category) && (!r.defaultOff || on.has(k)))
-        .map(([, r]) => r);
+    for (const r of [...(o.table ?? DEFAULT_PS2_MODEL_SUBSTITUTIONS), ...(o.extra ?? [])]) rows.set(rowKey(r), r);
+    return [...rows.values()].filter((r) => {
+        const k = modelKey(r.ootf);
+        return !off.has(k) && !cats.has(r.category) && (!r.defaultOff || on.has(k));
+    });
 }
 
 /** What the pipeline asks per PC class. */
@@ -508,11 +550,14 @@ export function planPs2Models(o: Ps2ModelSwapOptions = {}): Ps2ModelPlan {
             const r = on.get(modelKey(name));
             return r?.category === 'weapons' ? r : null;
         },
-        prop: (name, pcModelName) => {
-            const r = on.get(modelKey(name));
-            if (r?.category !== 'props' || (!r.odb && !r.refine)) return null;
-            return !r.pcModel || modelKey(r.pcModel) === modelKey(pcModelName) ? r : null;
-        },
+        prop: (name, pcModelName) =>
+            rows.find(
+                (r) =>
+                    r.category === 'props' &&
+                    (r.odb || r.refine) &&
+                    modelKey(r.ootf) === modelKey(name) &&
+                    (!r.pcModel || modelKey(r.pcModel) === modelKey(pcModelName)),
+            ) ?? null,
         flame: (name) => {
             const r = on.get(modelKey(name));
             return r?.category === 'flames' && r.odb ? r : null;

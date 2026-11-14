@@ -199,7 +199,7 @@ export function appendTextures(name: Uint8Array, extra: readonly number[]): { re
  * straight, so no cracks open); `pn2` = two steps; `round` = one step that also rounds edges up to 100 degrees (box-like
  * limbs become rounded).
  */
-export type RefineMode = 'normals' | 'pn' | 'pn2' | 'round';
+export type RefineMode = 'normals' | 'pn' | 'pn2' | 'round' | 'palm';
 
 interface RMesh {
     positions: number[];
@@ -382,6 +382,153 @@ export function refineMesh<
         normals: Int8Array.from(r.normals, (x) => Math.max(-127, Math.min(127, Math.round(x * 127)))),
         normalW: undefined,
         polygons: r.tris.map((t) => ({ flags: t.flags, texture: t.texture, indices: [...t.v], uvs: t.uv })),
+        bounds: null,
+    };
+}
+
+/**
+ * A disc texture recoloured for an OotF prop at convert time: `green` keeps the picture's brightness and makes it the
+ * saturated green of the Order of the Flame crystals (the Drakan 2 crystal is blue-white). Alpha is kept.
+ */
+export function tintImage(img: { width: number; height: number; rgba: Uint8Array }, tint: 'green') {
+    void tint;
+    const rgba = new Uint8Array(img.rgba.length);
+    for (let i = 0; i < rgba.length; i += 4) {
+        const l = 0.3 * img.rgba[i]! + 0.59 * img.rgba[i + 1]! + 0.11 * img.rgba[i + 2]!;
+        rgba[i] = Math.min(255, Math.round(l * 0.35));
+        rgba[i + 1] = Math.min(255, Math.round(l * 1.0 + 25));
+        rgba[i + 2] = Math.min(255, Math.round(l * 0.3));
+        rgba[i + 3] = img.rgba[i + 3]!;
+    }
+    return { width: img.width, height: img.height, rgba };
+}
+
+interface PalmPoly {
+    flags: number;
+    texture: number;
+    indices: number[];
+    uvs: number[];
+}
+
+/**
+ * A new palm built at convert time from an OotF palm mesh (no game data in the code): the trunk and other opaque parts are the
+ * OotF polygons rounded (`refineMesh` `round`: smooth normals and a curved subdivision step, each band keeping its bark texture
+ * and UVs); every frond card (polygons of an alpha texture) becomes a curved card of six segments that rises a little and then
+ * droops, keeping the card's own corner UVs (so the OotF frond picture is used as painted) and drawn from both sides.
+ * `alpha(texture)` says whether a texture of the model's list has holes.
+ */
+export function palmMesh<M extends { positions: Float32Array; normals: Int8Array; polygons: PalmPoly[] }>(
+    m: M,
+    alpha: (texture: number) => boolean,
+): M {
+    const P = (i: number) => [m.positions[i * 3]!, m.positions[i * 3 + 1]!, m.positions[i * 3 + 2]!];
+    const count = new Map<number, number>();
+    for (const p of m.polygons) if (!alpha(p.texture)) count.set(p.texture, (count.get(p.texture) ?? 0) + 1);
+    const bark = [...count.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+    const fronds = m.polygons.filter((p) => alpha(p.texture));
+    if (bark === undefined || !fronds.length) throw new DiscModelError('not a palm (no bark or no frond texture)');
+    const pos: number[] = [];
+    const nrm: number[] = [];
+    const polys: PalmPoly[] = [];
+    const vert = (p: number[], n: number[]) => {
+        pos.push(p[0]!, p[1]!, p[2]!);
+        const u = unit(n);
+        for (const x of u) nrm.push(Math.max(-127, Math.min(127, Math.round(x * 127))));
+        return pos.length / 3 - 1;
+    };
+    // trunk and every other opaque part: the OotF polygons rounded (`round`), so each bark band keeps its own texture and UVs
+    const solid = refineMesh(
+        { positions: m.positions, normals: m.normals, polygons: m.polygons.filter((q) => !alpha(q.texture)) },
+        'round',
+    );
+    for (let i = 0; i < solid.positions.length / 3; i++) {
+        pos.push(solid.positions[i * 3]!, solid.positions[i * 3 + 1]!, solid.positions[i * 3 + 2]!);
+        nrm.push(solid.normals[i * 3]!, solid.normals[i * 3 + 1]!, solid.normals[i * 3 + 2]!);
+    }
+    for (const q of solid.polygons) polys.push(q);
+    // the crown: the top of the bark
+    const tv = [...new Set(m.polygons.filter((p) => p.texture === bark).flatMap((p) => p.indices))].map(P);
+    const top = Math.max(...tv.map((v) => v[1]!));
+    const tops = tv.filter((v) => v[1]! >= top - 1e-4);
+    const crown = [0, 1, 2].map((k) => tops.reduce((a, v) => a + v[k]!, 0) / tops.length);
+    // fronds: curved cards from each OotF card
+    const SEG = 6;
+    for (const f of fronds) {
+        const n = f.indices.length;
+        const pts = f.indices.map(P);
+        const uv = (i: number) => [f.uvs[i * 2]!, f.uvs[i * 2 + 1]!];
+        // the base edge is the one nearest the crown; the opposite side is the tip
+        let best = 0;
+        let bestD = Infinity;
+        for (let e = 0; e < n; e++) {
+            const a = pts[e]!;
+            const b = pts[(e + 1) % n]!;
+            const d = Math.hypot(
+                (a[0]! + b[0]!) / 2 - crown[0]!,
+                (a[1]! + b[1]!) / 2 - crown[1]!,
+                (a[2]! + b[2]!) / 2 - crown[2]!,
+            );
+            if (d < bestD) {
+                bestD = d;
+                best = e;
+            }
+        }
+        const A = best;
+        const B = (best + 1) % n;
+        const C = (best + 2) % n;
+        const D = n === 4 ? (best + 3) % n : C;
+        const pa = pts[A]!;
+        const pb = pts[B]!;
+        const pc = pts[C]!;
+        const pd = pts[D]!;
+        const len = Math.hypot(
+            (pc[0]! + pd[0]! - pa[0]! - pb[0]!) / 2,
+            (pc[1]! + pd[1]! - pa[1]! - pb[1]!) / 2,
+            (pc[2]! + pd[2]! - pa[2]! - pb[2]!) / 2,
+        );
+        const grid: number[][] = [];
+        const guv: number[][][] = [];
+        for (let s = 0; s <= SEG; s++) {
+            const t = s / SEG;
+            const row: number[] = [];
+            const ruv: number[][] = [];
+            for (const [p0, p1, q0, q1] of [
+                [pa, pd, uv(A), uv(D)],
+                [pb, pc, uv(B), uv(C)],
+            ] as const) {
+                const p = [0, 1, 2].map((k) => p0[k]! + (p1[k]! - p0[k]!) * t);
+                p[1] = p[1]! + len * (0.12 * t - 0.32 * t * t);
+                row.push(vert(p, [0, 1, 0]));
+                ruv.push([q0[0]! + (q1[0]! - q0[0]!) * t, q0[1]! + (q1[1]! - q0[1]!) * t]);
+            }
+            grid.push(row);
+            guv.push(ruv);
+        }
+        for (let s = 0; s < SEG; s++) {
+            const [a, b] = grid[s]!;
+            const [d, c] = grid[s + 1]!;
+            const [ua, ub] = guv[s]!;
+            const [ud, uc] = guv[s + 1]!;
+            for (const tri of [
+                { v: [a!, d!, c!], u: [ua!, ud!, uc!] },
+                { v: [a!, c!, b!], u: [ua!, uc!, ub!] },
+            ]) {
+                polys.push({ flags: f.flags, texture: f.texture, indices: tri.v, uvs: tri.u.flat() });
+                polys.push({
+                    flags: f.flags,
+                    texture: f.texture,
+                    indices: [tri.v[0]!, tri.v[2]!, tri.v[1]!],
+                    uvs: [tri.u[0]!, tri.u[2]!, tri.u[1]!].flat(),
+                });
+            }
+        }
+    }
+    return {
+        ...m,
+        positions: Float32Array.from(pos),
+        normals: Int8Array.from(nrm),
+        normalW: undefined,
+        polygons: polys,
         bounds: null,
     };
 }
