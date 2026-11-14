@@ -477,7 +477,10 @@ export function convertPcLevel(pc: PcLevel, opt: ConvertOptions): Ps2LevelParts 
         pcWater: pc.terrain.filter((L) => L.type === LAYER_TYPE_WATER),
         groundAt: (x, z, y) => terrainGroundBelow(floors, x, z, y),
     };
-    const terrain = linkFarWater(pc.terrain.map((L) => convertLayer(L, pc, opt, report, water)));
+    const terrain = linkFarWater(
+        pc.terrain.map((L) => convertLayer(L, pc, opt, report, water)),
+        waterVisibleCells(),
+    );
 
     // ---- header
     const name = opt.name ?? pcLevelName(pc.header);
@@ -591,6 +594,15 @@ function convertLayer(
  * sees 65 lu and more. Water layers within this distance of a layer are added to its list. Journal 2026-11-09/ootf-sea-sky.md.
  */
 export const WATER_VISIBLE_CELLS = 96;
+
+/** `WATER_VISIBLE_CELLS`, or the env `DRAKAN_WATER_VISIBLE_CELLS` (16 .. 256) for a test conversion. */
+export function waterVisibleCells(): number {
+    const env = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.[
+        'DRAKAN_WATER_VISIBLE_CELLS'
+    ];
+    const n = env !== undefined && env !== '' ? Number(env) : NaN;
+    return Number.isFinite(n) ? Math.min(256, Math.max(16, Math.round(n))) : WATER_VISIBLE_CELLS;
+}
 
 export function linkFarWater(layers: TerrainLayer[], reach = WATER_VISIBLE_CELLS): TerrainLayer[] {
     const water = layers.filter((L) => L.type === LAYER_TYPE_WATER);
