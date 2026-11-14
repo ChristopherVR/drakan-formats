@@ -844,6 +844,18 @@ export async function convertOotfLevels(
                         continue;
                     }
                     const mover = plan({ o: t.tree, cls: t.cls });
+                    // The fallen trunk collides as a trunk: its branches over the walk surface do not stop Rynn.
+                    {
+                        const tow = ownerOf.get(t.cls);
+                        if (tow && t.cls.model)
+                            await builder.requireTrunkCollision(
+                                tow,
+                                t.cls.model.db,
+                                t.cls.model.id,
+                                t.toward[1] === 'x' ? 0 : 2,
+                                t.toward[0] === '+' ? -1 : 1,
+                            );
+                    }
                     const followers = t.followers.map((f) => plan(f));
                     list.push({ t, mover, followers });
                     // Roots at the foot: only their low polygons collide, so Rynn walks over them onto the trunk.
@@ -2000,6 +2012,16 @@ export async function convertOotfLevels(
                     if (!c) continue;
                     const k = sdbKey(`${c}.sdb`);
                     (want.get(k) ?? want.set(k, new Set()).get(k)!).add(n.ref & 0xffff);
+                }
+                // A felled tree's PC "Hit Ground Sound" (the PS2 Ground Object has no such field, so no scan asks for it):
+                // it plays as its Mover's stop sound (ootftree.ts).
+                for (const { t, mover } of fallingTrees.get(pc) ?? []) {
+                    const hit = mover ? pcFieldNumber(pc, t.tree, 'Hit Ground Sound') : undefined;
+                    const ow = hit ? owner(pc, t.tree.dbIndex) : null;
+                    const c = ow ? builder.resolveContainer(ow, hit! >>> 16) : null;
+                    if (!c) continue;
+                    const k = sdbKey(`${c}.sdb`);
+                    (want.get(k) ?? want.set(k, new Set()).get(k)!).add(hit! & 0xffff);
                 }
                 if (opt.sequences !== false) {
                     const cinematicBanks = new Map<string, Set<number>>();

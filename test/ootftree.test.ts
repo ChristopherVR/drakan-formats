@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import type { LvlObject, LvlObjectList, OdbClass } from '../src/index.ts';
 import { FLAG_VISIBLE, paramValue } from '../src/lvl.ts';
-import { lowCollisionBounds } from '../src/ootfassets.ts';
+import { lowCollisionBounds, trunkCollisionBounds } from '../src/ootfassets.ts';
 import {
     MOVER_RFL,
     TRUNK_STEP,
@@ -199,6 +199,28 @@ describe('falling trees', () => {
         const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
         expect(dv.getUint16(b.length - 4, true)).toBe(1); // one polygon listed
         expect(dv.getUint16(b.length - 2, true)).toBe(0); // the low one
+    });
+
+    it('lets the fallen trunk collide without the branches over its walk surface', () => {
+        // A trunk stave from y 0 to 4 (z up to 0.3), a branch at y 2 rising to z 1.0, a low limb at z 0.2.
+        const model = {
+            name: 'tree',
+            shading: 0,
+            distance: null,
+            textures: [],
+            positions: Float32Array.from([
+                0, 0, 0, 0.2, 4, 0.3, 0, 4, 0, 0, 2, 0.3, 0.6, 2.4, 1.0, 0.2, 2.6, 0.5, 0, 1, 0.1, 0.5, 1.2, 0.2, 0.1,
+                1.4, 0.15,
+            ]),
+            normals: new Int8Array(27),
+            polygons: [{ indices: [0, 1, 2] }, { indices: [3, 4, 5] }, { indices: [6, 7, 8] }],
+            bounds: null,
+        } as unknown as Parameters<typeof trunkCollisionBounds>[0];
+        const b = trunkCollisionBounds(model, 2, 1, 0.05);
+        const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
+        const at = 8 + 16 + 48 + 8 + 48;
+        const n = dv.getUint16(at, true);
+        expect([...Array(n)].map((_, i) => dv.getUint16(at + 2 + i * 2, true))).toEqual([0, 2]);
     });
 
     it('turns a quarter turn about the axis that tips the top toward the fall', () => {

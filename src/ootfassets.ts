@@ -161,6 +161,9 @@ function plateBounds(model: NeutralModel, headroom: number): Uint8Array {
  * at the foot of a felled tree (ootftree.ts), whose flares stand higher than the PS2 Rynn steps, so she can walk over the
  * low roots onto the fallen trunk as the PC level means. With no such polygon the model does not collide at all.
  */
+/** How far a felled trunk's branch may rise over the trunk top and still collide (world units). */
+export const TRUNK_MARGIN = 100;
+
 export function lowCollisionBounds(model: NeutralModel, maxY: number): Uint8Array {
     const keep: number[] = [];
     const pts: number[] = [];
@@ -169,6 +172,61 @@ export function lowCollisionBounds(model: NeutralModel, maxY: number): Uint8Arra
         keep.push(i);
         for (const v of p.indices)
             pts.push(model.positions[v * 3]!, model.positions[v * 3 + 1]!, model.positions[v * 3 + 2]!);
+    });
+    const out = synthesizeBounds(Float32Array.from(pts.length ? pts : [0, 0, 0]), keep.length);
+    const dv = new DataView(out.buffer, out.byteOffset, out.byteLength);
+    const at = out.length - keep.length * 2;
+    keep.forEach((pi, k) => dv.setUint16(at + k * 2, pi, true));
+    return out;
+}
+
+/**
+ * Bounds of a felled tree's model (ootftree.ts) that collide with its trunk and leave out what stands above the trunk's
+ * walk surface once fallen: branches and leaf cards whose highest point rises more than `margin` (model units) over the
+ * trunk top at their height. `up` is the model axis that points up after the fall (0 = x, 2 = z) and `sign` its direction.
+ * The trunk is the polygons spanning at least a quarter of the model's height and slender across (the trunk staves); the
+ * trunk top at a height is the highest of them there. Polygons wholly below the staves' foot (the butt end) are left out
+ * too. Everything is still drawn; only the collision changes.
+ */
+export function trunkCollisionBounds(model: NeutralModel, up: 0 | 2, sign: 1 | -1, margin: number): Uint8Array {
+    const P = model.positions;
+    let top = -Infinity;
+    for (let i = 1; i < P.length; i += 3) top = Math.max(top, P[i]!);
+    const span = (p: NeutralModel['polygons'][number]): [number, number] => {
+        const ys = p.indices.map((v) => P[v * 3 + 1]!);
+        return [Math.min(...ys), Math.max(...ys)];
+    };
+    const upOf = (v: number): number => sign * P[v * 3 + up]!;
+    // A stave runs a quarter of the height or more and is slender across (branches and leaf cards spread wide).
+    const staves = model.polygons.filter((p) => {
+        const [a, b] = span(p);
+        const across = (k: number): number => {
+            const vs = p.indices.map((v) => P[v * 3 + k]!);
+            return Math.max(...vs) - Math.min(...vs);
+        };
+        return b - a >= top / 4 && Math.max(across(0), across(2)) <= 0.45 * (b - a);
+    });
+    const trunkTop = (y: number): number => {
+        let t = -Infinity;
+        for (const p of staves) {
+            const [a, b] = span(p);
+            if (y >= a && y <= b) for (const v of p.indices) t = Math.max(t, upOf(v));
+        }
+        return t;
+    };
+    const keep: number[] = [];
+    const pts: number[] = [];
+    // The butt end below where the staves begin (root flare and cut face) is left out as well: Rynn stepped from it onto
+    // the staves and stuck on the seam (round 7, runs tr2 and sw2), and the staves alone reach the foot.
+    const staveFoot = staves.reduce((m, p) => Math.min(m, span(p)[0]), Infinity);
+    model.polygons.forEach((p, i) => {
+        const [a, b] = span(p);
+        if (Number.isFinite(staveFoot) && b <= staveFoot + 0.04 * top) return;
+        const surface = Math.max(trunkTop(a), trunkTop((a + b) / 2), trunkTop(b));
+        const high = Math.max(...p.indices.map(upOf));
+        if (Number.isFinite(surface) && high > surface + margin) return;
+        keep.push(i);
+        for (const v of p.indices) pts.push(P[v * 3]!, P[v * 3 + 1]!, P[v * 3 + 2]!);
     });
     const out = synthesizeBounds(Float32Array.from(pts.length ? pts : [0, 0, 0]), keep.length);
     const dv = new DataView(out.buffer, out.byteOffset, out.byteLength);
@@ -263,6 +321,8 @@ export class OotfAssetBuilder {
     private readonly sunkSphereKeys = new Map<string, number>();
     /** Model key -> highest model y (lu) whose polygons still collide (`lowCollisionBounds`). */
     private readonly lowCollisionKeys = new Map<string, number>();
+    /** Model key -> the up axis after a fall (`trunkCollisionBounds`). */
+    private readonly trunkCollisionKeys = new Map<string, { up: 0 | 2; sign: 1 | -1 }>();
     private readonly models: {
         id: number;
         model: NeutralModel;
@@ -628,6 +688,12 @@ export class OotfAssetBuilder {
             if (records)
                 records = [...writePs2ModelRecords(out), ...records.filter((r) => r.type === MOD_DISPLAY_LIST)];
         }
+        if (!skin && this.trunkCollisionKeys.has(key)) {
+            const t = this.trunkCollisionKeys.get(key)!;
+            out = { ...out, bounds: trunkCollisionBounds(out, t.up, t.sign, TRUNK_MARGIN / 2048) };
+            if (records)
+                records = [...writePs2ModelRecords(out), ...records.filter((r) => r.type === MOD_DISPLAY_LIST)];
+        }
         if (!skin && this.lowCollisionKeys.has(key)) {
             out = { ...out, bounds: lowCollisionBounds(out, this.lowCollisionKeys.get(key)!) };
             if (records)
@@ -975,6 +1041,20 @@ export class OotfAssetBuilder {
             key,
             Math.max(this.plateBoxKeys.get(key) ?? 0, (Math.max(0, sink) + PLATE_BOX_HEADROOM) / 2048),
         );
+        return true;
+    }
+
+    /**
+     * Let a felled tree's model collide with its trunk only, not with the branches over the fallen trunk's walk surface
+     * (`trunkCollisionBounds`). Call before the model is added; false when the reference does not resolve or the model was
+     * already converted.
+     */
+    async requireTrunkCollision(owner: string, pcDb: number, pcId: number, up: 0 | 2, sign: 1 | -1): Promise<boolean> {
+        await this.registerOwner(owner);
+        const c = this.resolveContainer(owner, pcDb);
+        const key = c ? `${lower(c)}#${pcId}` : '';
+        if (!c || this.modelIds.has(key)) return false;
+        this.trunkCollisionKeys.set(key, { up, sign });
         return true;
     }
 
