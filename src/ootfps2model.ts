@@ -65,11 +65,16 @@ export interface Ps2ModelSubstitution {
      * Props without a Drakan 2 model: draw the OotF model itself refined (`normals`, `pn`, `pn2`, see ootfdiscmodel.ts
      * `refineMesh`) while it collides as converted. `ps2` and `odb` are unused then.
      */
-    refine?: 'normals' | 'pn' | 'pn2' | 'round' | 'palm';
+    refine?: 'normals' | 'pn' | 'pn2' | 'round' | 'palm' | 'smooth' | 'module' | 'beam';
     /** Props: draw only the parts of the disc model that use these entries of its texture list (a crystal without its stand). */
     keepTextures?: readonly number[];
     /** Props: recolour the copied disc textures at convert time (`green`: the Order of the Flame crystal green). */
     tint?: 'green';
+    /**
+     * Effects: placed particle emitters (engine class 43) of this class that start on and that no object in the level links to
+     * are shown (visible flag) with their damage set to 0: a fire that burns for good on the PC, drawn but harmless.
+     */
+    harmlessShow?: boolean;
 }
 
 const tock = (pc: string, ps2: string, label: string): Ps2ModelSubstitution => ({
@@ -197,6 +202,48 @@ const PALMS: readonly [string, string, string, boolean][] = [
     ['Large Tree', 'PalmTree_Tall01(H)', 'Tall palm', true],
     ['SmallTree', 'PalmTree_Short01(H)', 'Short palm', true],
 ];
+const REMAKE_WHY =
+    'Drakan 2 has no model of it: a denser, smoother PS2-style model is built at convert time from the OotF one (two steps of Loop subdivision with sharp edges kept, smooth shading, the OotF textures and their layout); Rynn collides with the OotF model.';
+const MODULE_WHY =
+    'Drakan 2 has no model of these corridor pieces: a denser, smoother PS2-style piece is built at convert time from the OotF one (two steps of Loop subdivision; vaults and arches curve, the borders where the next piece joins stay exactly the OotF ones, so no gaps open even next to a piece left as it was); Rynn collides with the OotF piece.';
+const BEAM_WHY =
+    'Drakan 2 has no model of the light beam over a pick-up pad: it is rebuilt at convert time as three nested soft shafts of 32 sides (core, beam and a halo that narrows to the top) with the OotF beam texture, instead of one tube of 16 flat cards. The beam is scenery only.';
+/** OotF props remade at convert time (ootfpropremake.ts): [class, PC model, label, refine mode, why]. */
+const REMAKES: readonly [string, string, string, 'smooth' | 'module' | 'beam', string][] = [
+    ['Talon Torch 01', 'FangTorch01', 'Talon torch', 'smooth', REMAKE_WHY],
+    ['FangTorch01', 'FangTorch01', 'Talon torch', 'smooth', REMAKE_WHY],
+    ['Talon Torch 02', 'FangTorch02', 'Talon torch (leaning)', 'smooth', REMAKE_WHY],
+    ['FangTorch2', 'FangTorch02', 'Talon torch (leaning)', 'smooth', REMAKE_WHY],
+    ['Talon Torch Death Mage', 'FangTorch03', 'Great talon', 'smooth', REMAKE_WHY],
+    ['Talon Torch w/o light', 'IslandFang01(no bounding)', 'Talon spike', 'smooth', REMAKE_WHY],
+    ['islandfang', 'IslandFang01', 'Talon spike', 'smooth', REMAKE_WHY],
+    ['Landscape Spike2', 'island fang02', 'Talon spike', 'smooth', REMAKE_WHY],
+    ['Succubus Pillar', 'SuckPillar01', 'Succubus pillar', 'smooth', REMAKE_WHY],
+    ['Evil Ruin Straight 01', 'EvilRuinStraight01', 'Succubus ruin corridor', 'module', MODULE_WHY],
+    ['Evil Ruin Straight 02', 'EvilRuinStraight02', 'Succubus ruin corridor', 'module', MODULE_WHY],
+    ['Straight w lite 01', 'EvilRuinStraightW_Lite01', 'Succubus ruin corridor (lit)', 'module', MODULE_WHY],
+    ['Straight w lite 02', 'EvilRuinStraightW_Lite02', 'Succubus ruin corridor (lit)', 'module', MODULE_WHY],
+    ['Evil Ruin Entrance 01', 'EvilRuinEntrance01', 'Succubus ruin entrance', 'module', MODULE_WHY],
+    ['Entrance 01', 'EvilRuinEntrance01', 'Succubus ruin entrance', 'module', MODULE_WHY],
+    ['Evil Ruin Entrance 02', 'EvilRuinEntrance02', 'Succubus ruin entrance', 'module', MODULE_WHY],
+    ['Evil Ruin End', 'EvilRuinEnd01', 'Succubus ruin dead end', 'module', MODULE_WHY],
+    ['Evil End', 'EvilRuinEnd01', 'Succubus ruin dead end', 'module', MODULE_WHY],
+    ['Evil Ruin Left Turn', 'EvilRuinLeftTurn01', 'Succubus ruin corner', 'module', MODULE_WHY],
+    ['Left Turn 01', 'EvilRuinLeftTurn01', 'Succubus ruin corner', 'module', MODULE_WHY],
+    ['Left Turn 01 w lite', 'EvilRuinLeftTurnW_Lite01', 'Succubus ruin corner (lit)', 'module', MODULE_WHY],
+    ['Evil Ruin Right Turn', 'EvilRuinRightTurn01', 'Succubus ruin corner', 'module', MODULE_WHY],
+    ['Evil right Turn', 'EvilRuinRightTurn01', 'Succubus ruin corner', 'module', MODULE_WHY],
+    ['Evil Ruin Right Open w light', 'EvilRuinRightOpenW_Lite01', 'Succubus ruin side opening', 'module', MODULE_WHY],
+    ['Evil Ruin Arch 01', 'EvilRuinArch01', 'Succubus ruin arch', 'module', MODULE_WHY],
+    ['Arch 01', 'EvilRuinArch01', 'Succubus ruin arch', 'module', MODULE_WHY],
+    ['Arch to Rooms', 'EvilRuinArch01', 'Succubus ruin arch', 'module', MODULE_WHY],
+    ['Evil Ruin Arch 02', 'EvilRuinArch02', 'Succubus ruin arch', 'module', MODULE_WHY],
+    ['Evil Ruin Ceiling 01', 'EvilRuinCeiling01', 'Succubus ruin vault', 'module', MODULE_WHY],
+    ['Light Beam', 'Light Beam', 'Light beam over a pick-up pad', 'beam', BEAM_WHY],
+];
+const RING_WHY =
+    "The rings of magic flames round Alwarren's three barrier crystals: on the PC they burn from the start, but their objects carry no visible flag, so in the PS2 engine they never show. Turned on, the flames of this class that start on and that nothing in the level switches (the three rings and a single flame) show their fire with no damage: on the PC nothing puts them out, so a burning ring that hurt would block the way to a crystal for good. The fountain flames and the pulsing groups are left as they are.";
+
 /**
  * Looser Drakan 2 analogs (same kind of object, another name and size), stretched onto the OotF model: [class, PC model, ODB,
  * Drakan 2 class, label, why, off by default].
@@ -357,6 +404,25 @@ export const DEFAULT_PS2_MODEL_SUBSTITUTIONS: readonly Ps2ModelSubstitution[] = 
         refine: 'palm' as const,
         defaultOff: off,
     })),
+    ...REMAKES.map(([pc, pcModel, label, refine, why]) => ({
+        category: 'props' as const,
+        ootf: pc,
+        pcModel,
+        ps2: '(new PS2-style model)',
+        label,
+        why,
+        refine,
+        defaultOff: true,
+    })),
+    {
+        category: 'effects',
+        ootf: 'Alwarren Magic Flame',
+        ps2: '(OotF fire shown, harmless)',
+        label: 'Magic flame rings round the barrier crystals',
+        why: RING_WHY,
+        harmlessShow: true,
+        defaultOff: true,
+    },
     prop('Wine Keg', 'WineBarrel01(H)', 'MOUNTAON', 'Wine Keg (Surdana)', 'Wine keg', KEG_WHY, false, true),
     prop('winecask', 'WineBarrel01(H)', 'MOUNTAON', 'Wine Keg (Surdana)', 'Wine keg', KEG_WHY, false, true),
     flame('Sconce Flame', 'Wall sconce flame'), // also "SconceFlame" (names compare without spaces)
@@ -402,6 +468,16 @@ export class Ps2ModelMapError extends Error {}
 export const modelKey = (name: string): string => name.toLowerCase().replace(/[^a-z0-9]+/g, '');
 
 const CATEGORIES: readonly Ps2ModelCategory[] = ['enemies', 'weapons', 'props', 'flames', 'effects'];
+const REFINE_MODES: readonly NonNullable<Ps2ModelSubstitution['refine']>[] = [
+    'normals',
+    'pn',
+    'pn2',
+    'round',
+    'palm',
+    'smooth',
+    'module',
+    'beam',
+];
 
 /** Turn user edits (a parsed JSON file) into swap options over the default table. */
 export function ps2ModelSwapFromEdits(edits: unknown, base: Ps2ModelSwapOptions = {}): Ps2ModelSwapOptions {
@@ -431,15 +507,8 @@ export function ps2ModelSwapFromEdits(edits: unknown, base: Ps2ModelSwapOptions 
         const refine = (row as { refine?: unknown }).refine;
         if (known?.refine) {
             // a refined-body row: turned on, optionally with another refinement
-            if (
-                refine !== undefined &&
-                refine !== 'normals' &&
-                refine !== 'pn' &&
-                refine !== 'pn2' &&
-                refine !== 'round' &&
-                refine !== 'palm'
-            )
-                throw new Ps2ModelMapError(`row ${i + 1}: "refine" must be normals, pn, pn2, round or palm`);
+            if (refine !== undefined && !REFINE_MODES.includes(refine as never))
+                throw new Ps2ModelMapError(`row ${i + 1}: "refine" must be one of ${REFINE_MODES.join(', ')}`);
             extra.push({
                 ...known,
                 refine: (refine as Ps2ModelSubstitution['refine']) ?? known.refine,
@@ -510,6 +579,8 @@ export interface Ps2ModelPlan {
     flame(name: string): Ps2ModelSubstitution | null;
     /** The Drakan 2 effects row for this PC class, or null. */
     effect(name: string): Ps2ModelSubstitution | null;
+    /** The effects row with `harmlessShow` that is on for this class (its unswitched emitters are shown, harmless), or null. */
+    harmlessShow(name: string): Ps2ModelSubstitution | null;
     /** The swapped enemy gets the health after which its Order of the Flame class flees (`healthUntilFlee`, disc clips only). */
     enemyHealthUntilFlee(name: string): boolean;
 }
@@ -565,6 +636,10 @@ export function planPs2Models(o: Ps2ModelSwapOptions = {}): Ps2ModelPlan {
         effect: (name) => {
             const r = on.get(modelKey(name));
             return r?.category === 'effects' && r.odb && r.fields?.length ? r : null;
+        },
+        harmlessShow: (name) => {
+            const r = on.get(modelKey(name));
+            return r?.category === 'effects' && r.harmlessShow === true ? r : null;
         },
     };
 }

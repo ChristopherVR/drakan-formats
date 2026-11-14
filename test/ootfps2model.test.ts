@@ -35,7 +35,7 @@ describe('Drakan 2 model table', () => {
             expect(seen.has(k)).toBe(false);
             seen.add(k);
             expect(['enemies', 'weapons', 'props', 'flames', 'effects']).toContain(r.category);
-            if (r.category === 'effects') expect(r.odb && r.fields?.length).toBeTruthy();
+            if (r.category === 'effects') expect((r.odb && r.fields?.length) || r.harmlessShow).toBeTruthy();
             if (r.category === 'props') expect(r.pcModel && (r.odb || r.refine)).toBeTruthy();
             if (r.category === 'flames') expect(r.odb).toBeTruthy();
             expect(r.why.length).toBeGreaterThan(10);

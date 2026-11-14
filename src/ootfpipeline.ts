@@ -33,7 +33,9 @@ import {
     type LvlDependency,
     type LvlObject,
     type ParamSpec,
+    FLAG_VISIBLE,
 } from './lvl.ts';
+import { EMITTER_RFL, unswitchedEmitters } from './ootfpropremake.ts';
 import {
     ODB_CLASS_TYPE,
     ODB_FIELDS_TYPE,
@@ -1166,6 +1168,20 @@ export async function convertOotfLevels(
                 const n = [...p.visibility.values()].reduce((m, v) => m + v.size, 0);
                 if (n) log(`cull ${k}: ${n} show / hide timeline(s) in ${p.visibility.size} scene(s)`);
             }
+            // Models a Morph Plug (99) shows in turn: morphing blends their vertices one to one, so a frame drawn from another
+            // mesh (a Drakan 2 model, a remake) would tear the morph into spikes. Their props rows are not used.
+            const morphFrames = new Set<string>();
+            for (const u of used.values()) {
+                const ow = ownerOf.get(u.cls);
+                if (u.cls.rflClass !== 99 || !ow) continue;
+                await builder.registerOwner(ow);
+                const refs = morphModelRefs(u.cls);
+                if (u.cls.model) refs.push((u.cls.model.db << 16) | u.cls.model.id);
+                for (const r of refs) {
+                    const c = builder.resolveContainer(ow, r >>> 16);
+                    if (c) morphFrames.add(`${c.toLowerCase()}#${r & 0xffff}`);
+                }
+            }
             for (const u of used.values()) {
                 const m = u.cls.model;
                 const ow = ownerOf.get(u.cls);
@@ -1188,7 +1204,16 @@ export async function convertOotfLevels(
                         flameEmbers.add(u.cls);
                 }
                 // A Drakan 2 prop model in place of the PC one (ootfps2model.ts, props): the disc model copied into the pack.
-                if (propRows.has(modelKey(u.cls.name))) {
+                await builder.registerOwner(ow);
+                const container = builder.resolveContainer(ow, m.db);
+                const morphFrame = container !== null && morphFrames.has(`${container.toLowerCase()}#${m.id}`);
+                if (propRows.has(modelKey(u.cls.name)) && morphFrame) {
+                    const note = `drakan 2 model for ${u.cls.name.trim()} not used: its model is also a morph frame`;
+                    if (!propNotes.has(note)) {
+                        propNotes.add(note);
+                        res.warnings.push(note);
+                    }
+                } else if (propRows.has(modelKey(u.cls.name))) {
                     const pcm = await builder.readPcModel(ow, m.db, m.id);
                     const row = pcm ? modelSwap.prop(u.cls.name, pcm.name) : null;
                     if (pcm && row?.refine) {
@@ -3519,6 +3544,39 @@ export async function convertOotfLevels(
                         `${title}: ${moved} flame(s) moved to the foot of their flame for the Drakan 2 fire, ${candles} small one(s) burn as candles`,
                     );
             });
+        // Emitters that burn for good on the PC but carry no visible flag (Alwarren's crystal rings): drawn, harmless
+        // (ootfps2model.ts `harmlessShow`, ootfpropremake.ts).
+        await stage(`harmless fires ${pc.path}`, async () => {
+            const pcIdOf = new Map([...(parts.objectIdMap ?? new Map<number, number>())].map(([a, b]) => [b, a]));
+            const pcCls = (x: LvlObject) => pc.classes.get(x.dbIndex)?.get(x.classId);
+            const cands = pc.list.objects.filter((x) => {
+                const c = pcCls(x);
+                return c?.rflClass === EMITTER_RFL && modelSwap.harmlessShow(c.name) && !(x.flags & FLAG_VISIBLE);
+            });
+            if (!cands.length) return;
+            const show = unswitchedEmitters(
+                pc.list.objects,
+                cands.map((x) => ({ id: x.id, initialState: pcFieldNumber(pc, x, 'Initial State') })),
+            );
+            let shown = 0;
+            for (const o of lvl.objects.objects) {
+                const id = pcIdOf.get(o.id) ?? o.id;
+                if (!show.has(id)) continue;
+                const cls =
+                    classes.get(o.dbIndex)?.get(o.classId) ??
+                    plan?.synthesized.find((x) => x.dbIndex === o.dbIndex && x.classId === o.classId)?.cls;
+                // never shown without its damage set to 0
+                if (!setNamedParam(lvl.objects, o, cls?.fields, 'Damage (hp/s)', 0)) continue;
+                // nor with the effect its fire puts on what it touches
+                setNamedParam(lvl.objects, o, cls?.fields, 'Damage Effect', 0);
+                o.flags |= FLAG_VISIBLE;
+                shown++;
+                const c = pcCls(pc.list.objects.find((x) => x.id === id)!);
+                if (c)
+                    modelSwapsUsed.set(modelKey(c.name), { ...modelSwap.harmlessShow(c.name)!, ootf: c.name.trim() });
+            }
+            if (shown) log(`${title}: ${shown} unswitched fire emitter(s) shown with no damage`);
+        });
         // Last change of object flags: dynamic lights of a class with the "Light Source" cube are not drawn (ootfmarkers.ts).
         await stage(`markers ${pc.path}`, async () => {
             const hidden = hideLightMarkers(

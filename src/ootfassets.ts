@@ -49,6 +49,7 @@ import {
     refineMesh,
     tintImage,
 } from './ootfdiscmodel.ts';
+import { lightBeamMesh, smoothSubdivide } from './ootfpropremake.ts';
 import { type Ps2SubstituteTexture, substituteMismatch } from './ootfps2tex.ts';
 
 /**
@@ -1297,7 +1298,15 @@ export class OotfAssetBuilder {
                 const id = m.model.textures[t]?.id;
                 return id !== undefined && this.texAlpha.get(id) === true;
             };
-            const dl = withDisplayList(mode === 'palm' ? palmMesh(m.model, alpha) : refineMesh(m.model, mode));
+            const drawn =
+                mode === 'palm'
+                    ? palmMesh(m.model, alpha)
+                    : mode === 'smooth' || mode === 'module'
+                      ? smoothSubdivide(m.model, { fixBorders: mode === 'module' })
+                      : mode === 'beam'
+                        ? lightBeamMesh(m.model)
+                        : refineMesh(m.model, mode);
+            const dl = withDisplayList(drawn);
             const verts = writePs2ModelRecords(dl.model).find((r) => r.type === MOD_VERTICES_RECORD)!.data;
             drawing = combineDrawing(pVerts, readVertexRecord(verts), dl.record, 0);
         } catch (e) {

@@ -197,9 +197,10 @@ export function appendTextures(name: Uint8Array, extra: readonly number[]): { re
  * seams, hard edges over 60 degrees kept); `pn` = also one curved subdivision step (every triangle split in four, the new
  * edge points on the curved surface the normals describe, as PN triangles; edges along hard creases and open borders stay
  * straight, so no cracks open); `pn2` = two steps; `round` = one step that also rounds edges up to 100 degrees (box-like
- * limbs become rounded).
+ * limbs become rounded). `smooth`, `module` and `beam` are the new PS2-style drawings of ootfpropremake.ts (Loop subdivision;
+ * the same with fixed open borders for corridor modules; a rebuilt light beam).
  */
-export type RefineMode = 'normals' | 'pn' | 'pn2' | 'round' | 'palm';
+export type RefineMode = 'normals' | 'pn' | 'pn2' | 'round' | 'palm' | 'smooth' | 'module' | 'beam';
 
 interface RMesh {
     positions: number[];
