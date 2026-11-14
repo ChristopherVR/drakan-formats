@@ -64,6 +64,19 @@ import {
     writeClassSounds,
     type ClassSoundField,
 } from './ootfclasssounds.ts';
+import {
+    IDLE_CLIP_NAMES,
+    WARTOK_CLASS,
+    PC_VOICE_CLASSES,
+    PC_VOICE_SKIPPED_FIELDS,
+    SOUND_SWAPS_PATH,
+    classAnimations,
+    classFieldSounds,
+    clipSoundList,
+    mergeSoundSwaps,
+    writeSoundSwaps,
+    type SoundSwap,
+} from './ootfsoundswaps.ts';
 import { SUBTITLE_FORMAT, SUBTITLE_VERSION, type SubtitleLine, type SubtitleTable } from './ootfsubtitles.ts';
 import { applyCulling, planLevelCulling, sceneFileKey, type LevelCulling } from './ootfcull.ts';
 import { carryCreatures, type CarrierRig } from './ootfcarry.ts';
@@ -465,6 +478,18 @@ export interface OotfPipelineOptions {
      * PC class has none (ootfclasssounds.ts). Default `DEFAULT_TEMPLATE_VOICE_CLEARS`; `[]` keeps every template voice.
      */
     templateVoiceClears?: readonly TemplateVoiceClear[];
+    /**
+     * With `sounds`: Rynn and Arokh speak with their Order of the Flame voices in this campaign (ootfsoundswaps.ts). Their
+     * records stay Drakan 2's; the pack's `sounds/swaps.ini` plays the PC clips in place of the Drakan 2 ones only while the
+     * campaign is the current game. Default false: the Drakan 2 voices, as before.
+     */
+    pcVoices?: boolean;
+    /**
+     * With `sounds`: the grunts that the Drakan 2 Wartok models' standing and walking clips play. `drakan2` (default) keeps
+     * them; `off` plays nothing there in this campaign (the Order of the Flame Wartoks have no idle sounds). Drakan 2 is not
+     * changed either way.
+     */
+    wartokIdle?: 'drakan2' | 'off';
     sequences?: boolean;
     /**
      * Subtitle lines of the PC voice clips (ootfsubtitles.ts; made on the player's machine from the player's own audio). The
@@ -2308,6 +2333,98 @@ export async function convertOotfLevels(
                             );
                     }
             }
+            // Campaign sound swaps (ootfsoundswaps.ts): Drakan 2 sounds of shared records played as others in this campaign only.
+            const swaps: SoundSwap[] = [];
+            const voiceSwaps: { from: number[]; owner: string; refs: number[]; why: string }[] = [];
+            const pcOfKey = new Map<string, OdbClass>();
+            for (const u of used.values()) {
+                const k = planKey.get(sig(u.cls));
+                if (k && !pcOfKey.has(`${k.db}:${k.id}`)) pcOfKey.set(`${k.db}:${k.id}`, u.cls);
+            }
+            const sourceOfKey = (key: string): OdbClass | undefined => pcOfKey.get(key);
+            const playId = (stem: string | null, ref: number): number | null => {
+                const dep = stem
+                    ? tplHeader.dependencies.find((d) => odbStemForDependency(d.path.text) === stem)
+                    : null;
+                return dep ? ((dep.dbIndex << 16) | (ref & 0xffff)) >>> 0 : null;
+            };
+            if (plan && opt.wartokIdle === 'off') {
+                // Drakan 2 creature models voice themselves through their clips' sound lists (ADB 0x0505), standing and
+                // walking (survey item 2): with the option off those sounds play nothing in this campaign.
+                const done = new Set<string>();
+                for (const [key, t] of plan.mapped) {
+                    const source = sourceOfKey(key);
+                    if (!source || modelSwap.enemy(source.name) !== 'drakan2' || !WARTOK_CLASS.test(t.cls.name))
+                        continue;
+                    const stem = stemOfTarget(t);
+                    const from: number[] = [];
+                    for (const ref of classAnimations(t.cls)) {
+                        const aStem = containerStem(stem, ref >>> 16);
+                        const adb = aStem ? adbOf(aStem) : undefined;
+                        const e = adb?.find(0x0501, ref & 0xffff);
+                        if (!adb || !e || done.has(`${aStem}#${e.id}`)) continue;
+                        done.add(`${aStem}#${e.id}`);
+                        if (!IDLE_CLIP_NAMES.test(animName(await adb.readRaw(e)).trim())) continue;
+                        const s = adb.find(0x0505, e.id);
+                        for (const id of s ? clipSoundList(await adb.readRaw(s)) : []) {
+                            const p = id ? playId(aStem, id) : null;
+                            if (p !== null && !from.includes(p)) from.push(p);
+                        }
+                    }
+                    if (from.length)
+                        swaps.push({ from, to: [], why: `${t.cls.name.trim()}: idle and walk sounds off` });
+                }
+            }
+            if (plan && opt.pcVoices === true) {
+                // Rynn's and Arokh's records stay Drakan 2's: their PC sounds join the pack and are swapped in at play time.
+                const seen = new Set<string>();
+                for (const [key, t] of plan.mapped) {
+                    const source = sourceOfKey(key);
+                    const ow = source && ownerOf.get(source);
+                    if (!source || !ow || !PC_VOICE_CLASSES.includes(source.name.trim().toLowerCase())) continue;
+                    if (seen.has(`${t.dbIndex}:${t.classId}`)) continue; // one record, several PC classes: the first
+                    seen.add(`${t.dbIndex}:${t.classId}`);
+                    await builder.registerOwner(ow);
+                    const stem = stemOfTarget(t);
+                    const m = matchClassSounds(source, t.cls);
+                    if (m.unmatched.length && dbgEnv0['DRAKAN_DBG_CLASSSOUNDS'])
+                        log(`sound swaps ${t.cls.name.trim()}: no Drakan 2 field for ${m.unmatched.join(', ')}`);
+                    for (const f of m.fields) {
+                        const field = t.cls.fields![f.field]!.name.trim();
+                        if (!f.refs.length || PC_VOICE_SKIPPED_FIELDS.test(field)) continue;
+                        const from = classFieldSounds(t.cls, f.field)
+                            .map((r) => playId(containerStem(stem, r >>> 16), r))
+                            .filter((p): p is number => p !== null);
+                        if (!from.length && dbgEnv0['DRAKAN_DBG_CLASSSOUNDS'])
+                            log(
+                                `sound swaps ${t.cls.name.trim()}: ${field} has no Drakan 2 sound to play the PC one in`,
+                            );
+                        if (!from.length) continue;
+                        voiceSwaps.push({ from, owner: ow, refs: f.refs, why: `${t.cls.name.trim()}: ${field}` });
+                        for (const ref of f.refs) {
+                            const c = builder.resolveContainer(ow, ref >>> 16);
+                            if (!c) continue;
+                            const k = sdbKey(`${c}.sdb`);
+                            (want.get(k) ?? want.set(k, new Set()).get(k)!).add(ref & 0xffff);
+                            plainUse.add(`${k}#${ref & 0xffff}`);
+                        }
+                    }
+                }
+            }
+            const writeSwaps = (): void => {
+                const m = mergeSoundSwaps(swaps);
+                if (!m.swaps.length) return;
+                res.files[SOUND_SWAPS_PATH] = strToU8(writeSoundSwaps(m.swaps));
+                log(
+                    `sound swaps: ${m.swaps.length} line(s), ${m.swaps.reduce((n, s) => n + s.from.length, 0)} Drakan 2 sound(s)${m.shared ? `, ${m.shared} named by two fields (targets merged)` : ''}`,
+                );
+                if (dbgEnv0['DRAKAN_DBG_CLASSSOUNDS'])
+                    for (const s of m.swaps)
+                        log(
+                            `sound swap ${s.why}: ${s.from.map((x) => x.toString(16)).join(' ')} -> ${s.to.map((x) => x.toString(16)).join(' ') || 'none'}`,
+                        );
+            };
+            writeSwaps();
             for (const k of want.keys()) {
                 const bytes = await src.read(`${k}.sdb`);
                 if (!bytes) {
@@ -2419,6 +2536,17 @@ export async function convertOotfLevels(
                 log(
                     `class sounds: ${written} field(s) of ${classSounds.length} converted classes (${cleared} cleared: the PC class plays none there, classSoundsClear)${conflicts ? `, ${conflicts} field(s) differ between folded PC classes (first kept)` : ''}`,
                 );
+            const hostPlay = (id: number): number | null => playId(hostStem, id);
+            for (const v of voiceSwaps) {
+                const to = v.refs
+                    .map((r) => soundLookup!(v.owner, r))
+                    .filter((id): id is number => id !== null)
+                    .map(hostPlay)
+                    .filter((p): p is number => p !== null);
+                if (to.length) swaps.push({ from: v.from, to, why: `${v.why} (Order of the Flame voices)` });
+                else res.warnings.push(`sound swaps: ${v.why}: no PC sound converted, the Drakan 2 one stays`);
+            }
+            if (voiceSwaps.length) writeSwaps();
         });
     }
     const seqIds = new Map<string, number>();
