@@ -170,6 +170,41 @@ const BODY_REFINE: readonly [string, string, string][] = [
 ];
 const BODY_WHY =
     'No Drakan 2 model of a body on a spike, in a cage or hanging exists. Turned on, the OotF mesh is drawn refined (smooth normals, one curved subdivision step that also rounds box-like limbs; the texture layout is kept) while it collides as converted. Off: in Wartok Canyons the refined bodies look nearly the same as the OotF ones (journal 2026-11-14/ootf-d2-models.md).';
+const PINE_WHY =
+    'A looser match: the Drakan 2 pine of the same kind (about 700 triangles against 46 vertices), stretched onto the OotF tree; Rynn collides with the OotF tree.';
+const SNOWY_PINE_WHY =
+    'A looser match: the Drakan 2 snowy pine (about 700 triangles against 46 vertices), stretched onto the OotF tree; Rynn collides with the OotF tree.';
+const CRYSTAL_WHY =
+    'A looser match: the Drakan 2 Cathedral crystal (908 triangles against 9 vertices, nearly the same proportions), stretched onto the OotF crystal; off: it is blue-white where the Grimstone crystals are green, which looks wrong in the mines.';
+/**
+ * Looser Drakan 2 analogs (same kind of object, another name and size), stretched onto the OotF model: [class, PC model, ODB,
+ * Drakan 2 class, label, why, off by default].
+ */
+const ANALOGS: readonly [string, string, string, string, string, string, boolean][] = [
+    ['Large Tree', 'Large Pine(H)', 'WORLDCON', 'Pine Tree 01', 'Large pine', PINE_WHY, false],
+    ['MedTree', 'Med Pine(H)', 'WORLDCON', 'Pine Tree 01', 'Medium pine', PINE_WHY, false],
+    ['Small Tree', 'Small  Pine(H)', 'WORLDCON', 'Pine Tree 01', 'Small pine', PINE_WHY, false],
+    [
+        'Large Tree (Snowy)',
+        'Large Tree LiteSnow(H)',
+        'WORLDCON',
+        'Snowy Pine',
+        'Large snowy pine',
+        SNOWY_PINE_WHY,
+        false,
+    ],
+    [
+        'MedTree (Snowy)',
+        'Medium Tree LiteSnow(H)',
+        'WORLDCON',
+        'Snowy Pine',
+        'Medium snowy pine',
+        SNOWY_PINE_WHY,
+        false,
+    ],
+    ['Grimstone Crystals 1', 'GrimCrystal01', 'LEVEL1ON', 'Crystal Blue', 'Grimstone crystal', CRYSTAL_WHY, true],
+    ['Grimstone Crystals 2', 'GrimCrystal02', 'LEVEL1ON', 'Crystal Blue', 'Grimstone crystal', CRYSTAL_WHY, true],
+];
 const KEG_WHY =
     'The Drakan 2 Surdana wine keg is a remake of the same keg (945 triangles against 72) with the same origin; it is 0.1 units deeper, so it is stretched onto the OotF keg, and Rynn collides with the OotF keg.';
 
@@ -286,6 +321,7 @@ export const DEFAULT_PS2_MODEL_SUBSTITUTIONS: readonly Ps2ModelSubstitution[] = 
         refine: 'round' as const,
         defaultOff: true,
     })),
+    ...ANALOGS.map(([pc, pcModel, odb, ps2, label, why, off]) => prop(pc, pcModel, odb, ps2, label, why, off, true)),
     prop('Wine Keg', 'WineBarrel01(H)', 'MOUNTAON', 'Wine Keg (Surdana)', 'Wine keg', KEG_WHY, false, true),
     prop('winecask', 'WineBarrel01(H)', 'MOUNTAON', 'Wine Keg (Surdana)', 'Wine keg', KEG_WHY, false, true),
     flame('Sconce Flame', 'Wall sconce flame'), // also "SconceFlame" (names compare without spaces)
