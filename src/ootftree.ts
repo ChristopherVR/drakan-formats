@@ -215,7 +215,8 @@ export function findFallingTrees(
             });
             continue;
         }
-        for (const d of group)
+        // A push-over with no links has nothing to set off: it stays a prop rather than vanish at a blow (Alwarren brick 1998).
+        for (const d of group.filter((g) => g.o.links.length))
             out.push({
                 tree: d.o,
                 cls: d.cls,

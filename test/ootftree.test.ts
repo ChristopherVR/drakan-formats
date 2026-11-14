@@ -144,7 +144,7 @@ describe('falling trees', () => {
         ]);
     });
 
-    it('groups push-overs on one spot behind the longest and breaks the ones with no gap to bridge', () => {
+    it('groups push-overs on one spot behind the longest, breaks the ones with no gap that set something off', () => {
         const c = treeClass();
         const brace = { ...treeClass(), id: 3402, name: 'brace' };
         const brick = { ...treeClass(), id: 3403, name: 'brick' };
@@ -152,7 +152,8 @@ describe('falling trees', () => {
             [
                 obj(7, 3400, [5500, 1050, 1000], 90),
                 obj(9, 3402, [5510, 1050, 1000], 90),
-                obj(11, 3403, [3000, 1050, 1000], 90),
+                obj(11, 3403, [3000, 1050, 1000], 90, [7]),
+                obj(12, 3403, [2000, 1050, 1000], 90),
             ],
             [c, brace, brick],
         );
