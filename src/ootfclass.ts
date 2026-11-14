@@ -370,7 +370,15 @@ export const RETARGET_KINDS: ReadonlySet<ClassKind> = new Set(['logic', 'light',
  * the PC class defaults would slow Islands currents from 16 to 1 lu/s, untested).
  */
 const OWN_DEFAULTS_RFL: ReadonlySet<number> = new Set([51, 104, 111]);
+/**
+ * Non-logic engine classes whose objects also keep their PC class defaults on a same-named PS2 class. Rigid Bodies (16): a
+ * PC "Boulder" maps onto the disc's "Boulder" (RESOURES), whose "Damage (per lu/s)" is 1 and "Damage Player" off, so the
+ * Ruined Village boulders (PC 50 and on) rolled into the explosive barrels without setting them off: the body's hit sends
+ * Damage x speed / 2048 (handler 0x45a148), less than a barrel's 5 health.
+ */
+const PC_DEFAULTS_RFL: ReadonlySet<number> = new Set([16]);
 export function keepsPcDefaults(rfl: number | undefined): boolean {
+    if (rfl !== undefined && PC_DEFAULTS_RFL.has(rfl)) return true;
     return rfl !== undefined && !OWN_DEFAULTS_RFL.has(rfl) && ENGINE_CLASSES.get(rfl)?.kind === 'logic';
 }
 

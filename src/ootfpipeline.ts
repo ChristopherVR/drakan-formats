@@ -3,6 +3,15 @@ import { requireGenericPropDrawLists, requireRigidWeaponDrawLists } from './ootf
 import { holdLinkedDoors } from './ootfdoors.ts';
 import { splitClassRecord } from './odbwrite.ts';
 import { carryStartingInventory } from './ootfstartinventory.ts';
+import {
+    GROUND_OBJECT_RFL,
+    STRUCK_PUSH_OVER_MODE,
+    fallingTreeMoverClass,
+    findFallingTrees,
+    freeClassId,
+    placeFallingTrees,
+    type FallingTree,
+} from './ootftree.ts';
 import { ootfDebugFlag } from './ootfdebug.ts';
 import { strToU8 } from 'fflate';
 import {
@@ -94,7 +103,7 @@ import {
     pcInterfaceMusic,
 } from './ootfmusic.ts';
 import { buildOotfMusicPack, type OotfMusicPack } from './ootfdmusic.ts';
-import { addAutoPlayStomp, applyPuzzleLogic, relayDetectorSequences } from './ootfpuzzle.ts';
+import { addAutoPlayStomp, applyPuzzleLogic, pcFieldNumber, relayDetectorSequences } from './ootfpuzzle.ts';
 import { hideLightMarkers } from './ootfmarkers.ts';
 import { pcTransitionSequences, relayExitSequences } from './ootfexitseq.ts';
 import {
@@ -754,6 +763,41 @@ export async function convertOotfLevels(
                 ownedClasses.set(ownedClassKey(ow, id), cls);
             }
         }
+    // Trees Rynn fells over a gap (ootftree.ts): each gets a Mover class of its own model, planned with the other classes.
+    const fallingTrees = new Map<PcLevel, { t: FallingTree; mover: { db: number; id: number } }[]>();
+    if (dbgEnv0['OOTF_NO_FALLING_TREES'] !== '1')
+        for (const pc of pcs)
+            await stage(`falling trees ${pc.path}`, async () => {
+                const lengths = new Map<OdbClass, number>();
+                for (const o of pc.list.objects) {
+                    const cls = pc.classes.get(o.dbIndex)?.get(o.classId);
+                    const ow = cls ? ownerOf.get(cls) : undefined;
+                    if (cls?.rflClass !== GROUND_OBJECT_RFL || !cls.model || !ow || lengths.has(cls)) continue;
+                    if (pcFieldNumber(pc, o, 'Push Over Mode') !== STRUCK_PUSH_OVER_MODE) continue;
+                    const m = await builder.readPcModel(ow, cls.model.db, cls.model.id);
+                    const box = m ? modelBoxOf(m.positions) : null;
+                    if (box) lengths.set(cls, box.max[1]);
+                }
+                const sign = dbgEnv0['OOTF_TREE_TURN_SIGN'] === '-1' ? -1 : 1;
+                const list: { t: FallingTree; mover: { db: number; id: number } }[] = [];
+                for (const t of findFallingTrees(pc, (c) => lengths.get(c))) {
+                    const table = pc.classes.get(t.tree.dbIndex)!;
+                    const id = freeClassId(table);
+                    const cls = fallingTreeMoverClass(t, id, sign);
+                    table.set(id, cls);
+                    const ow = owner(pc, t.tree.dbIndex);
+                    if (ow) {
+                        ownerOf.set(cls, ow);
+                        ownedClasses.set(ownedClassKey(ow, id), cls);
+                    }
+                    used.set(`${pc.path}|${t.tree.dbIndex}:${id}`, { db: t.tree.dbIndex, id, cls, pc });
+                    list.push({ t, mover: { db: t.tree.dbIndex, id } });
+                    log(
+                        `falling tree ${pc.path}: ${t.tree.id} "${t.cls.name.trim()}" falls toward model ${t.toward} (world ${t.dir.map((v) => v.toFixed(2)).join(', ')}), ${Math.round(t.length)} long`,
+                    );
+                }
+                if (list.length) fallingTrees.set(pc, list);
+            });
     // Pressure plates and the blocks Rynn pushes onto them (ootfpush.ts). Every plate becomes a native Pressure Plate
     // (ootfclass.ts) and its model gets a box the plate can be pressed through. A push block stays a Rigid Body with its PC
     // sphere bounds; one that stands on a model floor gets a terrain layer at the height of that floor, because the PS2
@@ -2388,6 +2432,26 @@ export async function convertOotfLevels(
                         ? { mapPixel: (x: number, z: number) => mapPixelOf(levelMaps.get(pc.path)!.spec, x, z) }
                         : {}),
                 });
+                const trees = (fallingTrees.get(pc) ?? []).flatMap(({ t, mover }) => {
+                    const target = resolverFor(pc)?.(mover.db, mover.id);
+                    if (!target)
+                        res.warnings.push(`${title}: falling tree ${t.tree.id}: its Mover class was not planned`);
+                    return target ? [{ t, mover: { dbIndex: target.dbIndex, classId: target.classId } }] : [];
+                });
+                if (trees.length) {
+                    // The level's own converted Visibility Toggler (engine 121) shows each hidden falling Mover.
+                    const togglerSrc = pc.list.objects.find(
+                        (x) => pc.classes.get(x.dbIndex)?.get(x.classId)?.rflClass === 121,
+                    );
+                    const togglerObj = togglerSrc ? lvl.objects.objects.find((x) => x.id === togglerSrc.id) : undefined;
+                    const n = placeFallingTrees(lvl.objects, trees, (o) => ps2Class(o)?.fields, res.warnings, title, {
+                        visible: dbgEnv0['OOTF_TREE_VISIBLE'] === '1',
+                        ...(togglerObj
+                            ? { toggler: { dbIndex: togglerObj.dbIndex, classId: togglerObj.classId } }
+                            : {}),
+                    });
+                    console.warn(`puzzles ${title}: ${n} falling tree(s)`);
+                }
                 if (
                     rep.plates ||
                     rep.nativePlates ||
