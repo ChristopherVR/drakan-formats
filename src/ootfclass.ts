@@ -586,18 +586,42 @@ function isValueField(type: number): boolean {
 const sameType = (a: number, b: number): boolean =>
     fieldBase(a) === fieldBase(b) && fieldIsArray(a) === fieldIsArray(b);
 
-/** A converted clip id of the PC class to stand in for template clips that do not fit the converted rig: Base Idle, else the lowest. */
+/** The converted clip of the PC class's scalar animation field `name`, or undefined. */
+function pcClip(
+    pf: readonly { name: string; type: number }[],
+    data: readonly number[],
+    animMap: ReadonlyMap<number, number>,
+    name: string,
+): number | undefined {
+    const i = pf.findIndex(
+        (f) => f.name.trim() === name && fieldBase(f.type) === FIELD_ANIMATION && !fieldIsArray(f.type),
+    );
+    const id = i >= 0 ? (data[i] ?? 0) & 0xffff : 0;
+    return id ? animMap.get(id) : undefined;
+}
+
+/**
+ * A converted clip id of the PC class to stand in for template clips that do not fit the converted rig: Base Idle, else
+ * Hover (a flier: the Succubus and the Queen have no Base Idle, and the lowest clip was their wing slash or spell attack,
+ * which the flying creature template then looped on the ground), else the lowest.
+ */
 function animFallback(
     pf: readonly { name: string; type: number }[],
     data: readonly number[],
     animMap: ReadonlyMap<number, number>,
 ): number | undefined {
-    const idle = pf.findIndex(
-        (f) => f.name === 'Base Idle' && fieldBase(f.type) === FIELD_ANIMATION && !fieldIsArray(f.type),
+    return (
+        pcClip(pf, data, animMap, 'Base Idle') ??
+        pcClip(pf, data, animMap, 'Hover') ??
+        [...animMap.values()].sort((a, b) => a - b)[0]
     );
-    const own = idle >= 0 ? animMap.get((data[idle] ?? 0) & 0xffff) : undefined;
-    return own ?? [...animMap.values()].sort((a, b) => a - b)[0];
 }
+
+/**
+ * Template clip fields that a PC class names differently: the PS2 flying creature (30) calls the clip of a landed flier
+ * "Idle On Ground", the PC Succubus (100) calls it "Idle". Tried before the fallback above.
+ */
+const FOREIGN_ANIM_ALIASES: ReadonlyMap<string, readonly string[]> = new Map([['idle on ground', ['Idle']]]);
 
 /** Template clip fields that start a creature's death (the PS2 engine picks one by how the creature dies). */
 const DEATH_CLIP_FIELDS = ['death', 'forward death', 'sleep death', 'idle death'] as const;
@@ -820,7 +844,10 @@ export function mergeDefaults(
         const dying = deathFallback(pf, pc.data ?? [], animMap);
         for (const j of foreignAnim) {
             const isDeath = (DEATH_CLIP_FIELDS as readonly string[]).includes(tf[j]!.name.trim().toLowerCase());
-            const fallback = (isDeath ? dying : undefined) ?? idleFallback;
+            const alias = FOREIGN_ANIM_ALIASES.get(tf[j]!.name.trim().toLowerCase())
+                ?.map((n) => pcClip(pf, pc.data ?? [], animMap, n))
+                .find((n) => n !== undefined);
+            const fallback = alias ?? (isDeath ? dying : undefined) ?? idleFallback;
             if (fallback === undefined) continue;
             const v = out[j] ?? 0;
             if (fieldIsIndirect(tf[j]!.type)) {

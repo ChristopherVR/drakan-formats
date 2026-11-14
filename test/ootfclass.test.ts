@@ -204,6 +204,57 @@ describe('ootfclass', () => {
         expect(noDeath.data.slice(noDeath.data[3]! & 0xffff, (noDeath.data[3]! & 0xffff) + 1)).toEqual([120]);
     });
 
+    it('gives a converted flier its own idle on the ground and its hover, not its first attack clip', () => {
+        const T_ANIM = 9;
+        // PC Succubus (100): Hover 808, Idle 809, Wing slash 798 (the lowest id); no Base Idle, no Idle On Ground.
+        const pc = cls(
+            1,
+            'Succubus',
+            100,
+            [
+                [T_ANIM, 'Hover'],
+                [T_ANIM, 'Idle'],
+                [T_ANIM, 'Ground Attack'],
+            ],
+            [808, 809, 798],
+        );
+        // PS2 flying creature template (30): its own rig's clips in Hover, Idle On Ground and Take Off.
+        const tpl = cls(
+            2,
+            'Gryphon',
+            30,
+            [
+                [T_ANIM, 'Hover'],
+                [T_ANIM, 'Idle On Ground'],
+                [T_ANIM, 'Take Off'],
+            ],
+            [3812, 3823, 3819],
+        );
+        const map = new Map([
+            [798, 7013],
+            [808, 7027],
+            [809, 7021],
+        ]);
+        // Idle On Ground takes the PC Idle; Take Off (no PC field) takes the Hover, not the wing slash.
+        expect(mergeDefaults(pc, tpl, undefined, map).data).toEqual([7027, 7021, 7027]);
+        // The Queen (101) has neither Idle nor Take Off: both get her Hover.
+        const queen = cls(
+            1,
+            'Queen',
+            101,
+            [
+                [T_ANIM, 'Hover'],
+                [T_ANIM, 'Launch Weapon'],
+            ],
+            [1789, 816],
+        );
+        const qmap = new Map([
+            [816, 7187],
+            [1789, 7205],
+        ]);
+        expect(mergeDefaults(queen, tpl, undefined, qmap).data).toEqual([7205, 7205, 7205]);
+    });
+
     it('uses a complete rigid native Bow template only for a source model known to be rigid', () => {
         const source = {
             ...cls(1, 'Original rigid Bow', 79, [[T_FLOAT, 'Rate of Fire']], [f32(1.75)]),
