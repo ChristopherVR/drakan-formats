@@ -10,11 +10,20 @@
 // keeps the subtitles of its own speech, as timed pages (`subtitleClipText`). The runtime shows them while the clip plays,
 // whichever actor plays it (the engine itself only subtitles actors with a speech controller, not a scene's camera or
 // narrator). The pack also carries the lines it used as `story/subtitles.json` for other engines.
+//
+// Only dialogue and narration are subtitled. A clip that something in the game plays by itself, outside a scene's sound
+// action (a creature's ambient mumble, pain or attack lists, a waypoint's sound, a pickup), is a bark: Drakan 2 stores such
+// voices with an empty subtitle text, and the PC game shows no text at all. A line carries its `kind`; the subtitle tool and
+// the converter mark barks from the PC data (`listObjectSounds`, `classifySubtitleLines`) and a hand-written file can set the
+// kind of any line either way.
 
 import { view } from './bytes.ts';
+import { resourceKind } from './convert.ts';
+import { decodeFieldValue } from './fields.ts';
+import { objectParamSpecs } from './lvl.ts';
 import { parseDbText } from './ootfcontainer.ts';
 import type { PcFileSource } from './pc.ts';
-import { resolvePcPath } from './pc.ts';
+import { loadPcLevel, parsePcOdbClasses, resolvePcPath } from './pc.ts';
 import { parsePcSequence } from './ootfseq.ts';
 import { sdbKey } from './ootfsound.ts';
 import { SSD_SEQUENCE } from './resources.ts';
@@ -30,6 +39,17 @@ export interface SubtitleCue {
     text: string;
 }
 
+/**
+ * What a clip is. `dialogue` and `narration` are subtitled; `bark` (a voice the game plays by itself: idle mumbles, pain,
+ * attack and taunt lists) and `effect` (a scene sound that is not speech: a grunt, a laugh, a roar) are not. A line without a
+ * kind is dialogue.
+ */
+export type SubtitleKind = 'dialogue' | 'narration' | 'bark' | 'effect';
+export const SUBTITLE_KINDS: readonly SubtitleKind[] = ['dialogue', 'narration', 'bark', 'effect'];
+/** Whether a line of this kind is shown. */
+export const isSubtitledKind = (kind: SubtitleKind | undefined): boolean =>
+    kind === undefined || kind === 'dialogue' || kind === 'narration';
+
 /** The text of one voice clip. */
 export interface SubtitleLine {
     /** PC sound bank: install-relative path without `.sdb`, lower case, `/` separators (`sdbKey`). */
@@ -40,6 +60,10 @@ export interface SubtitleLine {
     name?: string;
     /** Clip length in seconds (informational). */
     duration?: number;
+    /** What the clip is (no kind: dialogue). Only dialogue and narration are shown. */
+    kind?: SubtitleKind;
+    /** Why the kind was set (informational, e.g. the class field that plays a bark). */
+    kindReason?: string;
     cues: SubtitleCue[];
 }
 
@@ -52,6 +76,9 @@ export interface SubtitleFile {
 }
 
 export class SubtitleFileError extends Error {}
+
+/** Lines read without cues: they only set a clip's kind and keep the text of an earlier file (`mergeSubtitleFiles`). */
+const kindOnlyLines = new WeakSet<SubtitleLine>();
 
 /** Validate parsed JSON as a subtitle file; throws SubtitleFileError naming the first fault. */
 export function parseSubtitleFile(json: unknown): SubtitleFile {
@@ -66,10 +93,20 @@ export function parseSubtitleFile(json: unknown): SubtitleFile {
     const lines: SubtitleLine[] = [];
     (f['lines'] as unknown[]).forEach((raw, i) => {
         const l = raw as Record<string, unknown>;
-        if (!l || typeof l['bank'] !== 'string' || !Number.isInteger(l['id']) || !Array.isArray(l['cues']))
+        const kind = l?.['kind'];
+        if (kind !== undefined && !SUBTITLE_KINDS.includes(kind as SubtitleKind))
+            return bad(`line ${i}: kind "${String(kind)}" is not one of ${SUBTITLE_KINDS.join(', ')}`);
+        // A line that only sets the kind of a clip (a hand-written list of barks) needs no cues.
+        const kindOnly = kind !== undefined && l?.['cues'] === undefined;
+        if (
+            !l ||
+            typeof l['bank'] !== 'string' ||
+            !Number.isInteger(l['id']) ||
+            !(kindOnly || Array.isArray(l['cues']))
+        )
             return bad(`line ${i}: needs bank, id and cues`);
         const cues: SubtitleCue[] = [];
-        for (const rc of l['cues'] as unknown[]) {
+        for (const rc of kindOnly ? [] : (l['cues'] as unknown[])) {
             const c = rc as Record<string, unknown>;
             if (!c || typeof c['text'] !== 'string' || !Number.isFinite(c['start']) || !Number.isFinite(c['end']))
                 return bad(`line ${i}: a cue needs start, end and text`);
@@ -79,6 +116,9 @@ export function parseSubtitleFile(json: unknown): SubtitleFile {
         const line: SubtitleLine = { bank: sdbKey(l['bank']), id: l['id'] as number, cues };
         if (typeof l['name'] === 'string') line.name = l['name'];
         if (Number.isFinite(l['duration'])) line.duration = l['duration'] as number;
+        if (kind !== undefined) line.kind = kind as SubtitleKind;
+        if (typeof l['kindReason'] === 'string') line.kindReason = l['kindReason'];
+        if (kindOnly) kindOnlyLines.add(line);
         lines.push(line);
     });
     return {
@@ -92,11 +132,28 @@ export function parseSubtitleFile(json: unknown): SubtitleFile {
 /**
  * Several subtitle files as one: a line of a later file replaces the same clip's line of an earlier one, also when the
  * later line is empty (a clip the author wants without a subtitle). So a hand-corrected file listed after a fresh
- * transcription wins. The language is the last file's.
+ * transcription wins. A later line without a `kind` keeps the earlier line's kind (a text correction does not change what
+ * the clip is); a later line with a kind and no cues only sets the kind and keeps the earlier text. The language is the
+ * last file's.
  */
 export function mergeSubtitleFiles(files: readonly SubtitleFile[]): SubtitleFile {
     const byKey = new Map<string, SubtitleLine>();
-    for (const f of files) for (const l of f.lines) byKey.set(`${l.bank}#${l.id}`, l);
+    for (const f of files)
+        for (const l of f.lines) {
+            const key = `${l.bank}#${l.id}`;
+            const before = byKey.get(key);
+            if (before && kindOnlyLines.has(l)) {
+                const merged: SubtitleLine = { ...before, kind: l.kind! };
+                if (l.kindReason !== undefined) merged.kindReason = l.kindReason;
+                else delete merged.kindReason;
+                if (kindOnlyLines.has(before)) kindOnlyLines.add(merged);
+                byKey.set(key, merged);
+            } else if (before && l.kind === undefined && before.kind !== undefined) {
+                const merged: SubtitleLine = { ...l, kind: before.kind };
+                if (before.kindReason !== undefined) merged.kindReason = before.kindReason;
+                byKey.set(key, merged);
+            } else byKey.set(key, l);
+        }
     return {
         format: SUBTITLE_FORMAT,
         version: SUBTITLE_VERSION,
@@ -182,9 +239,16 @@ export class SubtitleTable {
     private readonly byKey = new Map<string, SubtitleLine>();
     readonly language: string;
 
+    /** Lines that have text but are not shown because of their kind (barks, effects). */
+    readonly withheld: SubtitleLine[] = [];
+
     constructor(file: SubtitleFile) {
         this.language = file.language;
-        for (const l of file.lines) if (l.cues.some((c) => plainSubtitleText(c.text))) this.byKey.set(`${l.bank}#${l.id}`, l);
+        for (const l of file.lines) {
+            if (!l.cues.some((c) => plainSubtitleText(c.text))) continue;
+            if (isSubtitledKind(l.kind)) this.byKey.set(`${l.bank}#${l.id}`, l);
+            else this.withheld.push(l);
+        }
     }
 
     get size(): number {
@@ -263,7 +327,9 @@ export async function listSequenceSounds(src: PcFileSource): Promise<SequenceSou
                     const key = `${sdbKey(spelled)}#${ref & 0xffff}`;
                     const s =
                         out.get(key) ??
-                        out.set(key, { bank: sdbKey(spelled), bankPath: spelled, id: ref & 0xffff, uses: [] }).get(key)!;
+                        out
+                            .set(key, { bank: sdbKey(spelled), bankPath: spelled, id: ref & 0xffff, uses: [] })
+                            .get(key)!;
                     s.uses.push({
                         ssd: owner,
                         sequenceId: e.id,
@@ -277,6 +343,121 @@ export async function listSequenceSounds(src: PcFileSource): Promise<SequenceSou
         }
     }
     return [...out.values()].sort((a, b) => (a.bank === b.bank ? a.id - b.id : a.bank < b.bank ? -1 : 1));
+}
+
+/** One place in the PC data that plays a sound by itself, outside a sequence. */
+export interface ObjectSoundUse {
+    /** Install-relative ODB (class default) or level (object parameter) path, without extension. */
+    owner: string;
+    className: string;
+    field: string;
+    /** Object id in the level (object parameters only). */
+    object?: number;
+}
+
+export interface ObjectSound {
+    /** `sdbKey` of the bank. */
+    bank: string;
+    id: number;
+    uses: ObjectSoundUse[];
+}
+
+/**
+ * Every sound that a class default or a level object's parameter names (a sound field of any kind): what the game plays by
+ * itself, outside a scene's sound action. Refs are `(db << 16) | id`, `db` an index into the owning ODB's `.db` list.
+ */
+export async function listObjectSounds(src: PcFileSource): Promise<ObjectSound[]> {
+    const paths = await src.list();
+    const byLower = new Map(paths.map((p) => [p.toLowerCase(), p]));
+    const deps = new Map<string, Map<number, string>>();
+    const depsOf = async (owner: string): Promise<Map<number, string>> => {
+        let d = deps.get(owner.toLowerCase());
+        if (!d) {
+            const t = await src.read(`${owner}.db`);
+            d = t ? parseDbText(new TextDecoder('latin1').decode(t)) : new Map<number, string>();
+            deps.set(owner.toLowerCase(), d);
+        }
+        return d;
+    };
+    const out = new Map<string, ObjectSound>();
+    const add = async (dbOwner: string, ref: number, use: ObjectSoundUse): Promise<void> => {
+        const db = ref >>> 16;
+        const rel = db === 0 ? null : (await depsOf(dbOwner)).get(db);
+        const bankPath =
+            db === 0 ? dbOwner : rel ? resolvePcPath(dbOwner.split('/').slice(0, -1).join('/'), rel) : null;
+        if (!bankPath) return;
+        const real = byLower.get(`${bankPath}.sdb`.toLowerCase());
+        const bank = sdbKey(real ? real.replace(/\.sdb$/i, '') : bankPath);
+        const key = `${bank}#${ref & 0xffff}`;
+        const s = out.get(key) ?? out.set(key, { bank, id: ref & 0xffff, uses: [] }).get(key)!;
+        s.uses.push(use);
+    };
+    const soundValues = (type: number, value: unknown): number[] =>
+        resourceKind(type) !== 'sound'
+            ? []
+            : (Array.isArray(value) ? value : [value]).filter((v): v is number => typeof v === 'number' && v !== 0);
+    for (const path of paths.filter((p) => /\.odb$/i.test(p)).sort()) {
+        const bytes = await src.read(path);
+        if (!bytes) continue;
+        const owner = path.replace(/\.odb$/i, '');
+        let classes;
+        try {
+            classes = await parsePcOdbClasses(await SrscReader.fromBytes(bytes));
+        } catch {
+            continue; // an unreadable database is reported by the converter itself
+        }
+        for (const cls of classes.values())
+            for (const [i, f] of (cls.fields ?? []).entries())
+                for (const v of soundValues(f.type, decodeFieldValue(f.type, cls.data?.[i] ?? 0, cls.data ?? [])))
+                    await add(owner, v >>> 0, { owner, className: cls.name, field: f.name });
+    }
+    for (const path of paths.filter((p) => /\.lvl$/i.test(p)).sort()) {
+        let pc;
+        try {
+            pc = await loadPcLevel(src, path);
+        } catch {
+            continue;
+        }
+        const dir = path.split('/').slice(0, -1).join('/');
+        for (const o of pc.list.objects) {
+            const dep = pc.header.dependencies.find((d) => d.dbIndex === o.dbIndex);
+            if (!dep) continue;
+            const owner = resolvePcPath(dir, dep.path.text);
+            const className = pc.classes.get(o.dbIndex)?.get(o.classId)?.name ?? '';
+            for (const sp of objectParamSpecs(o))
+                for (const v of soundValues(sp.type, sp.value))
+                    await add(owner, v >>> 0, {
+                        owner: path.replace(/\.lvl$/i, ''),
+                        className,
+                        field: sp.name,
+                        object: o.id,
+                    });
+        }
+    }
+    return [...out.values()].sort((a, b) => (a.bank === b.bank ? a.id - b.id : a.bank < b.bank ? -1 : 1));
+}
+
+/** Text of one use, for `kindReason`. */
+export const objectSoundUseText = (u: ObjectSoundUse): string =>
+    `${u.className} . ${u.field}${u.object !== undefined ? ` (object ${u.object} of ${u.owner})` : ''}`;
+
+/**
+ * Give every line without a kind its kind from the PC data: a clip that a class or an object plays by itself is a bark,
+ * everything else stays dialogue. A kind already in the file (the tool's or a hand-written one) is kept. Returns the
+ * lines that were marked.
+ */
+export function classifySubtitleLines(file: SubtitleFile, objectSounds: readonly ObjectSound[]): SubtitleLine[] {
+    const byKey = new Map(objectSounds.map((s) => [`${s.bank}#${s.id}`, s]));
+    const marked: SubtitleLine[] = [];
+    file.lines = file.lines.map((l) => {
+        const s = l.kind === undefined ? byKey.get(`${l.bank}#${l.id}`) : undefined;
+        if (!s?.uses.length) return l;
+        const out: SubtitleLine = { ...l, kind: 'bark', kindReason: `played by ${objectSoundUseText(s.uses[0]!)}` };
+        if (kindOnlyLines.has(l)) kindOnlyLines.add(out);
+        marked.push(out);
+        return out;
+    });
+    return marked;
 }
 
 /** Mono 16-bit PCM as a RIFF WAVE file (for the transcription tool). */
