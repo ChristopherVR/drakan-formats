@@ -1105,7 +1105,12 @@ export async function convertOotfLevels(
                 if (propRows.has(modelKey(u.cls.name))) {
                     const pcm = await builder.readPcModel(ow, m.db, m.id);
                     const row = pcm ? modelSwap.prop(u.cls.name, pcm.name) : null;
-                    if (pcm && row) {
+                    if (pcm && row?.refine) {
+                        if ((await builder.refineDrawing(ow, m.db, m.id, row.refine)) !== null) {
+                            modelSwapsUsed.set(modelKey(u.cls.name), { ...row, ootf: u.cls.name.trim() });
+                            continue;
+                        }
+                    } else if (pcm && row) {
                         const disc = await discModelOf(row);
                         const p = pcm.positions;
                         const box = { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };

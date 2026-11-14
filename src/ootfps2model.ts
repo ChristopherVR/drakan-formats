@@ -56,6 +56,11 @@ export interface Ps2ModelSubstitution {
     pcModel?: string;
     /** Props: stretch the disc model onto the OotF model's box (a remake a little larger or smaller than the original). */
     fit?: boolean;
+    /**
+     * Props without a Drakan 2 model: draw the OotF model itself refined (`normals`, `pn`, `pn2`, see ootfdiscmodel.ts
+     * `refineMesh`) while it collides as converted. `ps2` and `odb` are unused then.
+     */
+    refine?: 'normals' | 'pn' | 'pn2' | 'round';
 }
 
 const tock = (pc: string, ps2: string, label: string): Ps2ModelSubstitution => ({
@@ -142,6 +147,21 @@ const SKELETON_WHY =
     'Drakan 2 ships a remade Mountain World skeleton of the same name, pose, size and origin (about 1,000 triangles against 140).';
 const BRIDGE_WHY =
     'The Drakan 2 Restoration rope bridge span has the same length and height as the OotF span but a walkway three times as wide; stretched onto the OotF span, Rynn walks on the OotF planks.';
+/** Bodies on spikes, in cages and hanging: Drakan 2 has no model of them, so the OotF mesh is drawn refined. */
+const BODY_REFINE: readonly [string, string, string][] = [
+    ['Spiked Body', 'Body on Spike02(h)', 'Body impaled on a spike'],
+    ['Spiked Torso', 'Torso on Spike01(h)', 'Torso on a spike'],
+    ['Hanging torso', 'HangingTorso2(H)', 'Hanging torso'],
+    ['Cage Body(L)', 'Cage02wPerson(H)', 'Body in a cage'],
+    ['Hanging Guy', 'HangingBody2(H)', 'Hanged man'],
+    ['Torture Gyro Victim', 'rackboy', 'Torture wheel victim'],
+    ['deadpose1', 'deadpose01', 'Dead villager'],
+    ['deadpose2', 'deadpose02', 'Dead villager'],
+    ['deadpose3', 'deadpose03', 'Dead villager'],
+    ['dead04', 'dead04', 'Dead villager'],
+];
+const BODY_WHY =
+    'No Drakan 2 model of a body on a spike, in a cage or hanging exists. Turned on, the OotF mesh is drawn refined (smooth normals, one curved subdivision step that also rounds box-like limbs; the texture layout is kept) while it collides as converted. Off: in Wartok Canyons the refined bodies look nearly the same as the OotF ones (journal 2026-11-14/ootf-d2-models.md).';
 const KEG_WHY =
     'The Drakan 2 Surdana wine keg is a remake of the same keg (945 triangles against 72) with the same origin; it is 0.1 units deeper, so it is stretched onto the OotF keg, and Rynn collides with the OotF keg.';
 
@@ -248,6 +268,16 @@ export const DEFAULT_PS2_MODEL_SUBSTITUTIONS: readonly Ps2ModelSubstitution[] = 
         true,
         true,
     ),
+    ...BODY_REFINE.map(([pc, pcModel, label]) => ({
+        category: 'props' as const,
+        ootf: pc,
+        pcModel,
+        ps2: '(refined OotF model)',
+        label,
+        why: BODY_WHY,
+        refine: 'round' as const,
+        defaultOff: true,
+    })),
     prop('Wine Keg', 'WineBarrel01(H)', 'MOUNTAON', 'Wine Keg (Surdana)', 'Wine keg', KEG_WHY, false, true),
     prop('winecask', 'WineBarrel01(H)', 'MOUNTAON', 'Wine Keg (Surdana)', 'Wine keg', KEG_WHY, false, true),
     flame('Sconce Flame', 'Wall sconce flame'), // also "SconceFlame" (names compare without spaces)
@@ -316,6 +346,24 @@ export function ps2ModelSwapFromEdits(edits: unknown, base: Ps2ModelSwapOptions 
         );
         const category = row.category ?? known?.category ?? 'weapons';
         if (!CATEGORIES.includes(category)) throw new Ps2ModelMapError(`row ${i + 1}: unknown category ${category}`);
+        const refine = (row as { refine?: unknown }).refine;
+        if (known?.refine) {
+            // a refined-body row: turned on, optionally with another refinement
+            if (
+                refine !== undefined &&
+                refine !== 'normals' &&
+                refine !== 'pn' &&
+                refine !== 'pn2' &&
+                refine !== 'round'
+            )
+                throw new Ps2ModelMapError(`row ${i + 1}: "refine" must be normals, pn, pn2 or round`);
+            extra.push({
+                ...known,
+                refine: (refine as Ps2ModelSubstitution['refine']) ?? known.refine,
+                defaultOff: false,
+            });
+            continue;
+        }
         if (known?.defaultOff && modelKey(known.ps2) === modelKey(row.ps2)) {
             on.push(row.ootf); // the table's own row, turned on
             continue;
@@ -418,7 +466,7 @@ export function planPs2Models(o: Ps2ModelSwapOptions = {}): Ps2ModelPlan {
         },
         prop: (name, pcModelName) => {
             const r = on.get(modelKey(name));
-            if (r?.category !== 'props' || !r.odb) return null;
+            if (r?.category !== 'props' || (!r.odb && !r.refine)) return null;
             return !r.pcModel || modelKey(r.pcModel) === modelKey(pcModelName) ? r : null;
         },
         flame: (name) => {

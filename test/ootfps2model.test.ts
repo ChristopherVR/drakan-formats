@@ -18,6 +18,7 @@ import {
     boxOf,
     combineDrawing,
     fitVertices,
+    refineMesh,
     readVertexRecord,
     writeVertexRecord,
 } from '../src/ootfdiscmodel.ts';
@@ -32,7 +33,7 @@ describe('Drakan 2 model table', () => {
             seen.add(modelKey(r.ootf));
             expect(['enemies', 'weapons', 'props', 'flames', 'effects']).toContain(r.category);
             if (r.category === 'effects') expect(r.odb && r.fields?.length).toBeTruthy();
-            if (r.category === 'props') expect(r.odb && r.pcModel).toBeTruthy();
+            if (r.category === 'props') expect(r.pcModel && (r.odb || r.refine)).toBeTruthy();
             if (r.category === 'flames') expect(r.odb).toBeTruthy();
             expect(r.why.length).toBeGreaterThan(10);
             expect(`${r.label} ${r.why}`).not.toMatch(/—/);
@@ -305,5 +306,65 @@ describe('Drakan 2 effects', () => {
             ]),
         );
         expect(user.effect('Crate')?.fields).toEqual(['Explosion Generator']);
+    });
+});
+
+describe('refined OotF prop meshes', () => {
+    // a low "tent" of two triangles meeting at a soft edge, with open borders
+    const tent = {
+        positions: new Float32Array([0, 0, 0, 2, 0, 0, 1, 0.2, 1, 1, 0.2, -1]),
+        normals: new Int8Array([0, 127, 0, 0, 127, 0, 0, 127, 0, 0, 127, 0]),
+        polygons: [
+            { flags: 0, texture: 0, indices: [0, 2, 1], uvs: [0, 0, 0.5, 1, 1, 0] },
+            { flags: 0, texture: 1, indices: [0, 1, 3], uvs: [0, 0, 1, 0, 0.5, 1] },
+        ],
+    };
+    it('keeps the triangles and corner UVs with smooth normals only', () => {
+        const r = refineMesh(tent, 'normals');
+        expect(r.polygons.length).toBe(2);
+        expect(r.polygons.map((p) => p.uvs)).toEqual(tent.polygons.map((p) => p.uvs));
+        expect(r.polygons.map((p) => p.texture)).toEqual([0, 1]);
+    });
+    it('splits every triangle in four, keeps the original corners and bends soft edges only', () => {
+        const r = refineMesh(tent, 'pn');
+        expect(r.polygons.length).toBe(8);
+        const pts = Array.from({ length: r.positions.length / 3 }, (_, i) =>
+            Array.from(r.positions.slice(i * 3, i * 3 + 3)),
+        );
+        for (const c of [
+            [0, 0, 0],
+            [2, 0, 0],
+            [1, 0.2, 1],
+            [1, 0.2, -1],
+        ].map((v) => v.map((x) => Math.fround(x))))
+            expect(pts.some((p) => p.every((v, k) => Math.abs(v - c[k]!) < 1e-6))).toBe(true);
+        // a soft edge whose end normals are square to it stays straight
+        expect(pts.some((p) => Math.abs(p[0]! - 1) < 1e-6 && Math.abs(p[1]!) < 1e-6 && Math.abs(p[2]!) < 1e-6)).toBe(
+            true,
+        );
+        // a shallow cone: the soft edges from the apex bend towards the curved surface
+        const cone = {
+            positions: new Float32Array([0, 0.3, 0, 1, 0, 1, 1, 0, -1, -1, 0, -1, -1, 0, 1]),
+            normals: new Int8Array(15).fill(0).map((_, i) => (i % 3 === 1 ? 127 : 0)),
+            polygons: [
+                [0, 1, 2],
+                [0, 2, 3],
+                [0, 3, 4],
+                [0, 4, 1],
+            ].map((v) => ({ flags: 0, texture: 0, indices: v, uvs: [0, 0, 1, 0, 0, 1] })),
+        };
+        const c = refineMesh(cone, 'pn');
+        const cp = Array.from({ length: c.positions.length / 3 }, (_, i) =>
+            Array.from(c.positions.slice(i * 3, i * 3 + 3)),
+        );
+        const m = cp.find((p) => p[0]! > 0.3 && p[0]! < 0.7 && Math.abs(p[0]! - p[2]!) < 1e-6)!;
+        expect(Math.abs(m[1]! - 0.15)).toBeGreaterThan(1e-3);
+        // a border edge stays straight
+        expect(
+            pts.some(
+                (p) => Math.abs(p[0]! - 1.5) < 1e-6 && Math.abs(p[1]! - 0.1) < 1e-6 && Math.abs(p[2]! - 0.5) < 1e-6,
+            ),
+        ).toBe(true);
+        expect(refineMesh(tent, 'pn2').polygons.length).toBe(32);
     });
 });

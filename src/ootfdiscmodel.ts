@@ -191,3 +191,197 @@ export function appendTextures(name: Uint8Array, extra: readonly number[]): { re
     });
     return { record: out, before: count };
 }
+
+/**
+ * How an OotF prop mesh is refined for drawing (`refineMesh`): `normals` = smooth shading normals only (welded across UV
+ * seams, hard edges over 60 degrees kept); `pn` = also one curved subdivision step (every triangle split in four, the new
+ * edge points on the curved surface the normals describe, as PN triangles; edges along hard creases and open borders stay
+ * straight, so no cracks open); `pn2` = two steps; `round` = one step that also rounds edges up to 100 degrees (box-like
+ * limbs become rounded).
+ */
+export type RefineMode = 'normals' | 'pn' | 'pn2' | 'round';
+
+interface RMesh {
+    positions: number[];
+    normals: number[];
+    tris: { v: [number, number, number]; uv: number[]; texture: number; flags: number }[];
+}
+
+const sub3 = (a: number[], b: number[]) => [a[0]! - b[0]!, a[1]! - b[1]!, a[2]! - b[2]!];
+const dot3 = (a: number[], b: number[]) => a[0]! * b[0]! + a[1]! * b[1]! + a[2]! * b[2]!;
+const cross3 = (a: number[], b: number[]) => [
+    a[1]! * b[2]! - a[2]! * b[1]!,
+    a[2]! * b[0]! - a[0]! * b[2]!,
+    a[0]! * b[1]! - a[1]! * b[0]!,
+];
+const unit = (a: number[]) => {
+    const l = Math.hypot(a[0]!, a[1]!, a[2]!);
+    return l > 0 ? [a[0]! / l, a[1]! / l, a[2]! / l] : [0, 1, 0];
+};
+const CREASE = Math.cos((60 * Math.PI) / 180);
+
+/** Shading normals per corner, smooth across UV seams and soft edges; a vertex per (position, normal). */
+function smoothMesh(m: RMesh, crease = CREASE): RMesh {
+    const P = (i: number) => m.positions.slice(i * 3, i * 3 + 3);
+    const key = (i: number) =>
+        P(i)
+            .map((v) => Math.round(v * 1e5))
+            .join(',');
+    const group = m.positions.length / 3 ? Array.from({ length: m.positions.length / 3 }, (_, i) => key(i)) : [];
+    const faceN = m.tris.map((t) => {
+        let n = cross3(sub3(P(t.v[1]), P(t.v[0])), sub3(P(t.v[2]), P(t.v[0])));
+        const orig = [0, 1, 2].map((k) => t.v.reduce((s, v) => s + m.normals[v * 3 + k]!, 0));
+        if (dot3(n, orig) < 0) n = n.map((x) => -x); // follow the converted normals' facing
+        return { n, u: unit(n) };
+    });
+    const byGroup = new Map<string, number[]>();
+    m.tris.forEach((t, f) =>
+        t.v.forEach((v) => (byGroup.get(group[v]!) ?? byGroup.set(group[v]!, []).get(group[v]!)!).push(f)),
+    );
+    const out: RMesh = { positions: [], normals: [], tris: [] };
+    const vid = new Map<string, number>();
+    m.tris.forEach((t, f) => {
+        const v = t.v.map((i) => {
+            const acc = [0, 0, 0];
+            for (const g of byGroup.get(group[i]!)!)
+                if (dot3(faceN[g]!.u, faceN[f]!.u) >= crease)
+                    for (let k = 0; k < 3; k++) acc[k] = acc[k]! + faceN[g]!.n[k]!;
+            const n = unit(acc);
+            const k = `${group[i]}|${n.map((x) => Math.round(x * 127)).join(',')}`;
+            let id = vid.get(k);
+            if (id === undefined) {
+                id = out.positions.length / 3;
+                vid.set(k, id);
+                out.positions.push(...P(i));
+                out.normals.push(...n);
+            }
+            return id;
+        }) as [number, number, number];
+        out.tris.push({ ...t, v });
+    });
+    return out;
+}
+
+/** One curved subdivision step (PN-triangle edge points on soft edges, straight ones on creases and borders). */
+function pnStep(m: RMesh, outward: number): RMesh {
+    const P = (i: number) => m.positions.slice(i * 3, i * 3 + 3);
+    const N = (i: number) => m.normals.slice(i * 3, i * 3 + 3).map((x) => x * outward);
+    const pk = (i: number) =>
+        P(i)
+            .map((v) => Math.round(v * 1e5))
+            .join(',');
+    const ek = (a: number, b: number) => [pk(a), pk(b)].sort().join('|');
+    // An edge is soft when every triangle on it has the same two corner normals (no crease, not a border).
+    const edgeUse = new Map<string, { n: string[]; count: number }>();
+    for (const t of m.tris)
+        for (let e = 0; e < 3; e++) {
+            const a = t.v[e]!,
+                b = t.v[(e + 1) % 3]!;
+            const k = ek(a, b);
+            const sig = [
+                pk(a) +
+                    N(a)
+                        .map((x) => x.toFixed(3))
+                        .join(),
+                pk(b) +
+                    N(b)
+                        .map((x) => x.toFixed(3))
+                        .join(),
+            ]
+                .sort()
+                .join('/');
+            const u = edgeUse.get(k) ?? edgeUse.set(k, { n: [], count: 0 }).get(k)!;
+            u.count++;
+            if (!u.n.includes(sig)) u.n.push(sig);
+        }
+    const out: RMesh = { positions: [...m.positions], normals: [...m.normals], tris: [] };
+    const mids = new Map<string, number>();
+    const mid = (a: number, b: number): number => {
+        const k = `${a}-${b}`;
+        const known = mids.get(k) ?? mids.get(`${b}-${a}`);
+        if (known !== undefined) return known;
+        const pa = P(a),
+            pb = P(b),
+            na = N(a),
+            nb = N(b);
+        const u = edgeUse.get(ek(a, b))!;
+        let p = [0, 1, 2].map((i) => (pa[i]! + pb[i]!) / 2);
+        if (u.count === 2 && u.n.length === 1) {
+            const d = sub3(pb, pa);
+            const wa = dot3(d, na),
+                wb = -dot3(d, nb);
+            const b1 = [0, 1, 2].map((i) => (2 * pa[i]! + pb[i]! - wa * na[i]!) / 3);
+            const b2 = [0, 1, 2].map((i) => (2 * pb[i]! + pa[i]! - wb * nb[i]!) / 3);
+            p = [0, 1, 2].map((i) => (pa[i]! + 3 * b1[i]! + 3 * b2[i]! + pb[i]!) / 8);
+        }
+        const id = out.positions.length / 3;
+        out.positions.push(...p);
+        out.normals.push(...unit([0, 1, 2].map((i) => (na[i]! + nb[i]!) * outward)));
+        mids.set(k, id);
+        return id;
+    };
+    for (const t of m.tris) {
+        const [a, b, c] = t.v;
+        const ab = mid(a, b),
+            bc = mid(b, c),
+            ca = mid(c, a);
+        const uv = (i: number) => [t.uv[i * 2]!, t.uv[i * 2 + 1]!];
+        const avg = (i: number, j: number) => [
+            (t.uv[i * 2]! + t.uv[j * 2]!) / 2,
+            (t.uv[i * 2 + 1]! + t.uv[j * 2 + 1]!) / 2,
+        ];
+        const tri = (v: [number, number, number], u: number[][]) =>
+            out.tris.push({ v, uv: u.flat(), texture: t.texture, flags: t.flags });
+        tri([a, ab, ca], [uv(0), avg(0, 1), avg(2, 0)]);
+        tri([ab, b, bc], [avg(0, 1), uv(1), avg(1, 2)]);
+        tri([ca, bc, c], [avg(2, 0), avg(1, 2), uv(2)]);
+        tri([ab, bc, ca], [avg(0, 1), avg(1, 2), avg(2, 0)]);
+    }
+    return out;
+}
+
+/**
+ * A refined copy of a converted (neutral) model for drawing: polygons split into triangles, shading normals smoothed, and
+ * for `pn` / `pn2` curved subdivision. UVs are per corner, so the seams of the OotF texture layouts stay where they are.
+ */
+export function refineMesh<
+    M extends {
+        positions: Float32Array;
+        normals: Int8Array;
+        polygons: { flags: number; texture: number; indices: number[]; uvs: number[] }[];
+    },
+>(m: M, mode: RefineMode): M {
+    let r: RMesh = {
+        positions: Array.from(m.positions),
+        normals: Array.from(m.normals, (x) => x / 127),
+        tris: [],
+    };
+    for (const p of m.polygons)
+        for (let k = 1; k + 1 < p.indices.length; k++)
+            r.tris.push({
+                v: [p.indices[0]!, p.indices[k]!, p.indices[k + 1]!],
+                uv: [p.uvs[0]!, p.uvs[1]!, p.uvs[k * 2]!, p.uvs[k * 2 + 1]!, p.uvs[k * 2 + 2]!, p.uvs[k * 2 + 3]!],
+                texture: p.texture,
+                flags: p.flags,
+            });
+    r = smoothMesh(r, mode === 'round' ? Math.cos((100 * Math.PI) / 180) : CREASE);
+    // The engine's normals may face into the mesh (the converter flips them to the PS2 convention): the curved points must
+    // move outwards, so compare the normals with the direction away from the mesh centre.
+    const n = r.positions.length / 3;
+    const centre = [0, 1, 2].map(
+        (k) => r.positions.filter((_, i) => i % 3 === k).reduce((a, b) => a + b, 0) / (n || 1),
+    );
+    let facing = 0;
+    for (let i = 0; i < n; i++)
+        facing += dot3(r.normals.slice(i * 3, i * 3 + 3), sub3(r.positions.slice(i * 3, i * 3 + 3), centre));
+    const outward = facing < 0 ? -1 : 1;
+    for (let s = 0; s < (mode === 'pn2' ? 2 : mode === 'normals' ? 0 : 1); s++) r = pnStep(r, outward);
+    return {
+        ...m,
+        positions: Float32Array.from(r.positions),
+        normals: Int8Array.from(r.normals, (x) => Math.max(-127, Math.min(127, Math.round(x * 127)))),
+        normalW: undefined,
+        polygons: r.tris.map((t) => ({ flags: t.flags, texture: t.texture, indices: [...t.v], uvs: t.uv })),
+        bounds: null,
+    };
+}

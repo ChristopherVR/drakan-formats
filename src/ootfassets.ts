@@ -38,7 +38,15 @@ import {
 import { type PcFileSource, type PcLevel, resolvePcPath } from './pc.ts';
 import { SrscReader } from './srsc.ts';
 import { TXD_ENTRY_TYPE } from './txd.ts';
-import { appendTextures, boxOf, combineDrawing, fitVertices, readVertexRecord } from './ootfdiscmodel.ts';
+import {
+    type RefineMode,
+    appendTextures,
+    boxOf,
+    combineDrawing,
+    fitVertices,
+    readVertexRecord,
+    refineMesh,
+} from './ootfdiscmodel.ts';
 import { type Ps2SubstituteTexture, substituteMismatch } from './ootfps2tex.ts';
 
 /**
@@ -1121,6 +1129,48 @@ export class OotfAssetBuilder {
             m.records.push({ type: MOD_DISPLAY_LIST, data: drawing.displayList });
         m.disc = true;
         for (const id of ids) this.useTexture(id, key);
+        return nid;
+    }
+
+    /**
+     * Draw PC model `pcId` refined (ootfdiscmodel.ts `refineMesh`: smoothed normals, optionally curved subdivision) while the
+     * engine still collides with the converted model: its vertex, polygon and bounds records stay, the refined vertices are
+     * appended and the refined strip display list replaces the converted one. Same textures. Null when the model cannot be
+     * converted or refined (the plain conversion then stands).
+     */
+    async refineDrawing(owner: string, pcDb: number, pcId: number, mode: RefineMode): Promise<number | null> {
+        await this.registerOwner(owner);
+        const c = this.resolveContainer(owner, pcDb);
+        if (!c) return null;
+        const key = `${lower(c)}#${pcId}`;
+        const known = this.modelIds.get(key);
+        if (known !== undefined) return this.models.find((m) => m.id === known)?.disc ? known : null;
+        const nid = await this.addModel(c, pcId, true);
+        if (nid === null) return null;
+        const m = this.models.find((x) => x.id === nid);
+        const pVerts = m?.records?.find((r) => r.type === MOD_VERTICES_RECORD)?.data;
+        if (!m || !pVerts || m.records?.some((r) => r.type === MOD_CHARACTER)) return null;
+        let drawing: { vertices: Uint8Array; displayList: Uint8Array };
+        try {
+            const dl = withDisplayList(refineMesh(m.model, mode));
+            const verts = writePs2ModelRecords(dl.model).find((r) => r.type === MOD_VERTICES_RECORD)!.data;
+            drawing = combineDrawing(pVerts, readVertexRecord(verts), dl.record, 0);
+        } catch (e) {
+            this.report.warnings.push(
+                `model ${key}: refined drawing failed (${e instanceof Error ? e.message : String(e)})`,
+            );
+            return null;
+        }
+        m.records = m.records!.map((r) =>
+            r.type === MOD_VERTICES_RECORD
+                ? { type: r.type, data: drawing.vertices }
+                : r.type === MOD_DISPLAY_LIST
+                  ? { type: r.type, data: drawing.displayList }
+                  : r,
+        );
+        if (!m.records.some((r) => r.type === MOD_DISPLAY_LIST))
+            m.records.push({ type: MOD_DISPLAY_LIST, data: drawing.displayList });
+        m.disc = true;
         return nid;
     }
 
