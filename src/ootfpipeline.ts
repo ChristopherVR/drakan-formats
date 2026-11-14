@@ -51,8 +51,16 @@ import {
     ps2SoundEntries,
     sdbKey,
     writePs2Sdb,
+    type PcSound,
     type PcSoundBank,
 } from './ootfsound.ts';
+import {
+    matchClassSounds,
+    matchSoundObjects,
+    pcClassSoundRefs,
+    writeClassSounds,
+    type ClassSoundField,
+} from './ootfclasssounds.ts';
 import { SUBTITLE_FORMAT, SUBTITLE_VERSION, type SubtitleLine, type SubtitleTable } from './ootfsubtitles.ts';
 import { applyCulling, planLevelCulling, sceneFileKey, type LevelCulling } from './ootfcull.ts';
 import { carryCreatures, type CarrierRig } from './ootfcarry.ts';
@@ -438,6 +446,12 @@ export interface OotfPipelineOptions {
     /** Rewrite text defaults / parameters to new XDB strings (default true). */
     texts?: boolean;
     sounds?: boolean;
+    /**
+     * With `sounds`: convert the sounds that the PC classes name in their own defaults (death and hit voices, loops, door and
+     * pickup sounds) and write them into the converted class records (ootfclasssounds.ts). Default true; false keeps the
+     * template's sound defaults in every clone, as before.
+     */
+    classSounds?: boolean;
     sequences?: boolean;
     /**
      * Subtitle lines of the PC voice clips (ootfsubtitles.ts; made on the player's machine from the player's own audio). The
@@ -2029,6 +2043,21 @@ export async function convertOotfLevels(
     /** Levels whose own sequence the PC engine starts at the load (no Stomp Player in the level). */
     const isAutoPlayLevel = (pc: PcLevel): boolean => bookSceneOn() && AUTO_PLAY_LEVEL.test(pc.path);
     const sequencePlayerTarget = (): ClassTarget | null => sequencePlayer?.t ?? null;
+    /**
+     * The scene a PC detector plays from its class default when the object names none itself (Wartok Canyons' Warrior
+     * Detector plays "newwarrior" so): converted and relayed like an object's own (relayDetectorSequences).
+     */
+    const classSequenceRefs = (pc: PcLevel, o: LvlObject): number[] => {
+        const cls = pc.classes.get(o.dbIndex)?.get(o.classId);
+        if (cls?.rflClass !== 61 || objectParamSpecs(o).some((sp) => resourceKind(sp.type) === 'sequence')) return [];
+        return (cls.fields ?? []).flatMap((f, i) => {
+            if (resourceKind(f.type) !== 'sequence') return [];
+            const v = decodeFieldValue(f.type, cls.data?.[i] ?? 0, cls.data ?? []);
+            return (Array.isArray(v) ? v : [v])
+                .filter((x): x is number => typeof x === 'number' && x !== 0)
+                .map((x) => x >>> 0);
+        });
+    };
     const scan = async (pc: PcLevel, kind: ResourceKind): Promise<Need[]> => {
         const out: Need[] = [];
         const resolve = resolverFor(pc);
@@ -2047,6 +2076,11 @@ export async function convertOotfLevels(
             // The sounds a pressure plate or a push block takes from its class (ootfpuzzle.ts `pushPuzzles` sets them).
             if (kind === 'sound')
                 for (const v of pushPuzzleSoundRefs(pc, o)) {
+                    await builder.registerOwner(ow);
+                    out.push({ owner: ow, ref: v, target: resolve?.(o.dbIndex, o.classId) ?? null });
+                }
+            if (kind === 'sequence')
+                for (const v of classSequenceRefs(pc, o)) {
                     await builder.registerOwner(ow);
                     out.push({ owner: ow, ref: v, target: resolve?.(o.dbIndex, o.classId) ?? null });
                 }
@@ -2171,6 +2205,85 @@ export async function convertOotfLevels(
                     }
                 }
             }
+            // Class-default sounds of the clones (ootfclasssounds.ts): the PC sounds their fields name join the pack.
+            const classSounds: { s: Synthesized; db: number; per: { owner: string; fields: ClassSoundField[] }[] }[] =
+                [];
+            // Clips that only a looping field of a clone plays (a torch's crackle in the PS2 flame's "Looping Sound") get the
+            // loop flag; the PS2 engine plays a clip without it once. Clips any other field, object or scene names keep theirs.
+            const plainUse = new Set([...want].flatMap(([k, ids]) => [...ids].map((id) => `${k}#${id}`)));
+            const loopUse = new Set<string>();
+            if (opt.classSounds !== false && plan) {
+                const sourceOf = new Map<string, OdbClass>();
+                const placed = new Set<string>();
+                for (const [uk, u] of used) {
+                    const k = planKey.get(sig(u.cls));
+                    if (k && !uk.startsWith('reference|')) placed.add(`${k.db}:${k.id}`);
+                }
+                for (const u of used.values()) {
+                    const k = planKey.get(sig(u.cls));
+                    if (k && !sourceOf.has(`${k.db}:${k.id}`)) sourceOf.set(`${k.db}:${k.id}`, u.cls);
+                }
+                for (const s of plan.synthesized) {
+                    const db = hostDbOf(s.file.replace(/\.ODB$/i, ''));
+                    if (db === null) continue;
+                    const per: { owner: string; fields: ClassSoundField[] }[] = [];
+                    for (const key of s.pcKeys) {
+                        const source = sourceOf.get(key);
+                        const ow = source && ownerOf.get(source);
+                        if (!source || !ow) continue;
+                        // A creature shown with its Drakan 2 model plays the Drakan 2 clips, whose animation events voice it: it
+                        // keeps the template's (that creature's) sound set, so its voice stays one creature's.
+                        if (modelSwap.enemy(source.name) === 'drakan2') continue;
+                        await builder.registerOwner(ow);
+                        const m = matchClassSounds(source, s.cls);
+                        if (m.unmatched.length && dbgEnv0['DRAKAN_DBG_CLASSSOUNDS'])
+                            log(
+                                `class sounds ${s.name}: no field in "${s.template.name}" for ${m.unmatched.join(', ')}`,
+                            );
+                        if (m.fields.length) per.push({ owner: ow, fields: m.fields });
+                        // Sounds a PC class names through a sound effect class (a torch's crackle): that class's own sounds.
+                        for (const o of matchSoundObjects(source, s.cls)) {
+                            const container = builder.resolveContainer(ow, o.ref >>> 16);
+                            const fx = container
+                                ? ownedClasses.get(ownedClassKey(container, o.ref & 0xffff))
+                                : undefined;
+                            const refs =
+                                fx?.rflClass === 6
+                                    ? pcClassSoundRefs(fx).find((r) => /^sounds$/i.test(r.name))
+                                    : undefined;
+                            if (!container || !refs) continue;
+                            await builder.registerOwner(container);
+                            per.push({
+                                owner: container,
+                                fields: [{ name: o.name, field: o.field, array: o.array, refs: refs.refs }],
+                            });
+                        }
+                    }
+                    // A sound effect class (engine class 6) that no level object places is only the PC flame's way of naming
+                    // its sound (`matchSoundObjects`): its own clone is never spawned, so its use does not stop the loop.
+                    const soundObjectOnly = s.pcKeys.every((k) => sourceOf.get(k)?.rflClass === 6 && !placed.has(k));
+                    for (const { owner: ow, fields } of per)
+                        for (const f of fields)
+                            for (const ref of f.refs) {
+                                const c = builder.resolveContainer(ow, ref >>> 16);
+                                if (!c) continue;
+                                const k = sdbKey(`${c}.sdb`);
+                                (want.get(k) ?? want.set(k, new Set()).get(k)!).add(ref & 0xffff);
+                                if (/loop/i.test(s.cls.fields![f.field]!.name)) loopUse.add(`${k}#${ref & 0xffff}`);
+                                else if (!soundObjectOnly) plainUse.add(`${k}#${ref & 0xffff}`);
+                            }
+                    if (per.length) classSounds.push({ s, db, per });
+                }
+                if (dbgEnv0['DRAKAN_DBG_CLASSSOUNDS'])
+                    for (const [key, t] of plan.mapped) {
+                        const source = sourceOf.get(key);
+                        const snd = source ? pcClassSoundRefs(source).map((r) => r.name) : [];
+                        if (snd.length)
+                            log(
+                                `class sounds mapped ${source!.name} -> ${t.cls.name}: keeps its own; PC has ${snd.join(', ')}`,
+                            );
+                    }
+            }
             for (const k of want.keys()) {
                 const bytes = await src.read(`${k}.sdb`);
                 if (!bytes) {
@@ -2189,10 +2302,17 @@ export async function convertOotfLevels(
                 if (e.type === 0x302) perGroup.set(e.sub, (perGroup.get(e.sub) ?? 0) + 1);
             const group = [...perGroup].sort((a, b) => b[1] - a[1])[0]?.[0] ?? 1;
             const freeId = host ? soundIdAllocator(host.entries) : undefined;
+            const looped = new Set<PcSound>();
+            for (const [k, bank] of banks)
+                for (const x of bank.sounds)
+                    if (loopUse.has(`${k}#${x.id}`) && !plainUse.has(`${k}#${x.id}`) && !(x.flags & 8)) looped.add(x);
+            if (looped.size)
+                log(`class sounds: ${looped.size} clip(s) played only by a looping field get the loop flag`);
             const conv = convertPcSounds(
                 banks,
                 { firstId: 1, groupId: group, groupName: 'Order of the Flame', nextId: freeId },
                 {
+                    ...(looped.size ? { flags: (x: PcSound) => (looped.has(x) || x.flags & 8 ? 0xa : 0x2) } : {}),
                     maxBytes: 0x3f000,
                     fitRates: [22050, 11025],
                     text: (key, pc) => opt.subtitles?.clipText(key, pc.id) ?? null,
@@ -2235,6 +2355,46 @@ export async function convertOotfLevels(
                 const m = c ? conv.map.get(sdbKey(`${c}.sdb`), ref & 0xffff) : null;
                 return m === null ? null : m & 0xffff;
             };
+            let written = 0;
+            let cleared = 0;
+            let conflicts = 0;
+            for (const { s, db, per } of classSounds) {
+                const values = new Map<number, number[]>();
+                for (const { owner: ow, fields } of per)
+                    for (const f of fields) {
+                        const ids = f.refs
+                            .map((r) => soundLookup!(ow, r))
+                            .filter((id): id is number => id !== null)
+                            .map((id) => ((db << 16) | id) >>> 0);
+                        if (f.refs.length && !ids.length) continue; // none converted: keep the template's
+                        const had = values.get(f.field);
+                        if (!had) values.set(f.field, f.array ? ids : ids.slice(0, 1));
+                        else if (had.join() !== (f.array ? ids : ids.slice(0, 1)).join()) {
+                            conflicts++;
+                            if (dbgEnv0['DRAKAN_DBG_CLASSSOUNDS'])
+                                log(`class sounds ${s.name}: folded PC classes differ in ${f.name}; first kept`);
+                        }
+                    }
+                if (dbgEnv0['DRAKAN_DBG_CLASSSOUNDS'])
+                    for (const [j, ids] of values)
+                        log(
+                            `class sounds ${s.name} (${s.template.name}, ${s.file}#${s.classId}): ${s.cls.fields![j]!.name.trim()} = ${ids.map((x) => `0x${x.toString(16)}`).join(' ') || 'none'}`,
+                        );
+                if (dbgEnv0['DRAKAN_DBG_CLASSSOUNDS']) {
+                    const kept = (s.cls.fields ?? []).flatMap((f, j) =>
+                        fieldBase(f.type) === FIELD_SOUND && !values.has(j) && s.cls.data?.[j] ? [f.name.trim()] : [],
+                    );
+                    if (kept.length)
+                        log(`class sounds ${s.name} (${s.template.name}): template keeps ${kept.join(', ')}`);
+                }
+                if (values.size) writeClassSounds(s, values);
+                written += values.size;
+                for (const ids of values.values()) if (!ids.length) cleared++;
+            }
+            if (classSounds.length)
+                log(
+                    `class sounds: ${written} field(s) of ${classSounds.length} converted classes (${cleared} cleared: the PC class plays none there)${conflicts ? `, ${conflicts} field(s) differ between folded PC classes (first kept)` : ''}`,
+                );
         });
     }
     const seqIds = new Map<string, number>();
@@ -2949,6 +3109,10 @@ export async function convertOotfLevels(
                                     typeof v === 'number' && v ? seqIds.get(`${pc.path}|${ow}|${v >>> 0}`) : undefined;
                                 if (m !== undefined) refs.push(m);
                             }
+                        }
+                        for (const v of classSequenceRefs(pc, o)) {
+                            const m = seqIds.get(`${pc.path}|${ow}|${v}`);
+                            if (m !== undefined) refs.push(m);
                         }
                         return refs;
                     },
