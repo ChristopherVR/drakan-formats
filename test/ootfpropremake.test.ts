@@ -136,6 +136,19 @@ describe('smoothed PS2-style remakes', () => {
         }
     });
 
+    it('keeps the border between two textures on its line', () => {
+        // the ring between a lower band (texture 0) and an upper band (texture 2) sits off-centre at y = 1
+        const m = prism(8, 4, false, 2);
+        for (let s = 8; s < 16; s++) m.positions[s * 3 + 1] = 1;
+        m.polygons.forEach((p, i) => (p.texture = i < 8 ? 0 : 2));
+        const r = smoothSubdivide(m);
+        const ring = new Set<string>();
+        for (let i = 0; i < r.positions.length / 3; i++)
+            if (Math.abs(r.positions[i * 3 + 1]! - 1) < 1e-6)
+                ring.add(`${Math.round(r.positions[i * 3]! * 1e4)},${Math.round(r.positions[i * 3 + 2]! * 1e4)}`);
+        expect(ring.size).toBeGreaterThanOrEqual(32);
+    });
+
     it('leaves the polygons of kept textures where they were', () => {
         const m = prism(8, 4, true, 2);
         const r = smoothSubdivide(m, { keepTextures: [0] });

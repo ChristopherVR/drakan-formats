@@ -7,7 +7,7 @@
  * - `smoothSubdivide`: Loop subdivision with sharp creases. Unlike the PN step of `refineMesh` (which keeps every original
  *   corner where it is, so box-like props barely change), Loop moves the corners too: an octagonal pillar becomes round, a
  *   faceted horn becomes a smooth curve. Edges sharper than the crease angle, open borders and the borders of parts that are
- *   kept flat stay sharp, so steps, rims and the flat base stay where they are; with `fixBorders` open borders do not
+ *   kept flat stay sharp, so steps, rims and the flat base stay where they are, and so do the borders between textures; with `fixBorders` open borders do not
  *   move at all, so a corridor module still meets its neighbours without gaps. UVs are subdivided linearly per triangle, so
  *   the OotF texture layout is kept.
  * - `lightBeamMesh`: the light beam over a Multiplayer pick-up pad redrawn as two nested soft shafts of 32 sides (the OotF
@@ -91,6 +91,9 @@ function loopStep(P: V3[], tris: Tri[], cosCrease: number, fixBorders: boolean):
                 !ta.smooth ||
                 !tb.smooth ||
                 ta.facing !== tb.facing ||
+                // where two textures meet (a carved band on a horn) the border stays a crease: smoothing across it
+                // bends the painted edge into a notch
+                ta.texture !== tb.texture ||
                 dot(scale(fn[a]!, ta.facing), scale(fn[b]!, tb.facing)) < cosCrease;
         }
         sharp.set(k, s);
