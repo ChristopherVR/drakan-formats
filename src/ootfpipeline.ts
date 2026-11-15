@@ -178,6 +178,7 @@ import { writePs2Srsc, type Ps2Entry } from './ootfcontainer.ts';
 import {
     ENGINE_CLASSES,
     FADER_RFL,
+    GENERATOR_RFL,
     PS2_SUBSTITUTES,
     aliasSquash,
     buildClassEntries,
@@ -243,6 +244,8 @@ import {
 } from './ootfanim.ts';
 import { buildRig, invertMat12, localToWorld, mat12ToQuat, mulMat12 } from './skeleton.ts';
 import { bindBasis, convertPcAnimToPs2 } from './ootfcreature.ts';
+import { addBlowUpPropActors, addBlowUpProps, type BlowUpProp } from './ootfblowup.ts';
+import { dragonChannelMap, dragonPartners, isDragonPair, nativeDragonClips, retargetDragonClip } from './ootfdragon.ts';
 import { sampleClip } from './anim.ts';
 import { MOD_CHARACTER, parseModel, parseModelName } from './model.ts';
 import {
@@ -265,6 +268,7 @@ import {
     leafFramePairs,
     matchJoints,
     retargetCreature,
+    rigSize,
 } from './ootfretarget.ts';
 import {
     applyMapOverride,
@@ -915,6 +919,25 @@ export async function convertOotfLevels(
                 ownedClasses.set(ownedClassKey(ow, id), cls);
             }
         }
+    // Generators that show a model until they burst (the Ruined Village stone Arokh): the model becomes a prop of its own,
+    // which the PS2 draws (ootfblowup.ts); its class is planned with the others and its scenes hide it with the generator.
+    const blowUpProps = new Map<PcLevel, BlowUpProp[]>();
+    for (const pc of pcs) {
+        const props = addBlowUpProps(pc);
+        if (!props.length) continue;
+        blowUpProps.set(pc, props);
+        for (const b of props) {
+            const ow = owner(pc, b.db);
+            if (ow) {
+                ownerOf.set(b.cls, ow);
+                ownedClasses.set(ownedClassKey(ow, b.classId), b.cls);
+            }
+            used.set(`${pc.path}|${b.db}:${b.classId}`, { db: b.db, id: b.classId, cls: b.cls, pc });
+            log(
+                `blow-up generator ${pc.path}: ${b.generator} shows its model through prop ${b.prop} ("${b.cls.name}")`,
+            );
+        }
+    }
     // Trees Rynn fells over a gap (ootftree.ts): each gets a Mover class of its own model, planned with the other classes.
     const fallingTrees = new Map<
         PcLevel,
@@ -3020,6 +3043,47 @@ export async function convertOotfLevels(
                             idle: await player.nativeClip('ncidle'),
                         };
                     })();
+                    // Arokh's scene clips on the disc dragon (ootfdragon.ts) and his channel map, PC rig -> disc rig.
+                    const dragonScene = await (async () => {
+                        const object = pc.list.objects.find(
+                            (o) => pc.classes.get(o.dbIndex)?.get(o.classId)?.rflClass === 28,
+                        );
+                        const cls = object && pc.classes.get(object.dbIndex)?.get(object.classId);
+                        const ow = cls && ownerOf.get(cls);
+                        if (dragonId === undefined || !cls?.model || !ow || !player.rig) return null;
+                        const refs = new Set<number>();
+                        for (const e of ssdReader.entries) {
+                            if (e.type !== SSD_SEQUENCE || !g.ids.has(e.id)) continue;
+                            let seq;
+                            try {
+                                seq = parsePcSequence(e.id, e.sub, (await ssdReader.read(e)).data);
+                            } catch {
+                                continue;
+                            }
+                            for (const a of seq.actors) {
+                                if (a.actorType !== 1 || sceneObjectIds.get(a.objectId) !== dragonId) continue;
+                                for (const x of a.actions) {
+                                    if (x.type !== 1) continue;
+                                    const ref = new DataView(x.payload.buffer, x.payload.byteOffset).getUint32(4, true);
+                                    if (ref >>> 16 === 0) refs.add(ref);
+                                }
+                            }
+                        }
+                        const source = await builder.creatureSource(ow, cls.model.db, cls.model.id);
+                        const container = builder.resolveContainer(ow, cls.model.db);
+                        if (!source || !container) return null;
+                        const disc = ps2Odbs
+                            .flatMap((o) => [...o.classes.values()])
+                            .find((k) => k.rflClass === 28 && !!k.model);
+                        const r = await player.addDragon(
+                            `${container}#${cls.model.id}`,
+                            source,
+                            refs,
+                            disc ? nativeDragonClips(cls, disc) : new Map(),
+                        );
+                        for (const w of r.warnings) res.warnings.push(`sequences ${pc.path}: dragon clips: ${w}`);
+                        return r.map.size ? r : null;
+                    })();
                     // Skeleton and clips of every skinned creature the scenes place, for the carried-creature poses (ootfcarry.ts).
                     const creatureRigs = new Map<number, CarrierRig>();
                     const propReaches = new Map<number, number>();
@@ -3104,7 +3168,7 @@ export async function convertOotfLevels(
                                 targetId === playerId
                                     ? playerScene?.channels
                                     : targetId === dragonId
-                                      ? dragonChannels
+                                      ? (dragonScene?.channels ?? dragonChannels)
                                       : tockOf(actor, targetId)?.channels,
                             // The PS2 Rynn class has a Jaw Channel: her speech gets the lip-sync bit (tracks: ootfsound.ts).
                             lipSyncForActor: (_actor, targetId) => targetId === playerId,
@@ -3168,6 +3232,11 @@ export async function convertOotfLevels(
                                 if (targetId === playerId && player.rig) {
                                     const clips = playerScene?.clips;
                                     return { get: (ref) => (ref >>> 16 === 0 ? clips?.get(ref & 0xffff) : undefined) };
+                                }
+                                // Arokh on the disc dragon plays the disc clip of the same class field or his retargeted clip.
+                                if (targetId === dragonId && dragonScene) {
+                                    const clips = dragonScene.map;
+                                    return { get: (ref) => (ref >>> 16 === 0 ? clips.get(ref & 0xffff) : undefined) };
                                 }
                                 // A scene Wartok on the disc rig plays its retargeted clips (also through the channel table above).
                                 const tock = tockOf(actor, targetId);
@@ -3242,7 +3311,19 @@ export async function convertOotfLevels(
                                 })
                                 .map((o) => o.id),
                         ),
-                        rewrite: (seq) => carry(cull ? cull(seq) : seq),
+                        // generators start on any message but 0, and Blow Up removes them unreleased (SequenceConvertOptions)
+                        generators: new Set(
+                            pc.list.objects
+                                .filter((o) => pc.classes.get(o.dbIndex)?.get(o.classId)?.rflClass === GENERATOR_RFL)
+                                .map((o) => o.id),
+                        ),
+                        rewrite: (seq) =>
+                            carry(
+                                addBlowUpPropActors(
+                                    cull ? cull(seq) : seq,
+                                    new Map((blowUpProps.get(pc) ?? []).map((b) => [b.generator, b.prop])),
+                                ),
+                            ),
                         usedIds: used,
                         only: g.ids,
                         pcDbIndex: g.db,
@@ -4542,7 +4623,84 @@ function playerClipBuilder(ps2: OotfPs2Context) {
     let nextId = (adb?.entries ?? []).reduce((m, e) => (e.type === 0x0501 ? Math.max(m, e.id) : m), 0) + 1;
     const done = new Map<string, number>();
     const entries: { id: number; info: Uint8Array; data: Uint8Array }[] = [];
+    // The disc Arokh shares SYSTEM.MOD / .ADB with Rynn: the character record with root joint `arokh` and the most joints.
+    let dragonSkeleton: Skeleton | null | undefined;
+    const dragonRig = async (): Promise<Skeleton | null> => {
+        if (dragonSkeleton !== undefined) return dragonSkeleton;
+        let best: Skeleton | null = null;
+        for (const e of mod?.entries ?? []) {
+            if (e.type !== MOD_CHARACTER) continue;
+            try {
+                const sk = parseSkeleton(await mod!.readRaw(e), 'ps2');
+                if (buildRig(sk, 0).names[0]?.toLowerCase() !== 'arokh') continue;
+                if (!best || sk.joints.length > best.joints.length) best = sk;
+            } catch {
+                // not a character record of this layout
+            }
+        }
+        dragonSkeleton = best;
+        return dragonSkeleton;
+    };
     return {
+        /**
+         * Arokh's scene clips on the disc dragon (ootfdragon.ts): a PC clip the PC Dragon class names in an animation field
+         * plays the disc clip of that field (`native`, PC id -> disc id), every other one is retargeted onto the disc rig as a
+         * new clip of this ADB. Returns PC clip id -> clip id in this ADB, and the PC channel -> disc channel map.
+         */
+        async addDragon(
+            sourceKey: string,
+            source: { skeleton: Skeleton; anims: Map<number, PcAnim> },
+            refs: ReadonlySet<number>,
+            native: ReadonlyMap<number, number>,
+        ): Promise<{ map: Map<number, number>; channels?: Map<number, number>; warnings: string[] }> {
+            const map = new Map<number, number>();
+            const warnings: string[] = [];
+            const sk = await dragonRig();
+            if (!sk || !adb) return { map, warnings: ['no disc dragon rig'] };
+            const src = buildRig(source.skeleton, 0);
+            const dst = buildRig(sk, 0);
+            if (!isDragonPair(src.names, dst.names))
+                return { map, warnings: ['the PC dragon rig does not match the disc dragon table'] };
+            const partner = dragonPartners(src.names, dst.names);
+            const own = new Set(sk.animIds);
+            const basis = bindBasis(src);
+            const scale = rigSize(src) > 1e-9 ? rigSize(dst) / rigSize(src) : 1;
+            for (const ref of refs) {
+                const id = ref & 0xffff;
+                const disc = native.get(id);
+                if (disc !== undefined && own.has(disc)) {
+                    map.set(id, disc);
+                    continue;
+                }
+                const key = `dragon|${sourceKey}|${id}`;
+                const have = done.get(key);
+                if (have !== undefined) {
+                    map.set(id, have);
+                    continue;
+                }
+                const pcAnim = source.anims.get(id);
+                if (!pcAnim) {
+                    warnings.push(`clip 0x${id.toString(16)} is not a clip of the PC dragon model`);
+                    continue;
+                }
+                try {
+                    const anim = retargetDragonClip(convertPcAnimToPs2(pcAnim, basis), src, dst, partner, {
+                        scale,
+                        channels: sk.channels.length,
+                    });
+                    const nid = nextId++;
+                    const w = writePs2Anim(anim);
+                    entries.push({ id: nid, info: w.info, data: w.data });
+                    done.set(key, nid);
+                    map.set(id, nid);
+                } catch (e) {
+                    warnings.push(
+                        `clip 0x${id.toString(16)} (${pcAnim.name}) not retargeted: ${e instanceof Error ? e.message : e}`,
+                    );
+                }
+            }
+            return { map, channels: dragonChannelMap(source.skeleton, src.names, sk, dst), warnings };
+        },
         get rig(): boolean {
             return !!mod && !!adb;
         },

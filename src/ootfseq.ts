@@ -253,6 +253,14 @@ export interface SequenceConvertOptions {
      * ids) sent to these actors become On; engine messages such as Off or Blow Up are kept.
      */
     screenFaders?: ReadonlySet<number>;
+    /**
+     * PC level object ids of generators (engine 63). The PS2 generator (handler `0x2ce120`) with On Trigger 0, the PC value
+     * of every scene generator, starts on any message it receives, but a message action with the number 0 never reaches it
+     * (the PC scenes start the Ruined Village bonding lightning, Rimril's phase effects and Volcanic's cage magic with 0), and
+     * Blow Up removes a PS2 generator without releasing anything (the PC releases its objects: the stone Arokh's pieces).
+     * Both become On; the other numbers the PC scenes send (15, 25, 2469, On) already start it and are kept.
+     */
+    generators?: ReadonlySet<number>;
     /** Rewrites each parsed PC scene before it is converted (the Intro's culling show / hide timelines, `ootfcull.ts`). */
     rewrite?: (seq: PcSequence) => PcSequence;
 }
@@ -780,6 +788,11 @@ function convertActor(a: PcSeqActor, opts: SequenceConvertOptions, report: Seque
     let release = -1;
     if (maps.endIdle !== undefined) sorted.forEach(({ x }, i) => (isRelease(x) ? (release = i) : undefined));
     const fader = a.actorType === 1 && !!opts.screenFaders?.has(a.objectId);
+    const generator = a.actorType === 1 && !!opts.generators?.has(a.objectId);
+    const startsGenerator = (x: PcAction): boolean => {
+        const code = view(x.payload).getUint32(0, true);
+        return code === 0 || code === SEQUENCE_MESSAGES.blowUp;
+    };
     let lastTime = 0;
     sorted.forEach(({ x }, i) => {
         if (i === release) {
@@ -796,7 +809,8 @@ function convertActor(a: PcSeqActor, opts: SequenceConvertOptions, report: Seque
             report.actionsOut++;
         }
         const b = convertAction(
-            fader && x.type === 7 && view(x.payload).getUint32(0, true) < 4096
+            (fader && x.type === 7 && view(x.payload).getUint32(0, true) < 4096) ||
+                (generator && x.type === 7 && startsGenerator(x))
                 ? { ...x, payload: faderStart(x.payload) }
                 : x,
             actionOptions,
@@ -836,7 +850,7 @@ function convertActor(a: PcSeqActor, opts: SequenceConvertOptions, report: Seque
     return { actor };
 }
 
-/** A message action payload that starts a PS2 fader (On) in place of a PC number. */
+/** A message action payload that starts a PS2 fader or generator (On) in place of a PC number. */
 function faderStart(payload: Uint8Array): Uint8Array {
     const out = payload.slice();
     view(out).setUint32(0, SEQUENCE_MESSAGES.on, true);

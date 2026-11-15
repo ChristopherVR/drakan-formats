@@ -223,6 +223,8 @@ export const MODEL_STANDINS: ReadonlySet<number> = new Set([130, 88, 100, 101, 2
 
 /** Engine id of the Fader on both platforms. */
 export const FADER_RFL = 136;
+/** Generator (spawner) engine class. */
+export const GENERATOR_RFL = 63;
 
 /**
  * A PC Fader (136) with a model fades that model in and out (the Intro's owl ring, "Presents", "Psygnosis Monolith", Surreal

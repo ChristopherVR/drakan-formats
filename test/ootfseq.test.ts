@@ -178,6 +178,28 @@ describe('ootfseq', () => {
         expect(await convert(new Set([200]))).toEqual([4097, 4097]);
         expect(await convert(new Set([201]))).toEqual([4097, 25]);
     });
+    it('starts a generator with On where the PC scene sends it 0 or Blow Up', async () => {
+        const gen = actor('Lightning', 5, 300, [
+            act(7, 0, [...u32(0), ...u32(0)]),
+            act(7, 1, [...u32(4259), ...u32(0)]),
+            act(7, 2, [...u32(25), ...u32(0)]),
+            act(7, 3, [...u32(4098), ...u32(0)]),
+        ]);
+        const bytes = w(str('Gen'), u32(126), u32(0), u32(70), u32(1), gen);
+        const convert = async (generators?: Set<number>): Promise<number[]> => {
+            const r = await convertPcSequences(stub(bytes), {
+                maps: { objectIdMap: new Map([[300, 13]]) },
+                usedIds: new Set(),
+                generators,
+            });
+            const s = parseSequence(r.entries[1]!.id, r.entries[1]!.sub, r.entries[1]!.data)!;
+            return parseActions(s.actors.find((a) => a.ref === 13)!)!
+                .filter((a) => a.type === 7)
+                .map((a) => a.fields[0]!.value);
+        };
+        expect(await convert()).toEqual([0, 4259, 25, 4098]);
+        expect(await convert(new Set([300]))).toEqual([4097, 4097, 25, 4098]);
+    });
     it('parses the PC layout', () => {
         const s = parsePcSequence(410, 1, pcSeq());
         expect(s.flags).toBe(126);
