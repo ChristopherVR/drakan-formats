@@ -77,6 +77,20 @@ export interface SubtitleFile {
 
 export class SubtitleFileError extends Error {}
 
+/**
+ * Order of the Flame names that speech recognition spells by ear, and their spelling in the game (`Erokh` for the dragon
+ * Arokh, `Rin` for Rynn). Applied to every cue a subtitle file is read with, so files transcribed before a fix is listed
+ * are corrected too; analysis/scripts/ootf_subtitles.py keeps the same table.
+ */
+export const SUBTITLE_NAME_FIXES: readonly (readonly [RegExp, string])[] = [
+    [/\bErokh\b/g, 'Arokh'],
+    [/\bRin\b/g, 'Rynn'],
+];
+
+/** `text` with the misheard names of `SUBTITLE_NAME_FIXES` spelled as in the game. */
+export const fixSubtitleNames = (text: string): string =>
+    SUBTITLE_NAME_FIXES.reduce((t, [from, to]) => t.replace(from, to), text);
+
 /** Lines read without cues: they only set a clip's kind and keep the text of an earlier file (`mergeSubtitleFiles`). */
 const kindOnlyLines = new WeakSet<SubtitleLine>();
 
@@ -110,7 +124,7 @@ export function parseSubtitleFile(json: unknown): SubtitleFile {
             const c = rc as Record<string, unknown>;
             if (!c || typeof c['text'] !== 'string' || !Number.isFinite(c['start']) || !Number.isFinite(c['end']))
                 return bad(`line ${i}: a cue needs start, end and text`);
-            cues.push({ start: c['start'] as number, end: c['end'] as number, text: c['text'] });
+            cues.push({ start: c['start'] as number, end: c['end'] as number, text: fixSubtitleNames(c['text']) });
         }
         cues.sort((a, b) => a.start - b.start);
         const line: SubtitleLine = { bank: sdbKey(l['bank']), id: l['id'] as number, cues };

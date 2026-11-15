@@ -103,6 +103,17 @@ describe('subtitle file', () => {
         expect(t.withheld.map((l) => l.id).sort()).toEqual([1, 2]);
     });
 
+    it('spells names misheard by speech recognition as the game does', () => {
+        const f = parseSubtitleFile({
+            format: SUBTITLE_FORMAT,
+            version: 1,
+            language: 'english',
+            lines: [
+                { bank: 'a', id: 1, cues: [{ start: 0, end: 1, text: 'Find Erokh. I thank you, Rin. Erokhs Rinse' }] },
+            ],
+        });
+        expect(f.lines[0]!.cues[0]!.text).toBe('Find Arokh. I thank you, Rynn. Erokhs Rinse');
+    });
     it('names the fault of a bad file', () => {
         expect(() => parseSubtitleFile({ format: 'other', version: 1, lines: [] })).toThrow(SubtitleFileError);
         expect(() => parseSubtitleFile(file([{ bank: 'a', id: 1, kind: 'grunt', cues: [] }]))).toThrow(/kind "grunt"/);
@@ -134,9 +145,7 @@ describe('clip text', () => {
     });
 
     it('keeps the text plain: no page marks, backslashes or typographic dashes', () => {
-        expect(plainSubtitleText('“Wait” — she said… it’s  here\\now')).toBe(
-            '"Wait", she said... it\'s here/now',
-        );
+        expect(plainSubtitleText('“Wait” — she said… it’s  here\\now')).toBe('"Wait", she said... it\'s here/now');
         expect(subtitleClipText({ cues: [{ start: 0, end: 1, text: 'a [[2]] b' }] })).toBe('[[0]]a 2 b[[1]]');
         expect(subtitleClipText({ cues: [{ start: 0, end: 1, text: '   ' }] })).toBe('');
     });
@@ -166,7 +175,17 @@ describe('clip text', () => {
 });
 
 describe('sound descriptor text', () => {
-    const sound = { id: 5, group: 1, name: 'voice', flags: 2, rate: 22050, volume: 0, dropoff: 15, priority: 5, pcm: new Int16Array(2205) };
+    const sound = {
+        id: 5,
+        group: 1,
+        name: 'voice',
+        flags: 2,
+        rate: 22050,
+        volume: 0,
+        dropoff: 15,
+        priority: 5,
+        pcm: new Int16Array(2205),
+    };
 
     it('stores the text the way the disc does and leaves a plain descriptor unchanged', () => {
         const plain = writePs2Descriptor(sound, 4410, 1280);
@@ -182,8 +201,32 @@ describe('sound descriptor text', () => {
         const pcm = new Int16Array(22050);
         const bank: PcSoundBank = {
             sounds: [
-                { id: 9, group: 1, name: 'line', flags: 0, channels: 1, bits: 16, rate: 22050, volume: 0, dropoff: 15, priority: 5, pcm },
-                { id: 10, group: 1, name: 'wind', flags: 8, channels: 1, bits: 16, rate: 22050, volume: 0, dropoff: 15, priority: 5, pcm },
+                {
+                    id: 9,
+                    group: 1,
+                    name: 'line',
+                    flags: 0,
+                    channels: 1,
+                    bits: 16,
+                    rate: 22050,
+                    volume: 0,
+                    dropoff: 15,
+                    priority: 5,
+                    pcm,
+                },
+                {
+                    id: 10,
+                    group: 1,
+                    name: 'wind',
+                    flags: 8,
+                    channels: 1,
+                    bits: 16,
+                    rate: 22050,
+                    volume: 0,
+                    dropoff: 15,
+                    priority: 5,
+                    pcm,
+                },
             ],
             groups: new Map(),
             warnings: [],
@@ -285,7 +328,11 @@ describe('sounds the game plays by itself', () => {
 
     it('lists the class defaults that name a sound, with the class and the field', async () => {
         const sounds = await listObjectSounds(src);
-        expect(sounds.map((s) => `${s.bank}#${s.id}`)).toEqual(['common/fx/fx#3', 'common/fx/fx#7', 'common/npc/npcs#2']);
+        expect(sounds.map((s) => `${s.bank}#${s.id}`)).toEqual([
+            'common/fx/fx#3',
+            'common/fx/fx#7',
+            'common/npc/npcs#2',
+        ]);
         expect(sounds[1]!.uses).toEqual([{ owner: 'Common/Npc/Npcs', className: 'Grunt', field: 'Hit Sound' }]);
         expect(sounds[2]!.uses[0]!.field).toBe('Ambient Sounds');
     });
