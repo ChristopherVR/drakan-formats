@@ -378,7 +378,12 @@ export function placeFallingTrees(
     fieldsOf: (o: LvlObject) => readonly ClassFieldDef[] | undefined,
     warnings: string[],
     title: string,
-    opt: { visible?: boolean; toggler?: { dbIndex: number; classId: number } } = {},
+    opt: {
+        visible?: boolean;
+        toggler?: { dbIndex: number; classId: number };
+        /** Receives every Mover added (leaders and followers): their class "Special Effect" was cleared. */
+        movers?: LvlObject[];
+    } = {},
 ): number {
     let n = 0;
     for (const { t, mover, stopSound, followerMovers } of trees) {
@@ -430,6 +435,7 @@ export function placeFallingTrees(
             for (const name of MOVER_SOUNDS) set(m2, fieldsOf(m2), name, 0);
             setNamedParam(list, m2, fieldsOf(m2), MOVER_EFFECT, 0);
             extra.push(m2);
+            opt.movers?.push(m2);
             standing.push(fo.id);
         });
         const { object: m } = addObject(list, {
@@ -448,6 +454,7 @@ export function placeFallingTrees(
         const mf = fieldsOf(m);
         for (const name of MOVER_SOUNDS) set(m, mf, name, name === 'Stop Sound' && stopSound ? stopSound : 0);
         setNamedParam(list, m, mf, MOVER_EFFECT, 0);
+        opt.movers?.push(m);
         const links = [m.id];
         // A hidden object turns on On but stays unseen and passes through Rynn; the level's own Visibility Toggler class
         // shows it first (as the tomb's toggler shows its hidden stair Movers before they move).

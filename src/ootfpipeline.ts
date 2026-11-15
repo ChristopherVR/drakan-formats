@@ -1,6 +1,6 @@
 import { bridgeMesh } from './ootfbridgemodel.ts';
 import { composeBody } from './ootfpropcompose.ts';
-import { breathStandIn, isArenaPowerUp } from './ootfbreath.ts';
+import { DRAGON_POWERUP_RFL, breathStandIn, isArenaPowerUp } from './ootfbreath.ts';
 import { buildBowAimMetadata } from './ootfbowaim.ts';
 import { buildCrystalMetadata } from './ootfcrystal.ts';
 import { requireGenericPropDrawLists, requireRigidWeaponDrawLists } from './ootfpropdraw.ts';
@@ -108,6 +108,7 @@ import {
 } from './ootfseq.ts';
 import { SrscReader } from './srsc.ts';
 import { ClassIdPinner, type ClassIdPins } from './savelayout.ts';
+import type { SaveEffectSwap, SaveRelink } from './saverevisions.ts';
 import {
     TERRAIN_TXD_PATH,
     limitVisibleEntries,
@@ -673,6 +674,17 @@ export interface OotfPipelineResult {
      * `PS2 level title @ x, y, z` of the exit object. The pack manifest carries them as `one_way_exits`.
      */
     oneWayExits?: string[];
+    /**
+     * Effects the conversion retired from objects that spawned them (a falling tree's Mover carried its template's
+     * "Special Effect" flame): the class, its inert twin of the same engine class (same database) and where the object
+     * stands. Saves of an earlier pack restore such spawned effects; the pack's `save_replaced_effects` (saverevisions.ts)
+     * lets the game give them the inert class when it loads such a save.
+     */
+    saveEffectSwaps?: SaveEffectSwap[];
+    /** Dragons and the Dragon Power-ups they link, per level (the pack's `save_relinked_powerups`, saverevisions.ts). */
+    saveRelinks?: SaveRelink[];
+    /** Zone-culling togglers per level title (the pack's `save_reset_togglers`, saverevisions.ts). */
+    saveTogglers?: Record<string, number[]>;
     /** Drakan 2 textures used in place of OotF ones (`OotfPipelineOptions.ps2Textures`), and rows that could not be used. */
     ps2Textures?: { used: { ootf: string; ps2: string; label: string }[]; skipped: { ootf: string; reason: string }[] };
     /** Drakan 2 models used for OotF classes (`OotfPipelineOptions.ps2Models`), by OotF class name. */
@@ -680,6 +692,17 @@ export interface OotfPipelineResult {
 }
 
 const hex4 = (n: number): string => n.toString(16).padStart(4, '0');
+
+/** Engine id of the PS2 particle effect (fire, sparks: "Flaming BoltFire Effect" and the torch fires). */
+const PARTICLE_EFFECT_RFL = 67;
+/** The fields an inert twin of a particle effect sets to 0: nothing is drawn or heard. */
+const INERT_EFFECT_FIELDS = [
+    'Flame Particle Texture',
+    'Max Particles per sec',
+    'Length (lu)',
+    'Start Sound',
+    'Looped Sound',
+];
 
 function cloneObject(o: LvlObject, id: number): LvlObject {
     return {
@@ -2917,6 +2940,58 @@ export async function convertOotfLevels(
         });
     }
 
+    // ---- inert effect twins (saverevisions.ts): an effect class with no particles, length or sound, same engine class
+    // and database as the effect it stands for, so a save's spawned record of the effect restores as nothing.
+    const inertPins = new ClassIdPinner(opt.classIdPins);
+    const inertTwins = new Map<string, number>();
+    const inertTop = new Map<string, number>();
+    const inertEffectTwin = (dbIndex: number, ref: number): number | string => {
+        if (ref >>> 16) return `its effect ${ref.toString(16)} is in another database`;
+        const odb = ps2Odbs.find((o) => o.dbIndex === dbIndex);
+        const tpl = odb?.classes.get(ref);
+        if (!odb || !tpl?.data || !tpl.fields || !odb.raw?.(ref)) return `its effect class ${ref} does not read`;
+        if (tpl.rflClass !== PARTICLE_EFFECT_RFL) return `its effect class ${ref} is not a particle effect`;
+        const key = `${odb.file}|${ref}`;
+        const known = inertTwins.get(key);
+        if (known !== undefined) return known;
+        const name = `${tpl.name.trim()} (off)`.slice(0, 31);
+        let top =
+            inertTop.get(odb.file) ??
+            Math.max(
+                0,
+                ...odb.classes.keys(),
+                ...(plan?.synthesized.filter((x) => x.file === odb.file).map((x) => x.classId) ?? []),
+                inertPins.top(odb.file),
+            );
+        const classId = inertPins.take(odb.file, name, tpl.rflClass ?? 0, new Set(odb.classes.keys())) ?? ++top;
+        inertTop.set(odb.file, Math.max(top, classId));
+        if (classId > 0xffff) return `no class id left in ${odb.file}`;
+        const data = [...tpl.data];
+        for (const f of INERT_EFFECT_FIELDS) {
+            const j = classFieldIndex(tpl, f);
+            if (j >= 0) data[j] = 0;
+        }
+        const group = odb.group?.(ref) ?? tpl.group;
+        plan?.synthesized.push({
+            pcKeys: [],
+            name,
+            file: odb.file,
+            dbIndex: odb.dbIndex,
+            classId,
+            group,
+            rfl: tpl.rflClass ?? 0,
+            template: { dbIndex: odb.dbIndex, classId: ref, name: tpl.name },
+            record: cloneClassRecord(odb.raw(ref)!, name, data),
+            cls: { ...tpl, id: classId, name, group, data },
+            copied: [],
+            skipped: [],
+            coverage: 1,
+        });
+        inertTwins.set(key, classId);
+        log(`inert twin ${classId} (${name}) of effect class ${ref} in ${odb.file}`);
+        return classId;
+    };
+
     // Classes mapped onto a PS2 class by name (no clone): their objects take the PC class defaults explicitly.
     const nameMapped = new Set([...(plan?.mapped.values() ?? [])].map((t) => `${t.dbIndex}:${t.classId}`));
 
@@ -3502,6 +3577,29 @@ export async function convertOotfLevels(
                 const ps2Class = (o: LvlObject) =>
                     classes.get(o.dbIndex)?.get(o.classId) ??
                     plan?.synthesized.find((x) => x.dbIndex === o.dbIndex && x.classId === o.classId)?.cls;
+                // Dragons and the Dragon Power-ups they link (their breath, ootfbreath.ts): a save of an earlier pack can
+                // hold a dragon that already used up a power-up whose breath was still empty; the pack's
+                // `save_relinked_powerups` lets the game link them again so the dragon takes the breath (saverevisions.ts).
+                for (const d of pc.list.objects) {
+                    if (pc.classes.get(d.dbIndex)?.get(d.classId)?.rflClass !== 28) continue;
+                    const powerUps = d.links.filter((id) => {
+                        const p = pc.list.objects.find((x) => x.id === id);
+                        return p && pc.classes.get(p.dbIndex)?.get(p.classId)?.rflClass === DRAGON_POWERUP_RFL;
+                    });
+                    const kept = powerUps.filter((id) => lvl.objects.objects.some((x) => x.id === id));
+                    if (kept.length && lvl.objects.objects.some((x) => x.id === d.id))
+                        (res.saveRelinks ??= []).push({ level: title, dragon: d.id, powerUps: kept });
+                }
+                // Zone-culling togglers (ootfzonecull.ts, applied with the objects): a save of an earlier pack can hold one
+                // in its hidden state, which it applies again on load; `save_reset_togglers` clears that state.
+                const zoneTogglers = findZoneCulls(
+                    pc.list,
+                    (o) => pc.classes.get(o.dbIndex)?.get(o.classId),
+                    (rfl) => ENGINE_CLASSES.get(rfl)?.kind === 'creature',
+                )
+                    .map((z) => z.toggler)
+                    .filter((id) => lvl.objects.objects.some((x) => x.id === id));
+                if (zoneTogglers.length) (res.saveTogglers ??= {})[title] = zoneTogglers;
                 const rep = applyPuzzleLogic({
                     pc,
                     list: lvl.objects,
@@ -3585,12 +3683,36 @@ export async function convertOotfLevels(
                         (x) => pc.classes.get(x.dbIndex)?.get(x.classId)?.rflClass === 121,
                     );
                     const togglerObj = togglerSrc ? lvl.objects.objects.find((x) => x.id === togglerSrc.id) : undefined;
+                    const movers: LvlObject[] = [];
                     const n = placeFallingTrees(lvl.objects, trees, (o) => ps2Class(o)?.fields, res.warnings, title, {
                         visible: dbgEnv0['OOTF_TREE_VISIBLE'] === '1',
                         ...(togglerObj
                             ? { toggler: { dbIndex: togglerObj.dbIndex, classId: togglerObj.classId } }
                             : {}),
+                        movers,
                     });
+                    // The Movers' class "Special Effect" was cleared on each object; saves of an earlier pack still hold
+                    // the flames those Movers spawned, so each such effect class gets an inert twin to swap them for.
+                    for (const m of movers) {
+                        const cls = ps2Class(m);
+                        const i = cls ? classFieldIndex(cls, 'Special Effect') : -1;
+                        const ref = i >= 0 ? Number(classFieldDefault(cls!, i)) >>> 0 : 0;
+                        if (!ref) continue;
+                        const twin = inertEffectTwin(m.dbIndex, ref);
+                        if (typeof twin === 'string') {
+                            res.warnings.push(
+                                `${title}: falling tree Mover ${m.id}: ${twin}; old saves keep its flame`,
+                            );
+                            continue;
+                        }
+                        (res.saveEffectSwaps ??= []).push({
+                            level: title,
+                            fromClass: ref,
+                            toClass: twin,
+                            x: m.pos[0],
+                            z: m.pos[2],
+                        });
+                    }
                     console.warn(`puzzles ${title}: ${n} falling tree(s)`);
                 }
                 if (
