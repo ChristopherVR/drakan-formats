@@ -57,7 +57,18 @@ export function addBlowUpProps(pc: PcLevel): BlowUpProp[] {
         return undefined;
     };
     const madeFor = new Map<OdbClass, { db: number; id: number; cls: OdbClass }>();
-    let nextObject = pc.list.objects.reduce((m, o) => Math.max(m, o.id), 0) + 1;
+    // The prop takes the highest id the PC level leaves unused below its largest one, so the level's largest id stays
+    // the same and the objects the converter adds later keep their ids (a save names them by id: savelayout.ts). Only
+    // a level with no gap appends above its largest id.
+    const used = new Set(pc.list.objects.map((o) => o.id));
+    const maxId = pc.list.objects.reduce((m, o) => Math.max(m, o.id), 0);
+    let gap = maxId - 1;
+    const nextObject = (): number => {
+        while (gap > 0 && used.has(gap)) gap--;
+        const id = gap > 0 ? gap : Math.max(...used, 0) + 1;
+        used.add(id);
+        return id;
+    };
     for (const o of [...pc.list.objects]) {
         const gen = pc.classes.get(o.dbIndex)?.get(o.classId);
         if (!gen || !blowUpGenerator(gen)) continue;
@@ -72,7 +83,7 @@ export function addBlowUpProps(pc: PcLevel): BlowUpProp[] {
             made = { db: o.dbIndex, id, cls };
             madeFor.set(gen, made);
         }
-        const prop: LvlObject = { ...o, id: nextObject++, classId: made.id, links: [], params: [] };
+        const prop: LvlObject = { ...o, id: nextObject(), classId: made.id, links: [], params: [] };
         pc.list.objects.push(prop);
         out.push({ generator: o.id, prop: prop.id, db: made.db, classId: made.id, cls: made.cls });
     }

@@ -56,11 +56,11 @@ describe('ootfblowup', () => {
         const made = addBlowUpProps(pc);
         expect(made).toHaveLength(1);
         const b = made[0]!;
-        expect([b.generator, b.prop, b.db, b.classId]).toEqual([10, 12, 2, 8]);
+        expect([b.generator, b.prop, b.db, b.classId]).toEqual([10, 9, 2, 8]); // the highest free id below the largest (11)
         expect(b.cls.rflClass).toBe(17);
         expect(b.cls.model).toEqual(model);
         const o = pc.list.objects.at(-1)!;
-        expect([o.id, o.classId, o.pos, o.rot, o.links, o.params]).toEqual([12, 8, [1, 2, 3], [0, 90, 0], [], []]);
+        expect([o.id, o.classId, o.pos, o.rot, o.links, o.params]).toEqual([9, 8, [1, 2, 3], [0, 90, 0], [], []]);
         const vis = (time: number, v: number) => ({ type: 6, time, payload: Uint8Array.from([v, 0, 0, 0]) });
         const msg = (time: number) => ({ type: 7, time, payload: Uint8Array.from([0xa3, 0x10, 0, 0, 0, 0, 0, 0]) });
         const seq = (actions: PcSequence['actors'][number]['actions']): PcSequence => ({
