@@ -5,9 +5,13 @@ import { OotfAssetBuilder } from '../src/ootfassets.ts';
 import { writePs2Srsc } from '../src/ootfcontainer.ts';
 import { PC_TEX_NEXT_FRAME, encodePs2Texture } from '../src/ootftex.ts';
 import {
+    DEFAULT_PS2_TERRAIN_FAMILIES,
     DEFAULT_PS2_TEXTURE_SUBSTITUTIONS,
+    PS2_TERRAIN_TXD,
     Ps2TextureMapError,
     effectiveSubstitutions,
+    effectiveTerrainSubstitutions,
+    ps2TerrainRows,
     ootfTextureKey,
     ps2TextureSwapFromEdits,
     resolvePs2Substitutes,
@@ -131,6 +135,49 @@ describe('Drakan 2 texture table', () => {
         expect(substituteMismatch({ width: 128, height: 64, bpp: 8 }, 64, 64, false)).toMatch(/aspect/);
         expect(substituteMismatch({ width: 64, height: 64, bpp: 16 }, 64, 64, true)).toMatch(/creature/);
         expect(substituteMismatch({ width: 64, height: 64, bpp: 8 }, 32, 32, true)).toBeNull();
+    });
+});
+
+describe('Drakan 2 ground families', () => {
+    it('lists each OotF ground texture in at most one family, with a reason', () => {
+        const seen = new Set<string>();
+        for (const f of DEFAULT_PS2_TERRAIN_FAMILIES) {
+            expect(f.ids.length).toBeGreaterThan(0);
+            expect(f.ps2).toBeGreaterThan(0);
+            expect(f.why.length).toBeGreaterThan(10);
+            expect(`${f.label} ${f.why}`).not.toMatch(/—/);
+            for (const id of f.ids) {
+                const k = ootfTextureKey(`${f.container}#${id}`);
+                expect(seen.has(k)).toBe(false);
+                seen.add(k);
+            }
+        }
+        const rows = ps2TerrainRows();
+        expect(rows.length).toBe(seen.size);
+        expect(rows.every((r) => r.ps2.startsWith(`${PS2_TERRAIN_TXD}#`))).toBe(true);
+    });
+
+    it('maps family members to the ground id, honours off, extra rows and both switches', () => {
+        const families = [
+            { label: 'Grass', container: 'W/Common TD', ids: [2, 3], ps2: 593, why: 'synthetic family row' },
+        ];
+        expect([...effectiveTerrainSubstitutions({}, families)]).toEqual([
+            ['w/common td#2', 593],
+            ['w/common td#3', 593],
+        ]);
+        expect(effectiveTerrainSubstitutions({ terrain: false }, families).size).toBe(0);
+        expect(effectiveTerrainSubstitutions({ enabled: false }, families).size).toBe(0);
+        const edited = ps2TextureSwapFromEdits([
+            { ootf: 'W/Common TD#3', ps2: null },
+            { ootf: 'W/Common TD#9', ps2: `${PS2_TERRAIN_TXD}#563` },
+            { ootf: 'W/Objects#4', ps2: 'X/Y.TXD#4' },
+        ]);
+        expect([...effectiveTerrainSubstitutions(edited, families)]).toEqual([
+            ['w/common td#2', 593],
+            ['w/common td#9', 563],
+        ]);
+        // object rows keep working next to ground rows
+        expect(effectiveSubstitutions({ ...edited, table: [] }).map((r) => r.ootf)).toContain('W/Objects#4');
     });
 });
 

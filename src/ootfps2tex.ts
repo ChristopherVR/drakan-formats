@@ -16,8 +16,9 @@ import { TXD_ENTRY_TYPE, parseTxdHeader } from './txd.ts';
  *  - the disc texture must have the OotF texture's aspect ratio (UVs are normalised, so only a different size is harmless);
  *  - textures of skinned models must stay 8 bpp and square (creature classes do not draw others), else the OotF one is kept;
  *  - an animated disc texture brings its frames (consecutive ids with the "next frame" flag), as an animated OotF one does.
- * Object textures only: no OotF terrain texture has a better Drakan 2 `Proc Textures` counterpart (the identical ones are a
- * placeholder and lava, which the terrain converter already maps to the native liquid entries).
+ * Object textures here; ground (terrain) textures have their own family table, `DEFAULT_PS2_TERRAIN_FAMILIES` below: no OotF
+ * ground texture is the same picture as a Drakan 2 `Proc Textures` entry, but whole OotF ground families (a surface's variants
+ * and its transition tiles) map onto the closest Drakan 2 ground (journal 2026-11-15/ootf-ground-textures.md).
  */
 
 export interface Ps2TextureSubstitution {
@@ -32,6 +33,9 @@ export interface Ps2TextureSubstitution {
 }
 
 const WORLDCON = 'WORLDCON/WORLDCON/WORLDCON.TXD';
+const MW_COMMON = 'Mountain World/Mountain World Common/Mountain World Common';
+const CHARRED_WHY =
+    'Drakan 2 stone block wall blackened by fire, same square size, for the soot-black brick of the burnt OotF houses; both tile.';
 /** The falling water of Surdana's falls (`SurdanaFalls02`, `SurdanaFalls_05LU`): 64 x 64, 30 frames at 30 fps, blended. */
 const FALLS = `${WORLDCON}#652`;
 const WATERFALL_WHY =
@@ -114,6 +118,46 @@ export const DEFAULT_PS2_TEXTURE_SUBSTITUTIONS: readonly Ps2TextureSubstitution[
         label: 'Waterfall (Alwarren)',
         why: WATERFALL_WHY,
     },
+    {
+        ootf: `${MW_COMMON}#5334`,
+        ps2: `${WORLDCON}#355`,
+        label: 'Charred stone walls (burnt houses)',
+        why: CHARRED_WHY,
+    },
+    {
+        ootf: `${MW_COMMON}#5335`,
+        ps2: `${WORLDCON}#355`,
+        label: 'Charred stone walls (burnt houses, second picture)',
+        why: CHARRED_WHY,
+    },
+    {
+        ootf: `${MW_COMMON}#5327`,
+        ps2: `${WORLDCON}#444`,
+        label: 'Stone block walls (houses, stone bridges)',
+        why: 'Drakan 2 dressed stone block wall, at four times the resolution, for the OotF village house walls and the arched stone bridges; both tile.',
+    },
+    {
+        ootf: `${MW_COMMON}#5351`,
+        ps2: `${WORLDCON}#469`,
+        label: 'Weathered stone (stone bridge sides)',
+        why: 'Drakan 2 stone blocks darkened by damp and moss, for the dirt-streaked sides of the OotF stone bridges.',
+    },
+    ...[5350, 5354, 5355].map((id) => ({
+        ootf: `${MW_COMMON}#${id}`,
+        ps2: 'LEVELS/LEVEL1ON/LEVEL1ON.TXD#690',
+        label: 'Cobbled walkway (stone bridges)',
+        why: 'The dark Surdana cobbles of Drakan 2, same size and tone, for the cobbled tops of the OotF stone bridges.',
+    })),
+    ...[
+        `${MW_COMMON}#3193`,
+        'Mountain World/Ruined Village/Ruined Village#3193',
+        'Mountain World/Ruined Village/Ruined Village#4582',
+    ].map((ootf) => ({
+        ootf,
+        ps2: 'LEVELS/LEVEL2RE/LEVEL2RE.TXD#497',
+        label: 'Brown rock (cliffs, boulders and rock walls)',
+        why: 'Drakan 2 weathered tan rock at twice the resolution, the object counterpart of the Drakan 2 ground rock the Mountain World slopes now draw (DEFAULT_PS2_TERRAIN_FAMILIES).',
+    })),
 ];
 
 export interface Ps2TextureSwapOptions {
@@ -125,6 +169,11 @@ export interface Ps2TextureSwapOptions {
     off?: readonly string[];
     /** Rows added to the table; a row with the `ootf` of a table row replaces it. */
     extra?: readonly Ps2TextureSubstitution[];
+    /**
+     * Ground: OotF terrain textures of the families in `DEFAULT_PS2_TERRAIN_FAMILIES` draw the Drakan 2 ground entry of their
+     * family (default true; false keeps every OotF ground texture). Off with `enabled: false` too.
+     */
+    terrain?: boolean;
 }
 
 /** One user edit of the table (the CLI's `--ps2-texture-map` JSON is an array of these): `ps2: null` turns a row off. */
@@ -175,7 +224,10 @@ export function ps2TextureSwapFromEdits(edits: unknown, base: Ps2TextureSwapOpti
     return { ...base, off, extra };
 }
 
-/** The rows a conversion uses: table minus `off`, `extra` replacing rows of the same OotF texture; empty when disabled. */
+/**
+ * The object rows a conversion uses: table minus `off`, `extra` replacing rows of the same OotF texture; empty when disabled. Ground
+ * rows (`effectiveTerrainSubstitutions`) are keyed by terrain textures, which no object uses, so an extra row may serve both.
+ */
 export function effectiveSubstitutions(o: Ps2TextureSwapOptions = {}): Ps2TextureSubstitution[] {
     if (o.enabled === false) return [];
     const off = new Set((o.off ?? []).map(ootfTextureKey));
@@ -183,6 +235,224 @@ export function effectiveSubstitutions(o: Ps2TextureSwapOptions = {}): Ps2Textur
     for (const r of [...(o.table ?? DEFAULT_PS2_TEXTURE_SUBSTITUTIONS), ...(o.extra ?? [])])
         rows.set(ootfTextureKey(r.ootf), r);
     return [...rows.entries()].filter(([k]) => !off.has(k)).map(([, r]) => r);
+}
+
+/** The Drakan 2 ground textures (`Proc Textures`); a row whose `ps2` names this TXD is a ground row. */
+export const PS2_TERRAIN_TXD = 'WORLDCON/PROCTEES/PROCTEES.TXD';
+
+function isTerrainRow(r: Ps2TextureSubstitution): boolean {
+    try {
+        return parseTextureRef(r.ps2).path.toUpperCase() === PS2_TERRAIN_TXD;
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * One OotF ground family drawn with one Drakan 2 ground texture: a surface's variants (the PC paints each cell with one of
+ * up to six variants of a surface at random) and the transition tiles whose larger part is that surface.
+ */
+export interface Ps2TerrainFamily {
+    /** What it is, in words a player understands. */
+    label: string;
+    /** The OotF texture container (install path without extension). */
+    container: string;
+    /** Texture ids of the family in that container. */
+    ids: readonly number[];
+    /** The Drakan 2 `Proc Textures` id (`PS2_TERRAIN_TXD`); its own material sets tiling, fade and foot-steps. */
+    ps2: number;
+    /** Why the pair matches. */
+    why: string;
+}
+
+const range = (a: number, b: number): number[] => Array.from({ length: b - a + 1 }, (_, i) => a + i);
+const MW_TD = 'Mountain World/Mountain World Common/Mountain World Common TD';
+
+/**
+ * The curated ground families. Why whole families: the PS2 engine blends every cell's texture into its neighbours (splats
+ * from per-vertex counts of the four cells round a vertex), so where the PC paints neighbouring cells with different variants
+ * of one surface no texture is ever drawn at full weight (0.6 % of the Ruined Village cells against 41 % in Surdana) and the
+ * ground reads as a patchwork of half-blended squares. One Drakan 2 texture per surface, tiled in world space by its own
+ * material, blends only where the surface really changes, as on the disc. Transition tiles (grass to rock, rock to snow, path
+ * edges) join the surface that covers most of their pixels; snow on rock and rocky tracks in snow join the snow or the track
+ * from 35 % on, so snow fields and tracks stay joined, and grass tiles crossed by a thin earth trail (60 % green or more) stay grass: one PS2 cell of earth, blended into
+ * its neighbours, would draw the trail two to three times as wide as the PC. Ids: Mountain World (Intro, Ruined Village, Wartok Canyons, Grimstone Mines, Grotto). Other worlds keep
+ * their OotF ground (not reviewed yet).
+ */
+export const DEFAULT_PS2_TERRAIN_FAMILIES: readonly Ps2TerrainFamily[] = [
+    {
+        label: 'Grass (Mountain World)',
+        container: MW_TD,
+        ids: [
+            ...range(2, 7),
+            21,
+            22,
+            24,
+            30,
+            31,
+            34,
+            ...range(151, 154),
+            ...range(160, 167),
+            ...range(173, 177),
+            ...range(179, 192),
+            361,
+            363,
+            364,
+            365,
+            408,
+        ],
+        ps2: 537,
+        why: 'Drakan 2 "Grass" (Surdana), a meadow grass with visible blades; one cell per tile. Mossy Green, nearer in colour, read as mossy rock in the dusk light of the Ruined Village.',
+    },
+    {
+        label: 'Brown rock ground and slopes (Mountain World)',
+        container: MW_TD,
+        ids: [
+            ...range(9, 14),
+            20,
+            23,
+            ...range(25, 29),
+            32,
+            33,
+            ...range(35, 56),
+            60,
+            61,
+            67,
+            69,
+            72,
+            73,
+            76,
+            78,
+            80,
+            83,
+            86,
+            87,
+            90,
+            91,
+            103,
+            104,
+            105,
+            108,
+            109,
+            ...range(222, 241),
+            ...range(254, 258),
+            395,
+            396,
+            397,
+            411,
+            412,
+            419,
+            ...range(422, 426),
+            431,
+        ],
+        ps2: 621,
+        why: 'Drakan 2 "Brown Rock Outdoor": weathered brown rock with cracks, the same kind of surface as the OotF rock-plate ground and mountain sides, tiled over 4 x 4 cells.',
+    },
+    {
+        label: 'Snow (Mountain World)',
+        container: MW_TD,
+        ids: [
+            16,
+            57,
+            58,
+            59,
+            63,
+            64,
+            65,
+            68,
+            71,
+            288,
+            289,
+            295,
+            309,
+            312,
+            ...range(316, 319),
+            ...range(390, 393),
+            427,
+            428,
+            429,
+            466,
+        ],
+        ps2: 563,
+        why: 'Drakan 2 "Blue Snow", the snow of Surdana, Ravenshold and the Tundra.',
+    },
+    {
+        label: 'Dark earth paths (Mountain World)',
+        container: MW_TD,
+        ids: [
+            ...range(120, 123),
+            ...range(127, 136),
+            139,
+            140,
+            141,
+            ...range(143, 145),
+            156,
+            159,
+            ...range(168, 171),
+            ...range(206, 209),
+        ],
+        ps2: 13719,
+        why: 'Drakan 2 "Mud" (Ravenshold, Andrellian), dark wet earth of nearly the same colour as the OotF paths.',
+    },
+    {
+        label: 'Rocky paths in snow (Mountain World)',
+        container: MW_TD,
+        ids: [
+            ...range(272, 275),
+            ...range(277, 287),
+            290,
+            291,
+            292,
+            294,
+            296,
+            ...range(297, 302),
+            304,
+            306,
+            307,
+            308,
+            311,
+            314,
+            315,
+            ...range(320, 323),
+            ...range(325, 330),
+            332,
+            333,
+            334,
+            335,
+        ],
+        ps2: 535,
+        why: 'Drakan 2 "Rock - Gray (Outdoor)", the grey mountain rock of every snow level, for the grey stony tracks through OotF snow.',
+    },
+];
+
+/** The ground families as `container#id` -> `PS2_TERRAIN_TXD#id` rows (for edits, listings and `--ps2-texture-map`). */
+export function ps2TerrainRows(
+    families: readonly Ps2TerrainFamily[] = DEFAULT_PS2_TERRAIN_FAMILIES,
+): Ps2TextureSubstitution[] {
+    return families.flatMap((f) =>
+        f.ids.map((id) => ({
+            ootf: `${f.container}#${id}`,
+            ps2: `${PS2_TERRAIN_TXD}#${f.ps2}`,
+            label: f.label,
+            why: f.why,
+        })),
+    );
+}
+
+/**
+ * Ground textures a conversion swaps: lower-case `container#id` of an OotF terrain texture -> the Drakan 2 `Proc Textures` id.
+ * The family table plus `extra` rows that name `PS2_TERRAIN_TXD`, minus `off`; empty when `enabled` or `terrain` is false.
+ */
+export function effectiveTerrainSubstitutions(
+    o: Ps2TextureSwapOptions = {},
+    families: readonly Ps2TerrainFamily[] = DEFAULT_PS2_TERRAIN_FAMILIES,
+): Map<string, number> {
+    const out = new Map<string, number>();
+    if (o.enabled === false || o.terrain === false) return out;
+    for (const r of [...ps2TerrainRows(families), ...(o.extra ?? []).filter(isTerrainRow)])
+        out.set(ootfTextureKey(r.ootf), parseTextureRef(r.ps2).id);
+    for (const k of (o.off ?? []).map(ootfTextureKey)) out.delete(k);
+    return out;
 }
 
 /** A disc texture ready to copy: its record bodies (first frame, then the animation frames) and what the checks need. */

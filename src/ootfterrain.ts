@@ -80,6 +80,11 @@ export interface TerrainTextureOptions {
     firstId?: number;
     /** Header +40 value (default `TERRAIN_TEXTURE_SLOT`). */
     slot?: number;
+    /**
+     * Drakan 2 ground in place of OotF ground: lower-case `container#id` of a PC terrain texture -> an id of the base
+     * (`Proc Textures`) TXD the cells use instead (`effectiveTerrainSubstitutions`). Ids the base TXD lacks are ignored.
+     */
+    native?: ReadonlyMap<string, number>;
 }
 
 export interface TerrainTextureReport {
@@ -91,6 +96,8 @@ export interface TerrainTextureReport {
     cellsUnmapped: number;
     /** PC liquid textures mapped to the template's native water / lava entries (`PS2_WATER_TEXTURE`, `PS2_LAVA_TEXTURE`). */
     liquids?: number;
+    /** Ground cells (summed over the levels) drawn with a Drakan 2 ground texture (`TerrainTextureOptions.native`). */
+    nativeCells?: number;
 }
 
 /** The dependency index of the template's `Proc Textures` entry (9 in LEVEL1NA), or undefined. */
@@ -237,6 +244,14 @@ export class TerrainTextureBuilder {
             const label = `${ref >>> 16}/${ref & 0xffff}`;
             if (!key) {
                 this.report.skipped.set(label, `dependency ${ref >>> 16} not found`);
+                continue;
+            }
+            const native = opt.native?.get(key);
+            if (native !== undefined && this.hasEntry(native)) {
+                const nref = ((this.db << 16) | native) >>> 0;
+                level.set(ref, nref);
+                colors.push({ ref, mean: this.meanOfRef(nref) ?? [128, 128, 128], made: true });
+                this.report.nativeCells = (this.report.nativeCells ?? 0) + (uses.get(ref) ?? 0);
                 continue;
             }
             const known = this.ids.get(key);

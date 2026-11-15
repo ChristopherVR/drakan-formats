@@ -112,6 +112,26 @@ describe('terrain textures', () => {
         expect(t.mapTexture(7, pc)).toBe(t.mapTexture(6, pc));
     });
 
+    it('draws mapped textures with a Drakan 2 ground entry of the base TXD instead of converting them', async () => {
+        const b = await TerrainTextureBuilder.create(src, base, 24, {
+            minSize: 0,
+            native: new Map([
+                ['lvl/lvl#6', 3],
+                ['lvl/lvl#7', 3],
+                ['lvl/lvl#5', 4], // not in the base TXD: converted as before
+            ]),
+        });
+        const map = await b.addLevel(pc);
+        expect(map(6, pc)).toBe(((24 << 16) | 3) >>> 0);
+        expect(map(7, pc)).toBe(map(6, pc));
+        expect(map(5, pc)! & 0xffff).not.toBe(4);
+        expect(b.report.converted).toBe(1);
+        expect(b.report.nativeCells).toBe(3);
+        // the far textures take a Drakan 2 entry's own picture, shrunk like a converted tile
+        expect(b.texelsOfRef(map(6, pc)!)).not.toBeNull();
+        expect(b.meanOfRef(map(6, pc)!)).toEqual([255, 255, 255]);
+    });
+
     it('finds the splat dependency', () => {
         expect(findSplatDbIndex(pc.header)).toBe(24);
     });
