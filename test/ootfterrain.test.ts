@@ -15,6 +15,7 @@ import {
     nativeWaterTextures,
     findSplatDbIndex,
     opaqueTextureCopy,
+    cellGradient,
 } from '../src/ootfterrain.ts';
 import { planTerrainSlots } from '../src/terrainblob.ts';
 import type { TerrainLayer } from '../src/terrain.ts';
@@ -131,6 +132,39 @@ describe('terrain textures', () => {
         // the far textures take a Drakan 2 entry's own picture, shrunk like a converted tile
         expect(b.texelsOfRef(map(6, pc)!)).not.toBeNull();
         expect(b.meanOfRef(map(6, pc)!)).toEqual([255, 255, 255]);
+    });
+
+    it('keeps the converted texture on steep cells of a Drakan 2 rock family (nativeSteepKeep)', async () => {
+        // 3 x 1 cells of texture 6: flat, 30 degrees, 60 degrees
+        const rise = [0, 0, Math.tan(Math.PI / 6) * 2048, Math.tan(Math.PI / 3) * 2048];
+        const at = (i: number): number => rise.slice(0, i + 1).reduce((a, b) => a + b, 0);
+        const row = [at(0), at(1), at(2), at(3)];
+        const L = {
+            type: 0,
+            width: 3,
+            height: 1,
+            heights: Float32Array.from([...row, ...row]),
+            cellTexLeft: new Uint32Array([6, 6, 6]),
+        } as unknown as TerrainLayer;
+        expect(cellGradient(L, 0)).toBeCloseTo(0);
+        expect(cellGradient(L, 2)).toBeCloseTo(Math.sqrt(3));
+        const lvl = { ...pc, terrain: [L] } as unknown as PcLevel;
+        const opts = { minSize: 0, native: new Map([['lvl/lvl#6', 3]]), nativeSteepKeep: new Set([3]) };
+        const b = await TerrainTextureBuilder.create(src, base, 24, opts);
+        const map = await b.addLevel(lvl);
+        expect(map(6, lvl)).toBe(((24 << 16) | 3) >>> 0);
+        expect(map.cell!(6, L, 0)).toBeUndefined();
+        expect(map.cell!(6, L, 1)).toBeUndefined(); // 30 degrees: under the default 40
+        const steep = map.cell!(6, L, 2)!;
+        expect(steep >>> 16).toBe(24);
+        expect(steep & 0xffff).not.toBe(3);
+        expect(b.report.steepCells).toBe(1);
+        expect(b.report.steepTextures).toBe(1);
+        // off with an empty set or gradient 0
+        const off = await TerrainTextureBuilder.create(src, base, 24, { ...opts, nativeSteepKeep: new Set<number>() });
+        expect((await off.addLevel(lvl)).cell).toBeUndefined();
+        const off2 = await TerrainTextureBuilder.create(src, base, 24, { ...opts, steepGradient: 0 });
+        expect((await off2.addLevel(lvl)).cell).toBeUndefined();
     });
 
     /** Proc Textures style 32 bpp record: 4 x 4, header +16 alpha selector, +37 feature byte, +40 material. */

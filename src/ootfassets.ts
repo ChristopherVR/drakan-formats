@@ -339,6 +339,8 @@ export class OotfAssetBuilder {
     private readonly polygonDrops = new Map<string, ReadonlySet<number>>();
     /** Model key -> offset (model units) taken off every vertex (a flame's embers kept where its object moved from). */
     private readonly modelShifts = new Map<string, readonly [number, number, number]>();
+    /** Model key -> vertex positions (model units) of the Drakan 2 drawing that replaced it (`useDiscModel`, after the fit). */
+    private readonly discDrawn = new Map<string, Float32Array>();
     /** Models that get the bounds of a pressure plate, with the box's headroom in model units (`requirePlateBox`). */
     private readonly plateBoxKeys = new Map<string, number>();
     /** Models whose lowest bounding sphere is moved down by that many model units (`requireSunkSphere`). */
@@ -1202,6 +1204,15 @@ export class OotfAssetBuilder {
         return true;
     }
 
+    /**
+     * Vertex positions (model units) a PC model reference is drawn with when a Drakan 2 model replaced it (`useDiscModel`,
+     * fitted onto the PC model's box when the row says so); null when the PC model itself is drawn.
+     */
+    discDrawnPositions(owner: string, pcDb: number, pcId: number): Float32Array | null {
+        const c = this.resolveContainer(owner, pcDb);
+        return c ? (this.discDrawn.get(`${lower(c)}#${pcId}`) ?? null) : null;
+    }
+
     /** The PC model a reference in `owner`'s ODB names (null when missing or unreadable), without converting it. */
     async readPcModel(owner: string, pcDb: number, pcId: number): Promise<PcModel | null> {
         await this.registerOwner(owner);
@@ -1323,6 +1334,15 @@ export class OotfAssetBuilder {
                 const pUsed = new Set(m.model.polygons.flatMap((q) => q.indices));
                 fitVertices(dv, boxOf(dv.positions, dUsed), boxOf(m.model.positions, pUsed));
             }
+            const used = new Set(dModel.polygons.flatMap((q) => q.indices));
+            this.discDrawn.set(
+                key,
+                Float32Array.from(
+                    [...used]
+                        .filter((i) => i * 3 + 2 < dv.positions.length)
+                        .flatMap((i) => [dv.positions[i * 3]!, dv.positions[i * 3 + 1]!, dv.positions[i * 3 + 2]!]),
+                ),
+            );
             before = appendTextures(pName, []).before;
             drawing = combineDrawing(pVerts, dv, dList, before);
         } catch (e) {

@@ -124,6 +124,8 @@ export interface ConvertOptions {
      * PC layer of the cell (water layers take the native liquid textures, `TerrainTextureBuilder.addLevel`).
      */
     mapTexture?: (pcRef: number, pc: PcLevel, layer: TerrainLayer) => number | null;
+    /** Per-cell override of `mapTexture` (a ref, or undefined for the texture's own; ootfterrain.ts steep rock cells). */
+    mapTextureCell?: (pcRef: number, layer: TerrainLayer, cell: number) => number | undefined;
     /** PS2 ref used for every cell whose texture cannot be mapped (hole and invisible cells stay as they are). */
     textureFallback: number;
     /** Level name written to the header (default: the PC level's own name). */
@@ -549,7 +551,8 @@ function convertLayer(
             cellTexLeft[c] = ref;
             continue;
         }
-        let m = cache.get(ref);
+        let m: number | null | undefined = opt.mapTextureCell?.(ref, L, c);
+        if (m === undefined) m = cache.get(ref);
         if (m === undefined) {
             m = opt.mapTexture?.(ref, pc, L) ?? -1;
             cache.set(ref, m);

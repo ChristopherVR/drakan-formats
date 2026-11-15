@@ -212,7 +212,7 @@ import {
     planPs2Models,
     type Ps2ModelSubstitution,
 } from './ootfps2model.ts';
-import { readPs2Neutral } from './ootfmodel.ts';
+import { readPs2Neutral, type PcModel } from './ootfmodel.ts';
 import { TXD_ENTRY_TYPE } from './txd.ts';
 import type { DiscModelSource } from './ootfassets.ts';
 import { ownModelClasses } from './ootfownmodel.ts';
@@ -226,12 +226,21 @@ import {
 } from './ootfclassrefs.ts';
 import { CELL_SIZE, LVL_TYPE_LAYERS, parsePs2Terrain, terrainGroundBelow, terrainHeightAt } from './terrain.ts';
 import {
+    footprintBase,
+    footprintSamples,
+    groundSnap,
+    isGroundableProp,
     isGroundableTree,
-    treeGroundHeight,
+    meshUnder,
+    modelFoot,
+    nativeModelLift,
+    placeMesh,
     treeGroundingOn,
+    turretOnBase,
     trunkFootprint,
-    type TrunkFootprint,
+    type PlacedMesh,
 } from './ootftreeground.ts';
+import { engineClassInfo } from './ootfclass.ts';
 import { odbStemForDependency } from './odb.ts';
 import {
     animName,
@@ -2917,6 +2926,7 @@ export async function convertOotfLevels(
                       : tex
                         ? tex.mapTexture
                         : undefined,
+                mapTextureCell: opt.terrainDiscTextures ? undefined : procMap?.cell,
                 mapResource,
                 mapClassRef: opt.classes !== false ? mapObjectClassRef : undefined,
                 keepPcDefaults: (c, t) => keepsPcDefaults(c.rflClass) && nameMapped.has(`${t.dbIndex}:${t.classId}`),
@@ -3868,36 +3878,193 @@ export async function convertOotfLevels(
             });
         // Emitters that burn for good on the PC but carry no visible flag (Alwarren's crystal rings): drawn, harmless
         // (ootfps2model.ts `harmlessShow`, ootfpropremake.ts).
-        // Trees whose trunk base is over the ground all round drop until it meets the lowest ground under the trunk
-        // (ootftreeground.ts; owner's decision of 15 November, DRAKAN_TREE_GROUNDING=off keeps the PC heights).
+        // Ground snap (ootftreeground.ts; owner's decisions of 15 and 16 November, DRAKAN_TREE_GROUNDING=off keeps the PC
+        // heights): classes drawn with a disc model of their own keep the PC model's bottom (the Ballisata Base), trees whose
+        // trunk floats on any side drop onto the lowest ground under the trunk, props floating a little all round touch down;
+        // nothing moves with another object's mesh under it.
         if (treeGroundingOn(opt.treeGrounding, dbgEnv0))
-            await stage(`tree grounding ${pc.path}`, async () => {
+            await stage(`ground snap ${pc.path}`, async () => {
                 const pcIdOf = new Map([...(parts.objectIdMap ?? new Map<number, number>())].map(([a, b]) => [b, a]));
-                const prints = new Map<OdbClass, TrunkFootprint | null>();
+                const pcModels = new Map<OdbClass, PcModel | null>();
+                const pcModelOf = async (c: OdbClass): Promise<PcModel | null> => {
+                    if (!pcModels.has(c)) {
+                        const ow = ownerOf.get(c);
+                        pcModels.set(c, ow && c.model ? await builder.readPcModel(ow, c.model.db, c.model.id) : null);
+                    }
+                    return pcModels.get(c)!;
+                };
+                // The disc model a class mapped by name onto a disc class is drawn with (null: drawn with its PC model).
+                const nativeModels = new Map<OdbClass, Promise<ArrayLike<number> | null>>();
+                const nativeModelOf = (c: OdbClass): Promise<ArrayLike<number> | null> => {
+                    let p = nativeModels.get(c);
+                    if (!p) {
+                        p = (async () => {
+                            const k = planKey.get(sig(c));
+                            const t = k ? plan?.mapped.get(`${k.db}:${k.id}`) : undefined;
+                            if (!t?.cls.model) return null;
+                            const mStem = containerStem(stemOfTarget(t), t.cls.model.db);
+                            const mod = mStem ? await discFile(mStem, 'MOD') : null;
+                            const m = mod ? await readPs2Neutral(mod, t.cls.model.id).catch(() => null) : null;
+                            return m?.positions ?? null;
+                        })();
+                        nativeModels.set(c, p);
+                    }
+                    return p;
+                };
+                const meshes: PlacedMesh[] = [];
+                const tilted: { id: number; min: number[]; max: number[] }[] = [];
+                for (const x of pc.list.objects) {
+                    const c = pc.classes.get(x.dbIndex)?.get(x.classId);
+                    // Only drawn, solid classes carry: scenery and mechanisms (doors, movers), not sounds or markers.
+                    const kind = c ? engineClassInfo(c.rflClass ?? -1)?.kind : undefined;
+                    const m = c && (kind === 'scenery' || kind === 'mechanism') ? await pcModelOf(c) : null;
+                    if (!m) continue;
+                    const pm = placeMesh(x.id, x, m.positions, m.polygons);
+                    if (pm) meshes.push(pm);
+                    else {
+                        // Tilted (no Euler order known): its bounding sphere counts as a support.
+                        let r = 0;
+                        for (let i = 0; i < m.positions.length; i++) r = Math.max(r, Math.abs(m.positions[i]!));
+                        r *= CELL_SIZE * Math.max(...(x.scale ?? [1, 1, 1]));
+                        tilted.push({
+                            id: x.id,
+                            min: [x.pos[0] - r, x.pos[1] - r, x.pos[2] - r],
+                            max: [x.pos[0] + r, x.pos[1] + r, x.pos[2] + r],
+                        });
+                    }
+                }
+                const lifted: string[] = [];
+                const liftedBases: LvlObject[] = [];
                 const moved: string[] = [];
+                const left = new Map<string, number>();
+                for (const o of lvl.objects.objects) {
+                    const pcId = pcIdOf.get(o.id) ?? o.id;
+                    const srcObj = pc.list.objects.find((x) => x.id === pcId);
+                    const pcCls = srcObj ? pc.classes.get(srcObj.dbIndex)?.get(srcObj.classId) : undefined;
+                    const ow = pcCls ? ownerOf.get(pcCls) : undefined;
+                    if (!srcObj || !pcCls?.model || !ow || pcCls.rflClass !== GROUND_OBJECT_RFL) continue;
+                    const pushOver = pcFieldNumber(pc, srcObj, 'Push Over Mode') ?? 0;
+                    const pcm = await pcModelOf(pcCls);
+                    if (!pcm) continue;
+                    const groundAt = (x: number, z: number, y: number) => terrainGroundBelow(pc.terrain, x, z, y + 100);
+                    const placed = { pos: o.pos, rot: srcObj.rot, scale: o.scale };
+                    const native = await nativeModelOf(pcCls);
+                    if (native && !pushOver) {
+                        // Keep the PC model's bottom when it stands on the ground (touches it somewhere under its base).
+                        const pf = trunkFootprint(pcm.positions);
+                        const nf = modelFoot(native);
+                        const lift = pf && nf !== null ? nativeModelLift(pf.foot, nf, o.scale?.[1] ?? 1) : null;
+                        if (pf && lift !== null) {
+                            const pcBase = footprintBase(placed, pf);
+                            const s = groundSnap(placed, pf, 'tree', (x, z) => groundAt(x, z, pcBase));
+                            if (s.verdict !== 'no-ground' && s.floatLow >= -128 && s.floatAll <= 128) {
+                                o.pos = [o.pos[0], o.pos[1] + lift, o.pos[2]];
+                                lifted.push(`${o.id} "${pcCls.name.trim()}" up ${Math.round(lift)}`);
+                                liftedBases.push(o);
+                            }
+                        }
+                        continue;
+                    }
+                    if (native) continue;
+                    const kind = isGroundableTree(pcCls, pushOver)
+                        ? 'tree'
+                        : isGroundableProp(pcCls, pushOver)
+                          ? 'prop'
+                          : null;
+                    if (!kind) continue;
+                    const drawn = builder.discDrawnPositions(ow, pcCls.model.db, pcCls.model.id);
+                    const f = trunkFootprint(drawn ?? pcm.positions);
+                    if (!f) continue;
+                    const base = footprintBase(placed, f);
+                    const s = groundSnap(
+                        placed,
+                        f,
+                        kind,
+                        (x, z) => groundAt(x, z, base),
+                        (x, z, top) => {
+                            for (const t of tilted)
+                                if (
+                                    t.id !== pcId &&
+                                    x >= t.min[0]! &&
+                                    x <= t.max[0]! &&
+                                    z >= t.min[2]! &&
+                                    z <= t.max[2]! &&
+                                    t.min[1]! <= top
+                                )
+                                    return Math.min(top, t.max[1]!);
+                            return meshUnder(meshes, x, z, top, pcId);
+                        },
+                    );
+                    if (s.verdict === 'moved') {
+                        moved.push(`${o.id} "${pcCls.name.trim()}" down ${Math.round(o.pos[1] - s.y!)}`);
+                        o.pos = [o.pos[0], s.y!, o.pos[2]];
+                    } else if (s.verdict !== 'touching') {
+                        const k = `${kind} ${s.verdict}`;
+                        left.set(k, (left.get(k) ?? 0) + 1);
+                        if (dbgEnv0['DRAKAN_DBG_GROUND']) {
+                            const by =
+                                s.verdict === 'supported'
+                                    ? meshes
+                                          .filter((m) =>
+                                              footprintSamples(placed, f).some(([x, z]) =>
+                                                  Number.isFinite(meshUnder([m], x, z, base + 32, pcId)),
+                                              ),
+                                          )
+                                          .map((m) => {
+                                              const so = pc.list.objects.find((x) => x.id === m.id);
+                                              const sc = so ? pc.classes.get(so.dbIndex)?.get(so.classId) : undefined;
+                                              return `${m.id} ${sc?.name.trim() ?? '?'}`;
+                                          })
+                                          .concat(
+                                              tilted
+                                                  .filter((t) =>
+                                                      footprintSamples(placed, f).some(
+                                                          ([x, z]) =>
+                                                              x >= t.min[0]! &&
+                                                              x <= t.max[0]! &&
+                                                              z >= t.min[2]! &&
+                                                              z <= t.max[2]!,
+                                                      ),
+                                                  )
+                                                  .map((t) => {
+                                                      const so = pc.list.objects.find((x) => x.id === t.id);
+                                                      const sc = so
+                                                          ? pc.classes.get(so.dbIndex)?.get(so.classId)
+                                                          : undefined;
+                                                      return `tilted ${t.id} ${sc?.name.trim() ?? '?'} rfl ${sc?.rflClass} r ${Math.round((t.max[0]! - t.min[0]!) / 2)}`;
+                                                  }),
+                                          )
+                                          .join('; ')
+                                    : '';
+                            log(
+                                `ground snap ${title}: ${o.id} "${pcCls.name.trim()}" left (${s.verdict}, ${Math.round(s.floatLow)} over the lowest ground, ${Math.round(s.floatAll)} over the highest) ${by}`,
+                            );
+                        }
+                    }
+                }
+                // A turret on a lifted disc base sits where the disc puts it on that base (`turretOnBase`): the PC ballista
+                // stands on a pillar 2000 units tall, the disc base is a low platform the swivel goes into.
+                const seated: string[] = [];
                 for (const o of lvl.objects.objects) {
                     const srcObj = pc.list.objects.find((x) => x.id === (pcIdOf.get(o.id) ?? o.id));
                     const pcCls = srcObj ? pc.classes.get(srcObj.dbIndex)?.get(srcObj.classId) : undefined;
-                    const ow = pcCls ? ownerOf.get(pcCls) : undefined;
-                    if (!srcObj || !pcCls?.model || !ow) continue;
-                    if (!isGroundableTree(pcCls, pcFieldNumber(pc, srcObj, 'Push Over Mode') ?? 0)) continue;
-                    if (!prints.has(pcCls)) {
-                        const m = await builder.readPcModel(ow, pcCls.model.db, pcCls.model.id);
-                        prints.set(pcCls, m ? trunkFootprint(m.positions) : null);
-                    }
-                    const f = prints.get(pcCls);
-                    if (!f) continue;
-                    const y = treeGroundHeight({ pos: o.pos, rot: srcObj.rot, scale: o.scale }, f, (x, z) =>
-                        terrainGroundBelow(pc.terrain, x, z, o.pos[1] + 100),
-                    );
-                    if (y === null) continue;
-                    moved.push(`${o.id} "${pcCls.name.trim()}" down ${Math.round(o.pos[1] - y)}`);
+                    if (!pcCls || !(await nativeModelOf(pcCls))) continue;
+                    const base = liftedBases.find((b) => Math.hypot(b.pos[0] - o.pos[0], b.pos[2] - o.pos[2]) < 256);
+                    const y = base ? turretOnBase(pcCls, base.pos[1]) : null;
+                    if (y === null || o.pos[1] <= y) continue;
+                    seated.push(`${o.id} "${pcCls.name.trim()}" down ${Math.round(o.pos[1] - y)}`);
                     o.pos = [o.pos[0], y, o.pos[2]];
                 }
-                if (moved.length)
+                if (lifted.length)
                     log(
-                        `tree grounding ${title}: ${moved.length} tree(s) lowered onto the ground: ${moved.join(', ')}`,
+                        `ground snap ${title}: ${lifted.length} disc-model object(s) kept on the PC bottom: ${lifted.join(', ')}`,
                     );
+                if (seated.length)
+                    log(`ground snap ${title}: ${seated.length} turret(s) seated on their base: ${seated.join(', ')}`);
+                if (moved.length)
+                    log(`ground snap ${title}: ${moved.length} object(s) lowered onto the ground: ${moved.join(', ')}`);
+                if (left.size)
+                    log(`ground snap ${title}: floating, left: ${[...left].map(([k, n]) => `${n} ${k}`).join(', ')}`);
             });
         await stage(`harmless fires ${pc.path}`, async () => {
             const pcIdOf = new Map([...(parts.objectIdMap ?? new Map<number, number>())].map(([a, b]) => [b, a]));
@@ -4348,6 +4515,10 @@ export async function convertOotfLevels(
     // ---- files
     if (terrBuilder) res.files[TERRAIN_TXD_PATH] = terrBuilder.build();
     if (terrBuilder?.report.nativeCells) log(`drakan 2 ground: ${terrBuilder.report.nativeCells} cells`);
+    if (terrBuilder?.report.steepCells)
+        log(
+            `drakan 2 ground, steep rock cells kept on their OotF texture: ${terrBuilder.report.steepCells} (${terrBuilder.report.steepTextures ?? 0} textures)`,
+        );
     const opaque = terrBuilder?.report.nativeOpaque;
     if (opaque?.size) log(`drakan 2 ground, opaque copies: ${[...opaque].map(([b, c]) => `${b} -> ${c}`).join(', ')}`);
     res.assets = builder.report;

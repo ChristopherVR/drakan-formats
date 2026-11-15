@@ -13,7 +13,7 @@ import { view } from './bytes.ts';
 import { type OdbClass, classFieldDefault } from './odb.ts';
 import { type PcFileSource, type PcLevel, parsePcOdbClasses, resolvePcPath } from './pc.ts';
 import { SrscReader } from './srsc.ts';
-import { TEX_HOLE, TEX_INVISIBLE, type TerrainLayer } from './terrain.ts';
+import { CELL_SIZE, TEX_HOLE, TEX_INVISIBLE, type TerrainLayer } from './terrain.ts';
 import { LAYER_TYPE_WATER } from './convert.ts';
 import { TXD_ENTRY_TYPE, decodeTxd } from './txd.ts';
 import { planTerrainSlots } from './terrainblob.ts';
@@ -93,7 +93,41 @@ export interface TerrainTextureOptions {
      * Dev knob `DRAKAN_TERRAIN_NATIVE_OPAQUE=0` turns it off when the option is unset.
      */
     nativeOpaque?: boolean;
+    /**
+     * `native` base ids whose steep cells keep their converted OotF texture (default `NATIVE_STEEP_KEEP`: the Drakan 2 rock
+     * 621 and 535). Those are tiled over 4 x 4 cells (32 texels per cell against the OotF tile's 64) and mapped from above,
+     * so on mountain faces they stretch into smooth streaks ("mushed up"); the OotF rock tiles keep the plates, cracks and
+     * snow streaks there. Empty set = off.
+     */
+    nativeSteepKeep?: ReadonlySet<number>;
+    /**
+     * Height gradient (rise per run) from which a cell is steep (default `STEEP_GRADIENT`, about 40 degrees). Dev knob
+     * `DRAKAN_TERRAIN_STEEP=<gradient>` when unset (0 = off).
+     */
+    steepGradient?: number;
 }
+
+/** Drakan 2 ground entries whose steep cells keep the OotF texture (`TerrainTextureOptions.nativeSteepKeep`). */
+export const NATIVE_STEEP_KEEP: ReadonlySet<number> = new Set([621, 535]);
+/** Default steep gradient: a cell rising 0.84 cell widths per cell width (40 degrees) is a mountain face. */
+export const STEEP_GRADIENT = 0.84;
+
+/** Gradient (rise over run) of a terrain cell from its four corner heights. */
+export function cellGradient(L: TerrainLayer, cell: number): number {
+    const cx = cell % L.width;
+    const cz = Math.floor(cell / L.width);
+    const st = L.width + 1;
+    const a = L.heights[cz * st + cx]!;
+    const b = L.heights[cz * st + cx + 1]!;
+    const c = L.heights[(cz + 1) * st + cx]!;
+    const d = L.heights[(cz + 1) * st + cx + 1]!;
+    const gx = (b - a + (d - c)) / 2 / CELL_SIZE;
+    const gz = (c - a + (d - b)) / 2 / CELL_SIZE;
+    return Math.hypot(gx, gz);
+}
+
+/** Per-cell texture choice on top of the per-texture map: a ref for this cell, or undefined for the texture's own. */
+export type TerrainCellMap = (pcRef: number, layer: TerrainLayer, cell: number) => number | undefined;
 
 export interface TerrainTextureReport {
     converted: number;
@@ -108,6 +142,10 @@ export interface TerrainTextureReport {
     nativeCells?: number;
     /** Base TXD id -> id of its opaque copy, for the `native` entries that needed one (`nativeOpaque`). */
     nativeOpaque?: Map<number, number>;
+    /** PC textures (summed over levels) converted for the steep cells of a Drakan 2 rock family (`nativeSteepKeep`). */
+    steepTextures?: number;
+    /** Steep cells (summed over levels) that keep their OotF texture. */
+    steepCells?: number;
 }
 
 /**
@@ -285,7 +323,9 @@ export class TerrainTextureBuilder {
      * Convert every texture the level's terrain uses (most used first). Returns the synchronous `mapTexture` for
      * `ConvertOptions.mapTexture` (PC ref -> `db << 16 | id`, null when the texture could not be converted).
      */
-    async addLevel(pc: PcLevel): Promise<(pcRef: number, pc: PcLevel, layer?: TerrainLayer) => number | null> {
+    async addLevel(
+        pc: PcLevel,
+    ): Promise<((pcRef: number, pc: PcLevel, layer?: TerrainLayer) => number | null) & { cell?: TerrainCellMap }> {
         const opt = this.opt;
         const maxTextures = opt.maxTextures ?? env('DRAKAN_TERRAIN_TEX_COUNT') ?? Infinity;
         const maxSize = opt.maxSize ?? env('DRAKAN_TERRAIN_TEX_MAX') ?? 256;
@@ -316,6 +356,11 @@ export class TerrainTextureBuilder {
             return c ? `${c.toLowerCase()}#${ref & 0xffff}` : null;
         };
         const level = new Map<number, number>(); // PC ref -> full PS2 ref for this level
+        const steepKeep = opt.nativeSteepKeep ?? NATIVE_STEEP_KEEP;
+        const steepGradient = opt.steepGradient ?? env('DRAKAN_TERRAIN_STEEP') ?? STEEP_GRADIENT;
+        /** Native refs of a steep-keep family: their OotF texture is converted too, for the steep cells. */
+        const steepRefs: number[] = [];
+        const steepLevel = new Map<number, number>();
         const colors: { ref: number; mean: [number, number, number]; made: boolean }[] = [];
         let made = 0;
         for (const ref of order) {
@@ -331,6 +376,7 @@ export class TerrainTextureBuilder {
                 level.set(ref, nref);
                 colors.push({ ref, mean: this.meanOfRef(nref) ?? [128, 128, 128], made: true });
                 this.report.nativeCells = (this.report.nativeCells ?? 0) + (uses.get(ref) ?? 0);
+                if (steepGradient > 0 && steepKeep.has(native)) steepRefs.push(ref);
                 continue;
             }
             const known = this.ids.get(key);
@@ -375,6 +421,52 @@ export class TerrainTextureBuilder {
             this.report.converted++;
             this.report.bytes += tex.body.length;
         }
+        // Steep cells of the Drakan 2 rock families keep their OotF texture (`nativeSteepKeep`); only textures that
+        // paint a steep cell are converted.
+        const steepCount = new Map<number, number>();
+        if (steepRefs.length) {
+            const want = new Set(steepRefs);
+            for (const L of pc.terrain) {
+                if (L.type === LAYER_TYPE_WATER || !L.heights) continue;
+                for (let c = 0; c < L.width * L.height; c++) {
+                    const r = L.cellTexLeft[c]!;
+                    if (want.has(r) && cellGradient(L, c) >= steepGradient)
+                        steepCount.set(r, (steepCount.get(r) ?? 0) + 1);
+                }
+            }
+        }
+        for (const ref of steepRefs) {
+            if (!steepCount.has(ref)) continue;
+            this.report.steepCells = (this.report.steepCells ?? 0) + steepCount.get(ref)!;
+            const key = keyOf(ref)!;
+            let id = this.ids.get(key);
+            if (id === undefined) {
+                const img = await this.decode(
+                    containerOf(pc, ref >>> 16)!,
+                    ref & 0xffff,
+                    `${ref >>> 16}/${ref & 0xffff}`,
+                );
+                if (!img || this.nextId > 0xffff) continue;
+                const tex = encodePs2Texture(img, {
+                    fps: 10,
+                    maxSize,
+                    minSize: opt.minSize ?? env('DRAKAN_TERRAIN_TEX_MIN') ?? 128,
+                    slot: opt.slot ?? env('DRAKAN_TERRAIN_SLOT') ?? TERRAIN_TEXTURE_SLOT,
+                    mode: 'indexed',
+                    maxTruecolorPixels: Infinity,
+                    ...opt.texture,
+                });
+                id = this.nextId++;
+                this.entries.push({ type: TXD_ENTRY_TYPE, id, sub: 0, data: tex.body });
+                this.ids.set(key, id);
+                this.means.set(id, meanColor(img.rgba));
+                this.smalls.set(id, cellTexelsOf(decodeTxd(tex.body, { upright: false })));
+                this.report.converted++;
+                this.report.bytes += tex.body.length;
+                this.report.steepTextures = (this.report.steepTextures ?? 0) + 1;
+            }
+            steepLevel.set(ref, ((this.db << 16) | id) >>> 0);
+        }
         // Reduction: textures past the cap take the nearest converted one of this level by mean colour.
         const have = colors.filter((d) => d.made);
         for (const d of colors) {
@@ -392,10 +484,16 @@ export class TerrainTextureBuilder {
             this.report.reduced++;
         }
         for (const [r, n] of uses) if (!level.has(r)) this.report.cellsUnmapped += n;
-        return (ref, _pc, layer) =>
+        const map = (ref: number, _pc: PcLevel, layer?: TerrainLayer): number | null =>
             noRef
                 ? null
                 : ((layer?.type === LAYER_TYPE_WATER ? liquids.get(ref) : undefined) ?? level.get(ref) ?? null);
+        if (!steepLevel.size || noRef) return map;
+        const cell: TerrainCellMap = (ref, layer, c) => {
+            const k = layer.type === LAYER_TYPE_WATER ? undefined : steepLevel.get(ref);
+            return k === undefined || cellGradient(layer, c) < steepGradient ? undefined : k;
+        };
+        return Object.assign(map, { cell });
     }
 
     /**
