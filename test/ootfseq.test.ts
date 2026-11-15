@@ -12,6 +12,10 @@ import {
     PC_DEFAULT_FOV,
     remapSequenceRefs,
     settlePlayerLying,
+    convertAction,
+    MUSIC_STOP_LEVEL,
+    addSceneDoorHolds,
+    actorKeyPositions,
     skeletonChannelMap,
     ssdEntryPath,
     sequenceSoundRefs,
@@ -157,6 +161,22 @@ describe('ootfseq', () => {
         });
         const t = parseSequence(again.entries[1]!.id, again.entries[1]!.sub, again.entries[1]!.data)!;
         expect(t.actors.filter((a) => a.ref === 77)).toHaveLength(1);
+    });
+    it('starts a screen fader with On whatever number the PC scene sends it', async () => {
+        const convert = async (screenFaders?: Set<number>): Promise<number[]> => {
+            const r = await convertPcSequences(stub(pcSeq()), {
+                maps: { objectIdMap: new Map([[200, 12]]) },
+                usedIds: new Set(),
+                screenFaders,
+            });
+            const s = parseSequence(r.entries[1]!.id, r.entries[1]!.sub, r.entries[1]!.data)!;
+            return parseActions(s.actors.find((a) => a.ref === 12)!)!
+                .filter((a) => a.type === 7)
+                .map((a) => a.fields[0]!.value);
+        };
+        expect(await convert()).toEqual([4097, 25]);
+        expect(await convert(new Set([200]))).toEqual([4097, 4097]);
+        expect(await convert(new Set([201]))).toEqual([4097, 25]);
     });
     it('parses the PC layout', () => {
         const s = parsePcSequence(410, 1, pcSeq());
@@ -499,6 +519,56 @@ describe('ootfseq', () => {
         expect((await attaches(undefined)).map((x) => x[1])).toEqual([2, 4, 0]);
     });
 
+    it('detaches the held player ahead of the action that ends the level', async () => {
+        // Intro 3 again, with its GUI trigger (the level's end) at 16.386 s: the detach must not share that tick
+        const key = (t: number) =>
+            act(0, t, [
+                ...f32(0),
+                ...f32(0),
+                ...f32(0),
+                ...f32(1),
+                ...f32(1),
+                ...f32(2),
+                ...f32(3),
+                ...u32(0),
+                ...u32(0x10),
+            ]);
+        const scene = (lastKey: number) =>
+            w(
+                str('Intro 3'),
+                u32(126),
+                u32(0),
+                u32(4),
+                u32(3),
+                actor('Rynn', 2, 2853, [
+                    act(1, 0, [...u32(0), ...u32(7), ...f32(0), ...f32(0.85), ...f32(1), ...u32(0)]),
+                ]),
+                actor('Aroch', 3, 2852, [act(4, 0, [...u32(2), ...u32(19)]), key(lastKey)]),
+                actor('Gui Trigger', 4, 2740, [act(7, 16.386, [...u32(0), ...u32(0)])]),
+            );
+        const detachAt = async (lastKey: number) => {
+            const result = await convertPcSequences(stub(scene(lastKey)), {
+                maps: {
+                    objectIdMap: new Map([
+                        [2853, 77],
+                        [2852, 88],
+                        [2740, 99],
+                    ]),
+                    animMapForActor: () => new Map([[7, 2400]]),
+                },
+                playerObjectId: 77,
+                holdPlayerObjectId: 77,
+                usedIds: new Set(),
+            });
+            const entry = result.entries.find((e) => e.type === 0x311)!;
+            const dragon = parseSequence(entry.id, entry.sub, entry.data)!.actors.find((a) => a.ref === 88)!;
+            const detach = parseActions(dragon)!.filter((x) => x.type === 4 && x.fields[0]!.value === 0);
+            return detach.map((x) => Math.round(x.time * 1000) / 1000);
+        };
+        expect(await detachAt(13.338)).toEqual([14.386]); // two seconds ahead of the trigger, after the dragon's last key
+        expect(await detachAt(15.5)).toEqual([15.5]); // not while the dragon still moves
+    });
+
     it('releases the actors a level-ending scene still holds when asked to', async () => {
         // The Book's backstory: camera and Rynn held at t = 0, never released (the PC level ends there); a fader runs last.
         const bytes = w(
@@ -687,6 +757,24 @@ describe('settlePlayerLying', () => {
         expect(ys(sorted)).toEqual([500, 540, 100, 100]);
     });
 
+    it('adds no key at the lying clip after a fall whose root motion already took her down', () => {
+        // clip 3 ends lying flat 480 below the origin (the fall's root motion lowered her); clip 2 lies at the origin
+        const fall = {
+            groundAt: () => 0,
+            lowestJoint: (ref: number) => (ref === 2 ? -25 : ref === 3 ? -490 : -480),
+            highestJoint: (ref: number) => (ref === 2 ? 80 : ref === 3 ? -390 : 1100),
+        };
+        const sorted = [move(0, 550), clip(0, 1), move(4, 550), clip(4, 3), clip(5, 2), move(8, 600)];
+        settlePlayerLying(sorted, fall);
+        // no key at 5; the authored key under the lying clip still rests her on the ground
+        expect(sorted.filter((e) => e.x.type === 0).map((e) => e.x.time)).toEqual([0, 4, 8]);
+        expect(ys(sorted)).toEqual([550, 550, 100]);
+        // a fall that ends standing-tall (the span of a standing pose) still gets the key
+        const tall = { ...fall, highestJoint: (ref: number) => (ref === 2 ? 80 : 1100) };
+        const again = [move(0, 550), clip(0, 1), move(4, 550), clip(4, 3), clip(5, 2)];
+        settlePlayerLying(again, tall);
+        expect(again.filter((e) => e.x.type === 0).map((e) => e.x.time)).toEqual([0, 4, 5]);
+    });
     it('leaves standing and sitting keys alone', () => {
         const sorted = [move(0, 500), clip(0, 1), move(4, 520)];
         settlePlayerLying(sorted, ground);
@@ -694,5 +782,141 @@ describe('settlePlayerLying', () => {
         const sitting = [move(0, 260), clip(0, 2)];
         settlePlayerLying(sitting, { groundAt: () => 100, lowestJoint: () => -184 });
         expect(ys(sitting)).toEqual([260]);
+    });
+});
+
+describe('addSceneDoorHolds', () => {
+    it('switches a door off at the start and on at the last action, on an actor of its own', async () => {
+        const { joinActions, newActionBytes, parseActions, actionField } = await import('../src/story/ssdactions.ts');
+        const j = joinActions([
+            newActionBytes(0, 0, { x: 10, y: 20, z: 30 }),
+            newActionBytes(0, 7.5, { x: 40, y: 50, z: 60 }),
+        ]);
+        const actors = [
+            {
+                name: 'Rynn',
+                slot: 2,
+                ref: 9,
+                mode: 1,
+                nameLen: 0,
+                actionCount: j.actionCount,
+                actions: j.actions,
+                keys: [],
+            },
+        ];
+        expect(actorKeyPositions(actors, 9)).toEqual([
+            [10, 20, 30],
+            [40, 50, 60],
+        ]);
+        expect(actorKeyPositions(actors, 8)).toEqual([]);
+        expect(addSceneDoorHolds(actors, [77], 0x11, 0x12)).toBe(1);
+        const hold = actors[1]!;
+        expect([hold.ref, hold.slot]).toEqual([77, 3]);
+        const xs = parseActions(hold)!;
+        expect(xs.map((x) => [x.type, x.time, actionField(x, 'message')])).toEqual([
+            [7, 0, 0x11],
+            [7, 7.5, 0x12],
+        ]);
+    });
+});
+
+describe('music actions', () => {
+    const report = () => ({
+        sequencesIn: 0,
+        sequencesOut: 0,
+        actorsIn: 0,
+        actorsOut: 0,
+        actionsIn: 0,
+        actionsOut: 0,
+        droppedActors: new Map(),
+        droppedActions: new Map(),
+        unverifiedMessages: new Map(),
+        warnings: [],
+    });
+    const music = (id: number, fadeIn: number, fadeOut: number) => ({
+        type: 8,
+        time: 4.5,
+        payload: Uint8Array.from([...u32(id), ...u32(0), ...f32(fadeIn), ...f32(fadeOut)]),
+    });
+    const fields = (b: Uint8Array): number[] => {
+        const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
+        return [
+            dv.getUint32(6, true),
+            dv.getUint32(10, true),
+            dv.getFloat32(14, true),
+            dv.getFloat32(18, true),
+            dv.getFloat32(22, true),
+            dv.getFloat32(26, true),
+            dv.getUint32(30, true),
+        ];
+    };
+    const opts = { maps: { objectIdMap: new Map(), musicMap: new Map([[6, 0x000e0006]]) }, usedIds: new Set<number>() };
+
+    it('plays a cue at the category level as it is', () => {
+        expect(fields(convertAction(music(6, 7, 3), opts, report())!)).toEqual([0x000e0006, 0, 7, 3, 0, 0, 1]);
+    });
+
+    it('turns a stop into the stop level with the PC fade out as ramp, kept after the scene', () => {
+        expect(fields(convertAction(music(0, 3, 9), opts, report())!)).toEqual([0, 1, 3, 9, MUSIC_STOP_LEVEL, 9, 1]);
+        expect(MUSIC_STOP_LEVEL).toBeLessThan(0);
+    });
+});
+
+describe('transform key scale', () => {
+    // One prop actor with one transform key; the PS2 key carries a scale of its own (bytes 36..47 of the payload).
+    const keyed = (): Uint8Array => {
+        const key = act(0, 1, [
+            ...f32(0),
+            ...f32(0),
+            ...f32(0),
+            ...f32(1),
+            ...f32(10),
+            ...f32(820),
+            ...f32(30),
+            ...u32(0),
+            ...u32(0),
+        ]);
+        return w(
+            str('Scaled'),
+            u32(126),
+            u32(0),
+            u32(2),
+            u32(2),
+            actor('Big', 1, 3030, [key]),
+            actor('Small', 2, 1858, [key]),
+        );
+    };
+    const keyScale = async (scaleOf?: (pcObject: number) => readonly number[] | null | undefined) => {
+        const r = await convertPcSequences(stub(keyed()), {
+            maps: {
+                objectIdMap: new Map([
+                    [3030, 30],
+                    [1858, 58],
+                ]),
+                scaleForActor: scaleOf && ((a) => scaleOf(a.objectId)),
+            },
+            usedIds: new Set(),
+        });
+        const entry = r.entries.find((e) => e.type === 0x311)!;
+        const s = parseSequence(entry.id, entry.sub, entry.data)!;
+        return s.actors.map((a) => {
+            const x = parseActions(a)!.find((q) => q.type === 0)!;
+            return ['sx', 'sy', 'sz', 'y'].map((n) => x.fields.find((f) => f.name === n)!.value);
+        });
+    };
+
+    it("keeps the actor's object scale in every key (a Wartok placed at 1.5 stays 1.5 through the scene)", async () => {
+        const out = await keyScale((id) => (id === 3030 ? [1.5, 1.5, 1.5] : null));
+        expect(out[0]).toEqual([1.5, 1.5, 1.5, 820]);
+        expect(out[1]).toEqual([1, 1, 1, 820]);
+    });
+
+    it('writes 1, 1, 1 without a scale, or for a scale that is not three positive numbers', async () => {
+        expect(await keyScale()).toEqual([
+            [1, 1, 1, 820],
+            [1, 1, 1, 820],
+        ]);
+        expect((await keyScale(() => [0, 1, 1]))[0]).toEqual([1, 1, 1, 820]);
+        expect((await keyScale(() => [2, 2]))[0]).toEqual([1, 1, 1, 820]);
     });
 });

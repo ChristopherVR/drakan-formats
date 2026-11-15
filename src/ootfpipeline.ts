@@ -2,7 +2,7 @@ import { bridgeMesh } from './ootfbridgemodel.ts';
 import { composeBody } from './ootfpropcompose.ts';
 import { buildBowAimMetadata } from './ootfbowaim.ts';
 import { requireGenericPropDrawLists, requireRigidWeaponDrawLists } from './ootfpropdraw.ts';
-import { holdLinkedDoors } from './ootfdoors.ts';
+import { DOOR_AUTO_OPEN_OFF, DOOR_AUTO_OPEN_ON, holdLinkedDoors, sceneAutoOpenDoors } from './ootfdoors.ts';
 import { splitClassRecord } from './odbwrite.ts';
 import { carryStartingInventory } from './ootfstartinventory.ts';
 import {
@@ -27,6 +27,7 @@ import {
 } from './convert.ts';
 import {
     objectParamSpecs,
+    paramValue,
     parseObjectList,
     parseLevelHeader,
     setObjectParams,
@@ -85,8 +86,8 @@ import { SUBTITLE_FORMAT, SUBTITLE_VERSION, type SubtitleLine, type SubtitleTabl
 import { applyCulling, planLevelCulling, sceneFileKey, type LevelCulling } from './ootfcull.ts';
 import { carryCreatures, type CarrierRig } from './ootfcarry.ts';
 import type { EndMessage, PcSeqActor, PcSequence, PlayerGround } from './ootfseq.ts';
-import { addEndMessages } from './ootfseq.ts';
-import { parseSequence, writeSequence } from './story/ssd.ts';
+import { actorKeyPositions, addEndMessages, addSceneDoorHolds } from './ootfseq.ts';
+import { parseSequence, writeSequence, type SsdActor } from './story/ssd.ts';
 import { planShellTrims } from './ootfshell.ts';
 import { convertStompPlayers, pcStompPlayer } from './ootfstomp.ts';
 import {
@@ -191,7 +192,12 @@ import {
     type Synthesized,
 } from './ootfclass.ts';
 import { OotfAssetBuilder, type AssetReport } from './ootfassets.ts';
-import { type Ps2TextureSwapOptions, effectiveSubstitutions, resolvePs2Substitutes } from './ootfps2tex.ts';
+import {
+    type Ps2TextureSwapOptions,
+    effectiveSubstitutions,
+    effectiveTerrainSubstitutions,
+    resolvePs2Substitutes,
+} from './ootfps2tex.ts';
 import {
     type Ps2ModelSwapOptions,
     classCompanionRef,
@@ -215,6 +221,13 @@ import {
     relocateClassDefaultReferences,
 } from './ootfclassrefs.ts';
 import { CELL_SIZE, LVL_TYPE_LAYERS, parsePs2Terrain, terrainGroundBelow, terrainHeightAt } from './terrain.ts';
+import {
+    isGroundableTree,
+    treeGroundHeight,
+    treeGroundingOn,
+    trunkFootprint,
+    type TrunkFootprint,
+} from './ootftreeground.ts';
 import { odbStemForDependency } from './odb.ts';
 import {
     animName,
@@ -295,6 +308,40 @@ function autoPlayEndMessages(pc: PcLevel, idMap: ReadonlyMap<number, number>): E
  * Adds end messages to the converted sequence `id` in the pack's SSD files (the exit relay's last scene, ootfexitseq.ts).
  * False when the sequence is not there exactly once or does not parse.
  */
+/**
+ * Adds door holds (`addSceneDoorHolds`) to the converted scenes `ids` of `files`: `doorsOf` names the doors a scene must hold,
+ * from its actors. Returns the number of holds added.
+ */
+function holdSceneDoors(
+    files: Record<string, Uint8Array>,
+    ids: readonly number[],
+    doorsOf: (actors: readonly SsdActor[]) => number[],
+): number {
+    let added = 0;
+    for (const id of new Set(ids)) {
+        const keys = Object.keys(files).filter((k) => new RegExp(`\\.SSD/0311_${id}_\\d+\\.bin$`, 'i').test(k));
+        if (keys.length !== 1) continue;
+        const key = keys[0]!;
+        const m = /0311_(\d+)_(\d+)\.bin$/i.exec(key)!;
+        const seq = parseSequence(Number(m[1]), Number(m[2]), files[key]!);
+        if (!seq) continue;
+        const doors = doorsOf(seq.actors);
+        if (!doors.length) continue;
+        added += addSceneDoorHolds(seq.actors, doors, DOOR_AUTO_OPEN_OFF, DOOR_AUTO_OPEN_ON);
+        seq.slots = seq.actors.reduce((n, a) => Math.max(n, a.slot + 1), 1);
+        files[key] = writeSequence(seq);
+    }
+    return added;
+}
+
+/** Clip name for matching a PC clip with a disc clip: lower case, without a dotted suffix ("run.rea" -> "run"). */
+export function clipKey(name: string): string {
+    return name
+        .trim()
+        .toLowerCase()
+        .replace(/\.[a-z0-9]+$/, '');
+}
+
 function rewriteSceneEnd(files: Record<string, Uint8Array>, id: number, messages: readonly EndMessage[]): boolean {
     const keys = Object.keys(files).filter((k) => new RegExp(`\\.SSD/0311_${id}_\\d+\\.bin$`, 'i').test(k));
     if (keys.length !== 1) return false;
@@ -423,6 +470,8 @@ export interface OotfPs2Context {
 }
 
 export interface OotfPipelineOptions {
+    /** Lower trees that float over the ground all round onto it (ootftreeground.ts). Default true; env DRAKAN_TREE_GROUNDING=off. */
+    treeGrounding?: boolean;
     textures?: boolean;
     /** Terrain texture conversion options (first id, max size, texture cap). */
     terrain?: TerrainTextureOptions;
@@ -1370,6 +1419,32 @@ export async function convertOotfLevels(
                         });
                     if (enemy === 'drakan2') {
                         retargetNotes.push(`drakan 2 ${i.cls.name}: PS2 model ${hit.cls.model.id} with its own clips`);
+                        // Its scene clips name PC animations the disc model does not have: play the disc clip of the same
+                        // name instead (Ruined Village scene 1.3: the Scavenger's "run" was dropped and it slid across the
+                        // shot without moving its legs).
+                        const dStem = containerStem(hit.odb.file.replace(/\.ODB$/i, ''), hit.cls.model.db);
+                        const dRec = dStem ? modOf(dStem)?.find(0x0208, hit.cls.model.id) : undefined;
+                        const dAdb = dStem ? adbOf(dStem) : undefined;
+                        const pcSrc = dRec && dAdb ? await builder.creatureSource(ow, m.db, m.id) : null;
+                        if (dStem && dRec && dAdb && pcSrc) {
+                            const dSk = parseSkeleton(await modOf(dStem)!.readRaw(dRec), 'ps2');
+                            const byClipName = new Map<string, number>();
+                            for (const id of [...dSk.animIds].sort((a, b) => a - b)) {
+                                const e = dAdb.find(0x0501, id);
+                                // disc clip names may carry a suffix such as ".rea" ("run.rea" for the PC's "run")
+                                const n = e ? clipKey(animName(await dAdb.readRaw(e))) : '';
+                                if (n && !byClipName.has(n)) byClipName.set(n, id);
+                            }
+                            const clips = new Map<number, number>();
+                            for (const [pcId, a] of pcSrc.anims) {
+                                const id = byClipName.get(clipKey(a.name));
+                                if (id !== undefined) clips.set(pcId, id);
+                            }
+                            if (clips.size) {
+                                sequenceRetargetMaps.set(`${i.db}:${i.id}`, clips);
+                                retargetNotes.push(`drakan 2 ${i.cls.name}: ${clips.size} scene clip(s) by name`);
+                            }
+                        }
                         continue;
                     }
                     const mStem = containerStem(hit.odb.file.replace(/\.ODB$/i, ''), hit.cls.model.db);
@@ -2665,7 +2740,13 @@ export async function convertOotfLevels(
     const procDb = findTerrainDbIndex(tplHeader);
     const terrBuilder =
         opt.textures !== false && !opt.terrainInCommon && ps2.procTxd && procDb !== undefined
-            ? await TerrainTextureBuilder.create(src, ps2.procTxd, procDb, opt.terrain)
+            ? await TerrainTextureBuilder.create(src, ps2.procTxd, procDb, {
+                  ...opt.terrain,
+                  // Drakan 2 ground for whole OotF ground families (`DEFAULT_PS2_TERRAIN_FAMILIES`), with the object swaps
+                  native:
+                      opt.terrain?.native ??
+                      (opt.ps2Textures ? effectiveTerrainSubstitutions(opt.ps2Textures) : undefined),
+              })
             : null;
 
     // ---- level maps: one Map class (picture, world rectangle, picture rectangle) per level with an Order of the Flame parchment
@@ -2924,22 +3005,27 @@ export async function convertOotfLevels(
                     // Lowest joint of the player's pose in a scene clip, for the lying-pose height (see `settlePlayerLying`).
                     const lowRig = playerScene && buildRig(playerScene.source.skeleton, 0);
                     const lowPose = new Map<string, ReturnType<typeof convertPcAnimToPs2>>();
+                    // lowest and highest joint height over the origin of the player's pose in a scene clip at t
+                    const jointSpan = (ref: number, t: number): [number, number] | undefined => {
+                        const a = ref >>> 16 === 0 ? playerScene?.source.anims.get(ref & 0xffff) : undefined;
+                        if (!a || !lowRig) return undefined;
+                        let ps2 = lowPose.get(a.name);
+                        if (!ps2) lowPose.set(a.name, (ps2 = convertPcAnimToPs2(a, bindBasis(lowRig))));
+                        const w = localToWorld(lowRig, sampleClip(lowRig, ps2, t));
+                        let low = Infinity;
+                        let high = -Infinity;
+                        for (let j = 0; j < lowRig.jointCount; j++) {
+                            low = Math.min(low, w[j * 12 + 10]! * 2048);
+                            high = Math.max(high, w[j * 12 + 10]! * 2048);
+                        }
+                        return [low, high];
+                    };
                     const playerGround: PlayerGround | undefined =
                         playerScene && lowRig
                             ? {
                                   groundAt: (x, z, y) => terrainGroundBelow(pc.terrain, x, z, y),
-                                  lowestJoint: (ref, t) => {
-                                      const a =
-                                          ref >>> 16 === 0 ? playerScene.source.anims.get(ref & 0xffff) : undefined;
-                                      if (!a) return undefined;
-                                      let ps2 = lowPose.get(a.name);
-                                      if (!ps2) lowPose.set(a.name, (ps2 = convertPcAnimToPs2(a, bindBasis(lowRig))));
-                                      const w = localToWorld(lowRig, sampleClip(lowRig, ps2, t));
-                                      let low = Infinity;
-                                      for (let j = 0; j < lowRig.jointCount; j++)
-                                          low = Math.min(low, w[j * 12 + 10]! * 2048);
-                                      return low;
-                                  },
+                                  lowestJoint: (ref, t) => jointSpan(ref, t)?.[0],
+                                  highestJoint: (ref, t) => jointSpan(ref, t)?.[1],
                               }
                             : undefined;
                     const carry = (seq: PcSequence): PcSequence =>
@@ -2976,6 +3062,20 @@ export async function convertOotfLevels(
                             lipSyncForActor: (_actor, targetId) => targetId === playerId,
                             endIdleForActor: (_actor, targetId) =>
                                 targetId === playerId ? playerScene?.idle : undefined,
+                            // Every key keeps the actor's object scale (the two Wartoks of scene 1.1 placed at 1.5).
+                            scaleForActor: (actor, targetId) => {
+                                if (targetId === playerId || targetId === dragonId) return undefined;
+                                const sourceId =
+                                    actor.actorType === 1 && first.objectIdMap.get(actor.objectId) === targetId
+                                        ? actor.objectId
+                                        : undefined;
+                                const object = pc.list.objects.find((o) =>
+                                    sourceId !== undefined
+                                        ? o.id === sourceId
+                                        : first.objectIdMap.get(o.id) === targetId,
+                                );
+                                return object?.scale;
+                            },
                             animMapForActor: (actor, targetId) => {
                                 // The PS2 player is the PS2 Rynn whatever the PC class's model: its clips live in its own ADB.
                                 if (targetId === playerId && player.rig) {
@@ -3041,6 +3141,20 @@ export async function convertOotfLevels(
                         // ...and its end, watched or skipped, takes the level's exit (the level Timer alone outlasted a skip)
                         endMessages: isAutoPlayLevel(pc) ? autoPlayEndMessages(pc, first.objectIdMap) : undefined,
                         playerGround,
+                        // scene faders start on On on the PS2, whatever number the PC scene sends them (only faders that
+                        // finish by themselves: one whose Faded Time is -1 waits for a second message, untested on the PS2)
+                        screenFaders: new Set(
+                            pc.list.objects
+                                .filter((o) => {
+                                    const k = pc.classes.get(o.dbIndex)?.get(o.classId);
+                                    if (k?.rflClass !== FADER_RFL || k.model) return false;
+                                    const i = k.fields?.findIndex((f) => /^faded time/i.test(f.name.trim())) ?? -1;
+                                    const own = i < 0 ? -1 : o.params.findIndex((p) => p.fieldIndex === i);
+                                    const faded = own >= 0 ? paramValue(o, own) : i >= 0 ? classFieldDefault(k, i) : 0;
+                                    return typeof faded === 'number' && faded >= 0;
+                                })
+                                .map((o) => o.id),
+                        ),
                         rewrite: (seq) => carry(cull ? cull(seq) : seq),
                         usedIds: used,
                         only: g.ids,
@@ -3586,6 +3700,37 @@ export async function convertOotfLevels(
             });
         // Emitters that burn for good on the PC but carry no visible flag (Alwarren's crystal rings): drawn, harmless
         // (ootfps2model.ts `harmlessShow`, ootfpropremake.ts).
+        // Trees whose trunk base is over the ground all round drop until it meets the lowest ground under the trunk
+        // (ootftreeground.ts; owner's decision of 15 November, DRAKAN_TREE_GROUNDING=off keeps the PC heights).
+        if (treeGroundingOn(opt.treeGrounding, dbgEnv0))
+            await stage(`tree grounding ${pc.path}`, async () => {
+                const pcIdOf = new Map([...(parts.objectIdMap ?? new Map<number, number>())].map(([a, b]) => [b, a]));
+                const prints = new Map<OdbClass, TrunkFootprint | null>();
+                const moved: string[] = [];
+                for (const o of lvl.objects.objects) {
+                    const srcObj = pc.list.objects.find((x) => x.id === (pcIdOf.get(o.id) ?? o.id));
+                    const pcCls = srcObj ? pc.classes.get(srcObj.dbIndex)?.get(srcObj.classId) : undefined;
+                    const ow = pcCls ? ownerOf.get(pcCls) : undefined;
+                    if (!srcObj || !pcCls?.model || !ow) continue;
+                    if (!isGroundableTree(pcCls, pcFieldNumber(pc, srcObj, 'Push Over Mode') ?? 0)) continue;
+                    if (!prints.has(pcCls)) {
+                        const m = await builder.readPcModel(ow, pcCls.model.db, pcCls.model.id);
+                        prints.set(pcCls, m ? trunkFootprint(m.positions) : null);
+                    }
+                    const f = prints.get(pcCls);
+                    if (!f) continue;
+                    const y = treeGroundHeight({ pos: o.pos, rot: srcObj.rot, scale: o.scale }, f, (x, z) =>
+                        terrainGroundBelow(pc.terrain, x, z, o.pos[1] + 100),
+                    );
+                    if (y === null) continue;
+                    moved.push(`${o.id} "${pcCls.name.trim()}" down ${Math.round(o.pos[1] - y)}`);
+                    o.pos = [o.pos[0], y, o.pos[2]];
+                }
+                if (moved.length)
+                    log(
+                        `tree grounding ${title}: ${moved.length} tree(s) lowered onto the ground: ${moved.join(', ')}`,
+                    );
+            });
         await stage(`harmless fires ${pc.path}`, async () => {
             const pcIdOf = new Map([...(parts.objectIdMap ?? new Map<number, number>())].map(([a, b]) => [b, a]));
             const pcCls = (x: LvlObject) => pc.classes.get(x.dbIndex)?.get(x.classId);
@@ -3757,6 +3902,23 @@ export async function convertOotfLevels(
                 },
             );
             if (held.length) log(`${pc.path}: ${held.length} ambush door(s) keep Auto-Open? 0`);
+        }
+        if (opt.sequences !== false) {
+            // Doors whose auto-open would fire for the player while a scene moves her stay shut until it ends (ootfdoors.ts).
+            const classOf = (o: LvlObject): OdbClass | undefined => {
+                const t = plan?.synthesized.find((x) => x.dbIndex === o.dbIndex && x.classId === o.classId);
+                return t ? { ...t.cls, rflClass: t.rfl } : classes.get(o.dbIndex)?.get(o.classId);
+            };
+            const players = parts.objects.objects.filter((o) => classOf(o)?.rflClass === 9).map((o) => o.id);
+            const ids = [...seqIds].filter(([k]) => k.startsWith(`${pc.path}|`)).map(([, v]) => v & 0xffff);
+            const doors = holdSceneDoors(ssdFiles, ids, (actors) =>
+                sceneAutoOpenDoors(
+                    parts!.objects,
+                    classOf,
+                    players.flatMap((p) => actorKeyPositions(actors, p)),
+                ),
+            );
+            if (doors) log(`${pc.path}: ${doors} door hold(s) keep auto-open doors shut during scenes`);
         }
         if (dbgEnv['DRAKAN_DBG_DROP']) {
             // Test aid: remove every object whose class name matches the regex (bisecting a crash to a class).
@@ -4017,6 +4179,7 @@ export async function convertOotfLevels(
 
     // ---- files
     if (terrBuilder) res.files[TERRAIN_TXD_PATH] = terrBuilder.build();
+    if (terrBuilder?.report.nativeCells) log(`drakan 2 ground: ${terrBuilder.report.nativeCells} cells`);
     res.assets = builder.report;
     res.ps2Models = { used: [...modelSwapsUsed.values()] };
     for (const u of modelSwapsUsed.values()) log(`drakan 2 model: ${u.ootf} -> ${u.ps2}`);

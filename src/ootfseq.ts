@@ -159,6 +159,15 @@ export interface SequenceMaps {
     endIdleForActor?: (actor: PcSeqActor, targetObjectId: number) => number | undefined;
     /** Set per actor by convertActor from `endIdleForActor`. */
     endIdle?: number;
+    /**
+     * Scale (x, y, z) of this actor's level object. A PC transform key moves and turns an actor and leaves its scale alone, but
+     * the PS2 key carries a scale of its own that replaces the object's: a key written with 1, 1, 1 shrank Ruined Village's two
+     * Wartoks placed at 1.5 back to their model size for the whole of scene 1.1, and the keys the PC set 820 over the grass for
+     * a body 1.5 times as tall left the smaller body floating 250 units up. Undefined writes 1, 1, 1.
+     */
+    scaleForActor?: (actor: PcSeqActor, targetObjectId: number) => readonly number[] | null | undefined;
+    /** Set per actor by convertActor from `scaleForActor`. */
+    scale?: readonly number[];
     /** PC sound ref `(db << 16) | id` -> final PS2 ref word (`(db << 16) | id` in the target SSD's `.DB` frame). */
     soundMap?: RefLookup;
     /** PC music id (first u32 of the music action; 0 = stop) -> PS2 music ref word (`(db << 16) | id`). */
@@ -219,6 +228,13 @@ export interface SequenceConvertOptions {
      * skip released Rynn into the empty picture level for the rest of the 250 s). See `addEndMessages`.
      */
     endMessages?: readonly EndMessage[];
+    /**
+     * PC level object ids of screen faders (engine 136 without a model). The PC fader ignores the value of the message that
+     * starts it (any message runs it, OpenDrakan `Fader_Cl`), and the scenes send it numbers such as 25 or 253; the PS2
+     * fader starts only on On (4097), as every disc scene starts its faders. Small numbers (below 4096, the engine's message
+     * ids) sent to these actors become On; engine messages such as Off or Blow Up are kept.
+     */
+    screenFaders?: ReadonlySet<number>;
     /** Rewrites each parsed PC scene before it is converted (the Intro's culling show / hide timelines, `ootfcull.ts`). */
     rewrite?: (seq: PcSequence) => PcSequence;
 }
@@ -228,6 +244,8 @@ export interface PlayerGround {
     groundAt(x: number, z: number, y: number): number;
     /** Height of the lowest joint over the origin in the pose of the clip `ref` (`(db << 16) | id`) at `t` seconds. */
     lowestJoint(ref: number, t: number): number | undefined;
+    /** Height of the highest joint over the origin in the same pose (optional; used to tell a fall that ends on the ground). */
+    highestJoint?(ref: number, t: number): number | undefined;
 }
 
 export interface Ps2SsdEntry {
@@ -455,7 +473,8 @@ export function convertSequence(seq: PcSequence, opts: SequenceConvertOptions, r
 
 /**
  * Ends the scene with the held player detached from every actor that still carries her (an attach action with actor slot 0 on
- * the same point, at the time of the scene's last action). The Intro's last scene ("Intro 3") puts Rynn on Arokh's saddle
+ * the same point, `DETACH_LEAD` seconds before the scene's last action but not before the carrier's last transform key).
+ * The Intro's last scene ("Intro 3") puts Rynn on Arokh's saddle
  * (PC point 19) and the level ends with her there. The PS2 engine keeps the "attached" bit of the player's handle (`+4`, bit
  * 0x80, set by the model attach `0x103af0` and cleared only by the detach `0x103df0`) through the level change, and the hair
  * simulation of an attached object only runs from its parent's attachment pass (`0x1042c8`): the skinning pass (`0x116990`)
@@ -464,6 +483,9 @@ export function convertSequence(seq: PcSequence, opts: SequenceConvertOptions, r
  * crouch and lunge. Only held players: a scene that releases the player keeps her mounted (the Islands and Volcano scenes
  * hand her over on Arokh). Returns the number of actions added.
  */
+/** Seconds before the scene's last action that the held player is detached (see `detachHeldPlayer`). */
+const DETACH_LEAD = 2;
+
 function detachHeldPlayer(actors: SsdActor[], playerSlot: number): number {
     const events: { parent: SsdActor; time: number; order: number; slot: number; point: number }[] = [];
     let end = 0;
@@ -487,7 +509,12 @@ function detachHeldPlayer(actors: SsdActor[], playerSlot: number): number {
     let added = 0;
     for (const e of last.values()) {
         if (e.slot !== playerSlot) continue;
-        const j = insertAction(e.parent, newActionBytes(4, end, { a: 0, b: e.point }));
+        // Not on the scene's last tick: Intro 3's last action is the GUI trigger that ends the level, and a detach on that same
+        // tick lost the race at a 30 Hz world rate (the next level started with the bit set, run hair3_intro_30). The carrier's
+        // last transform key bounds it from below, so she is not left behind while it still moves.
+        const keys = (parseActions(e.parent) ?? []).filter((x) => x.type === 0).map((x) => x.time);
+        const at = Math.max(e.time, Math.min(end, Math.max(end - DETACH_LEAD, ...keys)));
+        const j = insertAction(e.parent, newActionBytes(4, at, { a: 0, b: e.point }));
         e.parent.actions = j.actions;
         e.parent.actionCount = j.actionCount;
         added++;
@@ -551,6 +578,46 @@ export function addEndMessages(actors: SsdActor[], messages: readonly EndMessage
     return added;
 }
 
+/** World positions of the transform keys of the actors bound to `ref` (the player). */
+export function actorKeyPositions(actors: readonly SsdActor[], ref: number): [number, number, number][] {
+    const out: [number, number, number][] = [];
+    for (const a of actors) {
+        if (a.ref !== ref) continue;
+        for (const x of parseActions(a) ?? [])
+            if (x.type === 0) out.push([actionField(x, 'x'), actionField(x, 'y'), actionField(x, 'z')]);
+    }
+    return out;
+}
+
+/**
+ * Holds doors shut for the length of a scene: one actor per door that sends `off` at t = 0 and `on` at the time of the
+ * scene's last action (sent also when the scene is skipped, see `addEndMessages`). Used with the door messages that switch
+ * the PS2 auto-open off and on (`ootfdoors.ts`, `sceneAutoOpenDoors`). Returns the number of actors added.
+ */
+export function addSceneDoorHolds(actors: SsdActor[], doors: readonly number[], off: number, on: number): number {
+    let end = 0;
+    for (const a of actors) for (const x of parseActions(a) ?? []) end = Math.max(end, x.time);
+    let added = 0;
+    for (const ref of doors) {
+        const j = joinActions([
+            newActionBytes(7, 0, { message: off, param: 0 }),
+            newActionBytes(7, end, { message: on, param: 0 }),
+        ]);
+        actors.push({
+            name: 'Door Hold',
+            slot: actors.reduce((s, a) => Math.max(s, a.slot + 1), 1),
+            ref,
+            mode: 0,
+            nameLen: 0,
+            actionCount: j.actionCount,
+            actions: j.actions,
+            keys: [],
+        });
+        added++;
+    }
+    return added;
+}
+
 function resolveObject(
     a: PcSeqActor,
     opts: SequenceConvertOptions,
@@ -587,11 +654,36 @@ const LYING_RADIUS = 75;
 /** A lying key is lowered only when it holds the body at least this far over the ground. */
 const FLOATING_GAP = 150;
 
+/** A pose whose joints span less than this (world units) lies flat. */
+const LYING_SPAN = 500;
+
+/**
+ * True when the clip before the lying clip `lying` (with no authored key after its start) ends lying flat with its body far
+ * below the origin: the clip's own root motion took her down (a fall). The PS2 engine carries a scene clip's root motion
+ * into the actor's position, so at the end of such a clip she already lies on the ground, where the clip left her. A key
+ * at the lying clip's start would put her back at the last key's spot instead: in Ruined Village scene 1.1 the fall (clip
+ * 0x2a0, 54.9 to 56.3 s) carried Rynn about 660 units from her last key down onto the grass, and the key added at 56.3 s
+ * moved her lying body back there in one frame.
+ */
+function carriedDown(clips: readonly PcAction[], lying: PcAction, lastKey: number, g: PlayerGround): boolean {
+    if (!g.highestJoint) return false;
+    const fall = clips.filter((c) => c.time < lying.time).pop();
+    if (!fall || fall.time < lastKey) return false;
+    const dv = view(fall.payload);
+    const ref = dv.getUint32(4, true);
+    const t = dv.getFloat32(8, true) + (lying.time - fall.time) * dv.getFloat32(16, true);
+    const low = g.lowestJoint(ref, t);
+    const high = g.highestJoint(ref, t);
+    if (low === undefined || high === undefined || !Number.isFinite(low) || !Number.isFinite(high)) return false;
+    return low <= LYING_LOWEST && high - low < LYING_SPAN;
+}
+
 /**
  * The scene keys place the player's origin where the PC clip expects it: 500 over the ground when she stands. A lying
  * pose has its joints within about 100 of the origin, so the same height holds her body 450 and more in the air: Ruined
  * Village scene 1.1 keeps her origin 546 (then 635) over the ground while she lies knocked out. Every key under a lying
- * clip, and a key added where such a clip starts, rests the lowest joint on the ground.
+ * clip, and a key added where such a clip starts, rests the lowest joint on the ground. No key is added after
+ * a fall that already took her down (`carriedDown`).
  */
 export function settlePlayerLying(sorted: { x: PcAction; i: number }[], g: PlayerGround | undefined): void {
     if (!g) return;
@@ -623,7 +715,8 @@ export function settlePlayerLying(sorted: { x: PcAction; i: number }[], g: Playe
         const before = moves.filter((m) => m.x.time <= c.time).pop();
         if (low === undefined || !before || before.x.time === c.time) continue;
         const payload = rest(before.x.payload, low);
-        if (payload) added.push({ x: { type: 0, time: c.time, payload }, i: -1 });
+        if (!payload || carriedDown(clips, c, before.x.time, g)) continue;
+        added.push({ x: { type: 0, time: c.time, payload }, i: -1 });
     }
     for (const m of moves) {
         const low = lyingLow(clipAt(m.x.time), m.x.time);
@@ -642,6 +735,8 @@ function convertActor(a: PcSeqActor, opts: SequenceConvertOptions, report: Seque
     maps.channelMap = opts.maps.channelMapForActor?.(a, target.ref);
     maps.lipSync = opts.maps.lipSyncForActor?.(a, target.ref) ?? false;
     maps.endIdle = opts.maps.endIdleForActor?.(a, target.ref);
+    const scale = opts.maps.scaleForActor?.(a, target.ref);
+    maps.scale = scale && scale.length === 3 && scale.every((v) => Number.isFinite(v) && v > 0) ? scale : undefined;
     const actionOptions = { ...opts, maps };
     const chunks: Uint8Array[] = [];
     const sorted = a.actions.map((x, i) => ({ x, i })).sort((p, q) => p.x.time - q.x.time || p.i - q.i);
@@ -663,6 +758,7 @@ function convertActor(a: PcSeqActor, opts: SequenceConvertOptions, report: Seque
     // The release is the last run/stop action that gives the actor back to the game (payload non-zero).
     let release = -1;
     if (maps.endIdle !== undefined) sorted.forEach(({ x }, i) => (isRelease(x) ? (release = i) : undefined));
+    const fader = a.actorType === 1 && !!opts.screenFaders?.has(a.objectId);
     let lastTime = 0;
     sorted.forEach(({ x }, i) => {
         if (i === release) {
@@ -678,7 +774,13 @@ function convertActor(a: PcSeqActor, opts: SequenceConvertOptions, report: Seque
             chunks.push(idle);
             report.actionsOut++;
         }
-        const b = convertAction(x, actionOptions, report);
+        const b = convertAction(
+            fader && x.type === 7 && view(x.payload).getUint32(0, true) < 4096
+                ? { ...x, payload: faderStart(x.payload) }
+                : x,
+            actionOptions,
+            report,
+        );
         if (b) chunks.push(b);
         lastTime = Math.max(lastTime, x.time);
     });
@@ -695,6 +797,13 @@ function convertActor(a: PcSeqActor, opts: SequenceConvertOptions, report: Seque
         keys: [],
     };
     return { actor };
+}
+
+/** A message action payload that starts a PS2 fader (On) in place of a PC number. */
+function faderStart(payload: Uint8Array): Uint8Array {
+    const out = payload.slice();
+    view(out).setUint32(0, SEQUENCE_MESSAGES.on, true);
+    return out;
 }
 
 /** Seconds before the release at which the idle clip starts, and its blend time (the blend word of an animation action). */
@@ -754,11 +863,13 @@ export function convertAction(x: PcAction, opts: SequenceConvertOptions, report:
     };
     switch (x.type) {
         case 0: {
-            // quat(16) pos(12) relativeActor(4) options(4) -> same bytes, then scale 1,1,1 (PS2 has 12 more bytes)
+            // quat(16) pos(12) relativeActor(4) options(4) -> same bytes, then the scale (PS2 has 12 more bytes): the actor's own
+            // object scale, which the PC key keeps (`SequenceMaps.scaleForActor`), else 1, 1, 1
             const out = pcBytes(0, x.time, 48);
             out.set(x.payload, 6);
             const dv = view(out);
-            for (const at of [42, 46, 50]) dv.setFloat32(at, 1, true);
+            const scale = opts.maps.scale ?? [1, 1, 1];
+            [42, 46, 50].forEach((at, k) => dv.setFloat32(at, scale[k]!, true));
             return out;
         }
         case 1: {
@@ -809,7 +920,12 @@ export function convertAction(x: PcAction, opts: SequenceConvertOptions, report:
             return out;
         }
         case 8: {
-            // music: PC (musicId, dlsId, fadeIn, fadeOut) -> PS2 (ref, 0, fadeIn, fadeOut, 0, 0, 1). Stop (id 0) -> (0, 1, ...).
+            // music: PC (musicId, dlsId, fadeIn, fadeOut) -> PS2 (ref, keep, fadeIn, fadeOut, level, ramp, play): the PS2
+            // handler (0x1a4c50) sets the category fades and plays `ref` when `play` is set, `keep` lets the track outlive
+            // the scene, then it sets the music category's level to `level` over `ramp` seconds (0, 0: as it is). It has no
+            // stop: track 0 plays nothing and the cue went on (Ruined Village scene 1.3). A stop (id 0) passes the level
+            // MUSIC_STOP_LEVEL with the PC fade out as ramp; the runtime turns that into the engine's category stop with
+            // that fade (drakan_overrides.cpp, sceneMusicStopHook), and `keep` leaves the silence after the scene.
             const id = p.getUint32(0, true);
             const stop = id === 0;
             const ref = stop ? 0 : lookup(opts.maps.musicMap, id);
@@ -820,6 +936,10 @@ export function convertAction(x: PcAction, opts: SequenceConvertOptions, report:
             dv.setUint32(10, stop ? 1 : 0, true);
             dv.setFloat32(14, p.getFloat32(8, true), true);
             dv.setFloat32(18, p.getFloat32(12, true), true);
+            if (stop) {
+                dv.setFloat32(22, MUSIC_STOP_LEVEL, true);
+                dv.setFloat32(26, Math.max(0, p.getFloat32(12, true)), true);
+            }
             dv.setUint32(30, 1, true);
             return out;
         }
@@ -827,6 +947,9 @@ export function convertAction(x: PcAction, opts: SequenceConvertOptions, report:
             return drop(`type${x.type}`);
     }
 }
+
+/** Music category level of a converted music stop (no disc scene uses a negative level); see `convertAction`, case 8. */
+export const MUSIC_STOP_LEVEL = -4096;
 
 /** Message numbers that occur in the PAL disc's 202 sequences (journal ootf-sequences.md); others are passed through. */
 export const KNOWN_PS2_MESSAGES: ReadonlySet<number> = new Set([

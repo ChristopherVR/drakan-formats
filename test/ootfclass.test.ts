@@ -526,6 +526,58 @@ describe('ootfclass', () => {
         expect(m.data.slice(2, 5)).toEqual([8, 0, 7]);
     });
 
+    it("drops the template creature's own attachments from a converted rig", () => {
+        const T_CLS = 0x2003; // class reference (as `Left Weapon Object`)
+        const T_CLS_W = 0x4003; // class reference (as `Weapon Object`)
+        const T_CLSS = 0x1003; // class reference list
+        const T_CHAN = 8;
+        const T_CHANS = 0x1008;
+        const tplFields: [number, string][] = [
+            [T_CLS_W, 'Weapon Object'],
+            [T_CHAN, 'Weapon Channel'],
+            [T_CLS, 'Left Weapon Object'],
+            [T_CHAN, 'Left Weapon Channel'],
+            [T_CLSS, 'Body Attachment Objects'],
+            [T_CHANS, 'Body Attachment Channels'],
+            [T_CLS, 'Got Hit Blood Gen.'],
+            [T_CLS, 'Head attachment object'],
+        ];
+        // template: a claw on joint 18, two armour parts on joints 3 and 4, a blood generator, a head attachment
+        const tplData = [0x20111, 32, 0x229c3, 18, (2 << 16) | 8, (2 << 16) | 10, 0x20999, 0x20555, 0x20a, 0x20b, 3, 4];
+        const tpl = cls(2, 'Trog', 49, tplFields, tplData);
+        // the PC slave names its pick (and nothing for the left hand, the body or the head)
+        const pc = cls(
+            1,
+            'male slave',
+            49,
+            [
+                [T_CLS_W, 'Weapon Object'],
+                [T_CHAN, 'Weapon Channel'],
+            ],
+            [0x10077, 21],
+        );
+        const map = (ref: number): number => ref + 0x10000;
+        const own = mergeDefaults(pc, tpl, map, undefined, true, 42);
+        expect(own.data[0]).toBe(0x20077); // the PC weapon, mapped
+        expect(own.data[1]).toBe(21);
+        expect(own.data[2]).toBe(0); // no claw
+        expect(own.data[3]).toBe(0xffffffff); // and no joint for it
+        expect(own.data[4]).toBe(0); // no armour parts
+        expect(own.data[5]).toBe(0);
+        expect(own.data[6]).toBe(0x20999); // not an attachment: kept
+        expect(own.data[7]).toBe(0); // the template's head attachment
+        // a template that attaches nothing keeps its record as it was (channel included)
+        const bare = cls(3, 'Orc', 49, tplFields, [0, 32, 0, 0, 0, 0, 0, 0]);
+        expect(mergeDefaults(cls(4, 'x', 49, [], []), bare, map, undefined, true, 42).data).toEqual([
+            0, 32, 0, 0, 0, 0, 0, 0,
+        ]);
+        // a disc rig (the creature swapped to the Drakan 2 model) keeps the template's attachments
+        const disc = mergeDefaults(pc, tpl, map);
+        expect(disc.data[2]).toBe(0x229c3);
+        expect(disc.data[3]).toBe(18);
+        expect(disc.data[7]).toBe(0x20555);
+    });
+
     it('copies channel (joint id) fields only for converted models', () => {
         const T_CHAN = 8;
         const T_CHANS = 0x1008;

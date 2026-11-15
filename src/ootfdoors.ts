@@ -15,7 +15,7 @@
 // from a Visibility Toggler and the small house's door from a detector that sends Off.
 
 import { classFieldDefault, type OdbClass } from './odb.ts';
-import { type LvlObject, type LvlObjectList, objectParamSpecs, setObjectParams } from './lvl.ts';
+import { type LvlObject, type LvlObjectList, objectParamSpecs, paramValue, setObjectParams } from './lvl.ts';
 
 /** PS2 engine id of doors and gates. */
 export const DOOR_RFL = 19;
@@ -85,4 +85,47 @@ export function holdLinkedDoors(
         changed.push(o.id);
     }
     return changed;
+}
+
+/** Door messages that switch the auto-open off and on again (PS2 door handler, journal 2026-11-07/door-proof.md). */
+export const DOOR_AUTO_OPEN_OFF = 0x11;
+export const DOOR_AUTO_OPEN_ON = 0x12;
+const AUTO_OPEN_DISTANCE = /^auto-open distance/i;
+/** Level units to world units. */
+const LU = 2048;
+/** Added to a door's auto-open distance: the player glides between keys and the door measures from its own origin. */
+const SCENE_DOOR_MARGIN = 1024;
+
+/** The object's value of a class field (its own parameter, else the class default). */
+function fieldOf(o: LvlObject, cls: OdbClass, test: (name: string) => boolean): unknown {
+    const i = cls.fields?.findIndex((f) => test(f.name.trim())) ?? -1;
+    if (i < 0) return undefined;
+    const own = o.params.findIndex((p) => p.fieldIndex === i);
+    return own >= 0 ? paramValue(o, own) : classFieldDefault(cls, i);
+}
+
+/**
+ * Doors that would open by themselves during a cut scene. A PC door opens only when something sends it On or Rynn pushes it,
+ * and a scene's Rynn pushes nothing; the PS2 stand-in for the push, "Auto-Open?", fires for any player within its distance,
+ * also while a scene moves her. In Ruined Village scene 1.3 Rynn walks up to the old man in front of his house and its door
+ * swung open in the middle of the talk. Returns the doors (engine 19) whose auto-open is on and whose auto-open distance
+ * (plus a margin) reaches one of the player's scene keys, so the scene can switch their auto-open off while it plays.
+ */
+export function sceneAutoOpenDoors(
+    list: LvlObjectList,
+    classOf: (o: LvlObject) => OdbClass | undefined,
+    playerKeys: readonly (readonly [number, number, number])[],
+): number[] {
+    if (!playerKeys.length) return [];
+    const out: number[] = [];
+    for (const o of list.objects) {
+        const cls = classOf(o);
+        if (cls?.rflClass !== DOOR_RFL) continue;
+        if (fieldOf(o, cls, (n) => n === AUTO_OPEN) !== 1) continue;
+        const lu = fieldOf(o, cls, (n) => AUTO_OPEN_DISTANCE.test(n));
+        const reach = (typeof lu === 'number' && lu > 0 ? lu : 2) * LU + SCENE_DOOR_MARGIN;
+        const near = playerKeys.some((k) => Math.hypot(k[0] - o.pos[0], k[1] - o.pos[1], k[2] - o.pos[2]) <= reach);
+        if (near) out.push(o.id);
+    }
+    return out;
 }

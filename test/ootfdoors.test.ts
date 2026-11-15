@@ -4,7 +4,7 @@ import { FIELD_ENUM } from '../src/fields.ts';
 import type { LvlObject, LvlObjectList } from '../src/lvl.ts';
 import { paramValue } from '../src/lvl.ts';
 import type { OdbClass } from '../src/odb.ts';
-import { holdLinkedDoors, sentMessage } from '../src/ootfdoors.ts';
+import { holdLinkedDoors, sceneAutoOpenDoors, sentMessage } from '../src/ootfdoors.ts';
 
 const cls = (id: number, rflClass: number, fields: [string, number][]): OdbClass => ({
     id,
@@ -106,5 +106,41 @@ describe('ambush doors of converted OotF levels', () => {
         };
         expect(holdLinkedDoors(list, (o) => classes.get(o.classId), hiddenCreature)).toEqual([]);
         expect(paramValue(list.objects[0]!, 0)).toBe(1);
+    });
+});
+
+describe('doors held during cut scenes', () => {
+    const swing = cls(6, 19, [
+        ['Locked', 0],
+        ['Auto-Open?', 1],
+        ['Auto-Open Distance (lu)', 2],
+    ]);
+    const lookup = new Map([...classes, [6, swing]]);
+    const at = (o: LvlObject, x: number, z: number): LvlObject => ({ ...o, pos: [x, 0, z] });
+
+    it('names the auto-open doors within their distance (plus a margin) of a scene key of the player', () => {
+        const off: LvlObject = {
+            ...at(object(103, 6), 0, 0),
+            params: [{ fieldIndex: 1, type: FIELD_ENUM, name: 'Auto-Open?', nameRaw: new Uint8Array(12) }],
+            data: [0],
+        };
+        const list: LvlObjectList = {
+            objects: [
+                at(object(100, 6), 3000, 0),
+                at(object(101, 6), 6000, 0),
+                at(object(102, 6), 0, 20000),
+                off,
+                at(object(104, 2), 0, 0),
+            ],
+            warnings: [],
+        };
+        // 2 lu = 4096 units, plus the 1024 margin: 100 (3000 away) and 101 (6000 away from the first key, 5000 from the second)
+        expect(
+            sceneAutoOpenDoors(list, (o) => lookup.get(o.classId), [
+                [0, 0, 0],
+                [1000, 0, 0],
+            ]),
+        ).toEqual([100, 101]);
+        expect(sceneAutoOpenDoors(list, (o) => lookup.get(o.classId), [])).toEqual([]);
     });
 });

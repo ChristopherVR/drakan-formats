@@ -12,6 +12,7 @@
 import { ootfClassDebug } from './ootfdebug.ts';
 import {
     FIELD_ANIMATION,
+    FIELD_CLASS,
     FIELD_CHANNEL,
     FIELD_COLOUR,
     FIELD_ENUM,
@@ -833,6 +834,7 @@ export function mergeDefaults(
                 for (let k = 0; k < n; k++) if ((out[off + k] ?? 0) >= rigJoints) out[off + k] = 0;
             } else if (v >= rigJoints) out[j] = 0;
         });
+    if (copyChannels) dropTemplateAttachments(tf, out, new Set(copied));
     const foreignAnim = animMap
         ? tf.map((_, j) => j).filter((j) => fieldBase(tf[j]!.type) === FIELD_ANIMATION && !convertedAnim.has(j))
         : [];
@@ -863,6 +865,42 @@ export function mergeDefaults(
     const skill = inheritedWeaponSkillField(pc, tpl);
     if (skill >= 0) out[skill] = 0;
     return { data: out, copied, skipped, coverage: valueFields === 0 ? 1 : found / valueFields, same };
+}
+
+/**
+ * The object a template field attaches to the creature's rig, paired with the channel field that names the joint:
+ * `Left Weapon Object` / `Left Weapon Channel`, `Shield Object` / `Shield Channel`, `Body Attachment Objects` /
+ * `Body Attachment Channels`, `Weapon Object` / `Weapon Channel`, and the `Head attachment object` (on the head channel).
+ * Null when `name` is no such field.
+ */
+export function attachmentChannelName(name: string): string | null {
+    const n = name.trim();
+    if (/^head attachment object$/i.test(n)) return '';
+    const m = /^(.*\S)\s+Object(s?)$/i.exec(n);
+    return m ? `${m[1]} Channel${m[2]}` : null;
+}
+
+/**
+ * A creature that keeps its converted PC model and rig must not carry the template creature's own attachments: the
+ * template's objects belong to the template's body and its channel ids to the template's rig. The Green Trog the mine
+ * slaves are cloned from hangs its left claw ("Trog HandClaw_L") on joint 18, the slave's right upper arm, where it showed
+ * as a shoulder piece; the Ebon Knight carried Savage Leader Maulgak's eight armour parts. Object fields of that kind the
+ * PC class did not supply (`copied` = field names written from the PC class) are cleared with their channel.
+ */
+function dropTemplateAttachments(tf: readonly ClassFieldDef[], out: number[], copied: ReadonlySet<string>): void {
+    const index = new Map<string, number>();
+    tf.forEach((t, j) => index.set(t.name.trim().toLowerCase(), j));
+    tf.forEach((t, j) => {
+        if (fieldBase(t.type) !== FIELD_CLASS || copied.has(t.name)) return;
+        const channel = attachmentChannelName(t.name);
+        if (channel === null) return;
+        const c = channel ? index.get(channel.toLowerCase()) : undefined;
+        if (channel && c === undefined) return; // an object field with no joint of its own: not an attachment
+        if (!out[j]) return; // nothing attached: the record stays as it was
+        out[j] = 0;
+        if (c !== undefined && !copied.has(tf[c]!.name) && fieldBase(tf[c]!.type) === FIELD_CHANNEL)
+            out[c] = fieldIsIndirect(tf[c]!.type) ? 0 : 0xffffffff;
+    });
 }
 
 /**
