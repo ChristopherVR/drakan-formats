@@ -399,6 +399,8 @@ describe('the Intro as a conversion template', () => {
         expect(w).toContain('Surdana');
     });
     it('stays silent for a template whose databases all carry a folder', () => {
-        expect(introTemplateWarning(['..\\Level 1 - Common\\Level 1 - Common', '../Common/System/System', ''])).toBeNull();
+        expect(
+            introTemplateWarning(['..\\Level 1 - Common\\Level 1 - Common', '../Common/System/System', '']),
+        ).toBeNull();
     });
 });

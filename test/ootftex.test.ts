@@ -152,7 +152,10 @@ describe('PS2 texture encode', () => {
             expect([got.at(-1)!.w, got.at(-1)!.h]).toEqual([16, 8]);
             // a texture written at its own size and exactly: nothing for the sink
             const n = got.length;
-            const same = encodePs2Texture(img(16, 16, (x) => [x, 0, 0, 255]), { square: true });
+            const same = encodePs2Texture(
+                img(16, 16, (x) => [x, 0, 0, 255]),
+                { square: true },
+            );
             expect(same.hdSource).toBeUndefined();
             expect(got).toHaveLength(n);
             // deferExact: the source is attached but not emitted
@@ -1140,7 +1143,10 @@ describe('hard alpha (skinned cut-outs)', () => {
         const rgba = new Uint8Array(16 * 16 * 4);
         for (let i = 0; i < 256; i++) rgba.set([200, 100, 50, i % 3 === 0 ? 40 : i % 3 === 1 ? 200 : 255], i * 4);
         const soft = encodePs2Texture({ width: 16, height: 16, rgba }, { mode: 'indexed', square: true });
-        const hard = encodePs2Texture({ width: 16, height: 16, rgba }, { mode: 'indexed', square: true, hardAlpha: true });
+        const hard = encodePs2Texture(
+            { width: 16, height: 16, rgba },
+            { mode: 'indexed', square: true, hardAlpha: true },
+        );
         expect(soft.body[16]).toBe(8);
         expect(hard.body[16]).toBe(1);
     });

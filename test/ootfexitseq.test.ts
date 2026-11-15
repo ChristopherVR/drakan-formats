@@ -8,8 +8,14 @@ import type { PcLevel } from '../src/pc.ts';
 import { mergeSubtitleFiles, parseSubtitleFile, SUBTITLE_FORMAT, SubtitleTable } from '../src/ootfsubtitles.ts';
 
 const SEQ = 0x0b; // sequence ref field type (the disc's ExitSequence / Entrance Sequence)
-const field = (name: string, type: number): ClassFieldDef => ({ type, nameRaw: new Uint8Array(0), name }) as ClassFieldDef;
-const exitFields = [field('Transition To...', 0x0a), field('Maintain Player Position', FIELD_INT), field('ExitSequence', SEQ), field('Entrance Sequence', SEQ)];
+const field = (name: string, type: number): ClassFieldDef =>
+    ({ type, nameRaw: new Uint8Array(0), name }) as ClassFieldDef;
+const exitFields = [
+    field('Transition To...', 0x0a),
+    field('Maintain Player Position', FIELD_INT),
+    field('ExitSequence', SEQ),
+    field('Entrance Sequence', SEQ),
+];
 
 function obj(id: number, classId: number): LvlObject {
     return {
@@ -34,7 +40,13 @@ function obj(id: number, classId: number): LvlObject {
 const listOf = (...objects: LvlObject[]): LvlObjectList => ({ objects, warnings: [] }) as unknown as LvlObjectList;
 
 function pcLevel(): PcLevel {
-    const transition = { id: 7, name: 'Level Transition', rflClass: 55, fields: exitFields, data: [0, 1, 0, 0] } as unknown as OdbClass;
+    const transition = {
+        id: 7,
+        name: 'Level Transition',
+        rflClass: 55,
+        fields: exitFields,
+        data: [0, 1, 0, 0],
+    } as unknown as OdbClass;
     const other = { id: 8, name: 'Timer', rflClass: 62, fields: [], data: [] } as unknown as OdbClass;
     const a = obj(100, 7); // names both scenes
     const b = obj(101, 7); // names none
@@ -44,7 +56,19 @@ function pcLevel(): PcLevel {
         { fieldIndex: 2, type: SEQ, name: 'ExitSequence', value: 0x41e },
         { fieldIndex: 3, type: SEQ, name: 'Entrance Sequence', value: 0x45c },
     ]);
-    return { path: 'World/Level/Level.lvl', list, classes: new Map([[1, new Map([[7, transition], [8, other]])]]) } as unknown as PcLevel;
+    return {
+        path: 'World/Level/Level.lvl',
+        list,
+        classes: new Map([
+            [
+                1,
+                new Map([
+                    [7, transition],
+                    [8, other],
+                ]),
+            ],
+        ]),
+    } as unknown as PcLevel;
 }
 
 describe('exit and entrance sequences', () => {
@@ -59,9 +83,18 @@ describe('exit and entrance sequences', () => {
     const player = {
         dbIndex: 2,
         classId: 129,
-        fields: [field('Sequence List', 0x100b), field('List Play Order', T_ENUM), field('Initial State', T_ENUM), field('Message To Play Next', T_ENUM)],
+        fields: [
+            field('Sequence List', 0x100b),
+            field('List Play Order', T_ENUM),
+            field('Initial State', T_ENUM),
+            field('Message To Play Next', T_ENUM),
+        ],
     };
-    const timer = { dbIndex: 2, classId: 128, fields: [field('Time Until Trigger', 2), field('Start Mode', T_ENUM), field('Trigger Message', T_ENUM)] };
+    const timer = {
+        dbIndex: 2,
+        classId: 128,
+        fields: [field('Time Until Trigger', 2), field('Start Mode', T_ENUM), field('Trigger Message', T_ENUM)],
+    };
     const value = (o: LvlObject, name: string) => objectParamSpecs(o).find((p) => p.name === name)?.value;
 
     it('puts a player with both scenes and a timer of their length in front of the exit', () => {
@@ -117,9 +150,14 @@ describe('exit and entrance sequences', () => {
         const detector = {
             dbIndex: 2,
             classId: 129,
-            fields: ['Task', 'Detect Which?', 'Initial State', 'Can be Triggered by Message ?', 'Trigger Message', 'Detect Only Once?'].map(
-                (n) => field(n, T_ENUM),
-            ),
+            fields: [
+                'Task',
+                'Detect Which?',
+                'Initial State',
+                'Can be Triggered by Message ?',
+                'Trigger Message',
+                'Detect Only Once?',
+            ].map((n) => field(n, T_ENUM)),
         };
         const ends: { id: number; messages: unknown[] }[] = [];
         const warnings: string[] = [];
@@ -195,7 +233,9 @@ describe('exit and entrance sequences', () => {
         const base = { pc: pcLevel(), title: 'Level', player, timer, seconds: () => 1 };
         let warnings: string[] = [];
         // nothing links to the exit: it is only walked into
-        expect(relayExitSequences({ ...base, list: listOf(obj(100, 498)), mapSequence: () => 5, warnings })).toEqual([]);
+        expect(relayExitSequences({ ...base, list: listOf(obj(100, 498)), mapSequence: () => 5, warnings })).toEqual(
+            [],
+        );
         expect(warnings.join()).toMatch(/nothing fires this exit by link/);
         warnings = [];
         expect(relayExitSequences({ ...base, list: listOf(), mapSequence: () => 5, warnings })).toEqual([]);
@@ -215,7 +255,8 @@ describe('exit and entrance sequences', () => {
 });
 
 describe('subtitle file precedence', () => {
-    const file = (lines: unknown[]) => parseSubtitleFile({ format: SUBTITLE_FORMAT, version: 1, language: 'english', lines });
+    const file = (lines: unknown[]) =>
+        parseSubtitleFile({ format: SUBTITLE_FORMAT, version: 1, language: 'english', lines });
     it('lets a later (corrected) file replace lines of an earlier one', () => {
         const fresh = file([
             { bank: 'a/b', id: 1, cues: [{ start: 0, end: 2, text: 'A misheard line.' }] },

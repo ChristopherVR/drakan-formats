@@ -158,7 +158,12 @@ describe('push puzzles', () => {
         // The class sounds of plates and of the block are converted with the level.
         expect(pushPuzzleSoundRefs(pc, z!.plates[0]!)).toEqual([0x20001]);
         expect(pushPuzzleSoundRefs(pc, z!.block)).toEqual([0x20002]);
-        expect(pushPuzzleSoundRefs(pc, objects.find((o) => o.id === 5)!)).toEqual([]);
+        expect(
+            pushPuzzleSoundRefs(
+                pc,
+                objects.find((o) => o.id === 5)!,
+            ),
+        ).toEqual([]);
     });
 
     it('knows a block on a model from a block on terrain', () => {
@@ -170,11 +175,17 @@ describe('push puzzles', () => {
 
     it('places an unrotated model with its +x toward +z, as the engine does', () => {
         // The tile of plate 2 lies at +x in the model: in the world it is north of the room centre, beside the block.
-        const w = worldBox(objects.find((o) => o.id === 992)!, boxes.get(992)!);
+        const w = worldBox(
+            objects.find((o) => o.id === 992)!,
+            boxes.get(992)!,
+        );
         expect(w.min.map(Math.round)).toEqual([10000 - 1341, 7789 - 102, 10000 + 5537]);
         expect(w.max.map(Math.round)).toEqual([10000 - 699, 7789 - 102, 10000 + 6171]);
         // A quarter turn brings +x back to +x; the scale applies before the turn.
-        const turned = worldBox({ pos: [0, 0, 0], rot: [0, 90, 0], scale: [2, 1, 1] }, { min: [1, 0, 0], max: [2, 1, 1] });
+        const turned = worldBox(
+            { pos: [0, 0, 0], rot: [0, 90, 0], scale: [2, 1, 1] },
+            { min: [1, 0, 0], max: [2, 1, 1] },
+        );
         expect(turned.min.map(Math.round)).toEqual([2, 0, 0]);
         expect(turned.max.map(Math.round)).toEqual([4, 1, 1]);
         const [t] = modelTriangles(
@@ -234,14 +245,20 @@ describe('the floor layer of a push block on a model', () => {
     const block = { pos: [4096, 7809, 7000] as [number, number, number] };
 
     it('covers the room at floor height, with holes where the floor model has none', () => {
-        const pf = pushFloor(terrain(), block, 7700, [quad(0, 8192).map((t) => t.map((p) => [p[0], 300, p[2]])) as FloorTriangle[], floor])!;
+        const pf = pushFloor(terrain(), block, 7700, [
+            quad(0, 8192).map((t) => t.map((p) => [p[0], 300, p[2]])) as FloorTriangle[],
+            floor,
+        ])!;
         expect(pf.floor).toBe(7688);
         expect(pf.room).toEqual([1, 0]);
         const L = pf.layer;
         expect([L.index, L.originX, L.originZ, L.width, L.height, L.type]).toEqual([3, 0, 0, 4, 4, 0]);
         expect(L.id).toBe(13);
         expect([...new Set(L.heights)]).toEqual([7688 - PUSH_FLOOR_DROP]);
-        const row = (z: number): number[] => [...L.cellTexLeft.slice(z * 4, z * 4 + 4), ...L.cellTexRight.slice(z * 4, z * 4 + 4)];
+        const row = (z: number): number[] => [
+            ...L.cellTexLeft.slice(z * 4, z * 4 + 4),
+            ...L.cellTexRight.slice(z * 4, z * 4 + 4),
+        ];
         expect(new Set(row(0))).toEqual(new Set([TEX_INVISIBLE]));
         expect(new Set(row(1))).toEqual(new Set([TEX_HOLE]));
         expect(new Set(row(2))).toEqual(new Set([TEX_HOLE]));
@@ -266,7 +283,11 @@ describe('the floor layer of a push block on a model', () => {
 
     it('makes none for a block on terrain or without a floor under it', () => {
         expect(pushFloor(terrain(), block, 7700, [])).toBeNull();
-        expect(pushFloor(terrain(), { pos: [4096, 1600, 7000] }, 1500, [quad(0, 8192).map((t) => t.map((p) => [p[0], 1500, p[2]])) as FloorTriangle[]])).toBeNull();
+        expect(
+            pushFloor(terrain(), { pos: [4096, 1600, 7000] }, 1500, [
+                quad(0, 8192).map((t) => t.map((p) => [p[0], 1500, p[2]])) as FloorTriangle[],
+            ]),
+        ).toBeNull();
     });
 });
 
@@ -444,6 +465,8 @@ describe('class plan: the Pressure Plate', () => {
         expect(none({})).toBe(0);
         const renamed = { ...source, fields: source.fields!.map((f, i) => (i === 3 ? { ...f, name: 'State' } : f)) };
         expect(none(options, renamed)).toBe(0);
-        expect(none(options, { ...source, fields: source.fields!.slice(0, 12), data: source.data!.slice(0, 12) })).toBe(0);
+        expect(none(options, { ...source, fields: source.fields!.slice(0, 12), data: source.data!.slice(0, 12) })).toBe(
+            0,
+        );
     });
 });

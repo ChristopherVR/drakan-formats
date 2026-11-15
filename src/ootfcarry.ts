@@ -98,11 +98,22 @@ function transformAction(time: number, m: Mat12): PcAction {
 }
 
 /** World matrix of the carrier's joint `joint` at time `t`, or undefined when the scene has not placed it yet. */
-function jointWorld(carrier: PcSeqActor, rig: Rig, posed: Map<string, ReturnType<typeof convertPcAnimToPs2>>, rec: CarrierRig, joint: number, t: number): Mat12 | undefined {
+function jointWorld(
+    carrier: PcSeqActor,
+    rig: Rig,
+    posed: Map<string, ReturnType<typeof convertPcAnimToPs2>>,
+    rec: CarrierRig,
+    joint: number,
+    t: number,
+): Mat12 | undefined {
     const move = lastBefore(carrier.actions, 0, t);
     if (!move) return undefined;
     let local: Float32Array = new Float32Array(rig.jointCount * 12);
-    const clip = lastBefore(carrier.actions.filter((x) => x.type === 1 && view(x.payload).getUint32(0, true) === 0), 1, t);
+    const clip = lastBefore(
+        carrier.actions.filter((x) => x.type === 1 && view(x.payload).getUint32(0, true) === 0),
+        1,
+        t,
+    );
     const pc = clip ? rec.anims.get(view(clip.payload).getUint32(4, true) & 0xffff) : undefined;
     if (clip && pc) {
         const dv = view(clip.payload);
@@ -155,7 +166,12 @@ export function carryCreatures(seq: PcSequence, opt: CarryOptions): PcSequence {
                 const h = view(x.payload);
                 const hs = h.getUint32(0, true);
                 if (hs === 0 || hs === slot || x.time > at.time) return false;
-                const off = attaches.some((y) => y.time > x.time && y.time <= at.time && view(y.payload).getUint32(4, true) === h.getUint32(4, true));
+                const off = attaches.some(
+                    (y) =>
+                        y.time > x.time &&
+                        y.time <= at.time &&
+                        view(y.payload).getUint32(4, true) === h.getUint32(4, true),
+                );
                 const prop = actors.find((a) => a.id === hs);
                 return !off && !!prop && opt.propReach(prop) !== undefined;
             });
@@ -171,7 +187,11 @@ export function carryCreatures(seq: PcSequence, opt: CarryOptions): PcSequence {
                 return [j[9]! - j[6]! * reach, j[10]! - j[7]! * reach - HANG, j[11]! - j[8]! * reach];
             };
             const start = view(v.payload);
-            const from: [number, number, number] = [start.getFloat32(16, true), start.getFloat32(20, true), start.getFloat32(24, true)];
+            const from: [number, number, number] = [
+                start.getFloat32(16, true),
+                start.getFloat32(20, true),
+                start.getFloat32(24, true),
+            ];
             const keys: PcAction[] = [];
             const at0 = (t: number): Mat12 | undefined => {
                 const tip = tipAt(t);

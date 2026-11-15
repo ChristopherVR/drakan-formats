@@ -147,8 +147,7 @@ export function pictureContent(img: TopDownImage, threshold = 40): PictureRect {
     let x1 = -1;
     let y1 = -1;
     const lit = (i: number): boolean =>
-        img.rgba[i * 4 + 3]! > 0 &&
-        img.rgba[i * 4]! + img.rgba[i * 4 + 1]! + img.rgba[i * 4 + 2]! > threshold * 3;
+        img.rgba[i * 4 + 3]! > 0 && img.rgba[i * 4]! + img.rgba[i * 4 + 1]! + img.rgba[i * 4 + 2]! > threshold * 3;
     // rows / columns need a run of lit pixels, so single stray pixels of a torn edge do not count
     const rowLit = new Array<number>(img.height).fill(0);
     const colLit = new Array<number>(img.width).fill(0);
@@ -298,7 +297,11 @@ export function mapPixelOf(spec: Pick<LevelMapSpec, 'world' | 'picture'>, x: num
 }
 
 /** The inverse: the world position (lu) under a point of the 256 x 256 texture. */
-export function levelPointOfMapPixel(spec: Pick<LevelMapSpec, 'world' | 'picture'>, px: number, py: number): [number, number] {
+export function levelPointOfMapPixel(
+    spec: Pick<LevelMapSpec, 'world' | 'picture'>,
+    px: number,
+    py: number,
+): [number, number] {
     const n = MAP_TEXTURE_SIZE;
     const w = spec.world;
     const p = spec.picture;

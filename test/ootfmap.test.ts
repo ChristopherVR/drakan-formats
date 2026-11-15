@@ -105,7 +105,9 @@ describe('calibration', () => {
         expect([x, z]).toEqual([20, 40]);
     });
     it('writes the class fields in lu and texture pixels', () => {
-        const v = Object.fromEntries(mapClassValues({ ...spec, image: { width: 1, height: 1, rgba: new Uint8Array(4) } }));
+        const v = Object.fromEntries(
+            mapClassValues({ ...spec, image: { width: 1, height: 1, rgba: new Uint8Array(4) } }),
+        );
         expect(v['Upper Left Level Corner X (lu)']).toBe(10);
         expect(v['Lower Right Level Corner Z (lu)']).toBe(60);
         expect(v['Upper Left Map Corner X (pixels)']).toBe(64);
@@ -123,10 +125,16 @@ describe('picture helpers', () => {
         expect(r).toEqual({ x0: 0.1, y0: 0.2, x1: 0.9, y1: 0.8 });
     });
     it('stretches any picture over the 256 texture, bottom row first', () => {
-        const img: TopDownImage = { width: 2, height: 2, rgba: Uint8Array.from([255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255]) };
+        const img: TopDownImage = {
+            width: 2,
+            height: 2,
+            rgba: Uint8Array.from([255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255]),
+        };
         const t = mapTextureImage(img);
         expect([t.width, t.height]).toEqual([256, 256]);
-        const px = (x: number, row: number): number[] => [...t.rgba.subarray((row * 256 + x) * 4, (row * 256 + x) * 4 + 3)];
+        const px = (x: number, row: number): number[] => [
+            ...t.rgba.subarray((row * 256 + x) * 4, (row * 256 + x) * 4 + 3),
+        ];
         expect(px(10, 255)).toEqual([255, 0, 0]); // top left of the picture is the last stored row
         expect(px(200, 255)).toEqual([0, 255, 0]);
         expect(px(10, 0)).toEqual([0, 0, 255]);

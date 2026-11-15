@@ -149,14 +149,18 @@ export function relayExitSequences(env: ExitRelayEnv): ExitRelay[] {
         if (!scenes.length) continue;
         const senders = env.list.objects.filter((o) => o.links.includes(exitId));
         if (!senders.length) {
-            env.warnings.push(`${where}: nothing fires this exit by link (it is walked into); its sequences do not play`);
+            env.warnings.push(
+                `${where}: nothing fires this exit by link (it is walked into); its sequences do not play`,
+            );
             continue;
         }
         const fList = need(env.player, 'Sequence List');
         const fTime = need(env.timer, 'Time Until Trigger');
         const fMsg = need(env.timer, 'Trigger Message');
         if (!fList || !fTime || !fMsg) {
-            env.warnings.push(`${where}: the Stomp Player or Timer class lacks a needed field; its sequences do not play`);
+            env.warnings.push(
+                `${where}: the Stomp Player or Timer class lacks a needed field; its sequences do not play`,
+            );
             continue;
         }
         const pos: [number, number, number] = [exit.pos[0], exit.pos[1], exit.pos[2]];
