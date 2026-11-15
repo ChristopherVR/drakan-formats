@@ -10,8 +10,8 @@
 // such a toggler's scenery is shown from the start and its Hide senders no longer reach it.
 //
 // A toggler counts as zone culling only when every link source is a detector or a timer, at least one detector sends its
-// Show message and one its Hide message, it has at least `MIN_LINKS` links, and every link that starts hidden is static
-// scenery (props, flames, switches). Puzzle togglers (one source, Movers, boulders, a single object) are left alone.
+// Show message and one its Hide message, it has at least `MIN_LINKS` links, some of its links start hidden and every link
+// that starts hidden is static scenery (props, flames, switches). Puzzle togglers (one source, Movers, boulders, a single object) are left alone.
 // Hidden creatures that a Show detector of such a toggler wakes and that stand among its scenery are shown with it.
 
 import { classFieldDefault, type OdbClass } from './odb.ts';
@@ -76,7 +76,8 @@ export function findZoneCulls(
         if (!showers.length || !detectors.some((s) => sent(s) === hide)) continue;
         const links = t.links.map((id) => byId.get(id)).filter((o): o is LvlObject => !!o);
         const hidden = links.filter((o) => !(o.flags & FLAG_VISIBLE));
-        if (hidden.some((o) => !ZONE_SCENERY_RFL.has(rfl(o)))) continue;
+        // A zone that starts visible (village interiors a level-start timer hides, trees, houses) stays as authored.
+        if (!hidden.length || hidden.some((o) => !ZONE_SCENERY_RFL.has(rfl(o)))) continue;
         const near = (o: LvlObject): boolean =>
             hidden.some(
                 (h) =>

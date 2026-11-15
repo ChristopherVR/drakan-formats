@@ -107,6 +107,9 @@ describe('zone culling togglers', () => {
             warnings: [],
         };
         expect(findZoneCulls(few, classOf, isCreature)).toEqual([]);
+        const allVisible = camp();
+        for (const o of allVisible.objects) if (o.classId !== 7) o.flags |= 1;
+        expect(findZoneCulls(allVisible, classOf, isCreature)).toEqual([]);
         const showOnly = camp();
         showOnly.objects = showOnly.objects.filter((o) => o.id !== 31);
         expect(findZoneCulls(showOnly, classOf, isCreature)).toEqual([]);
