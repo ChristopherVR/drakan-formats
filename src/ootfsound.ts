@@ -314,6 +314,12 @@ export interface Ps2Sound {
     dropoff: number;
     /** 0-15; the descriptor class byte is `priority * 0x11` (0x55 on most effects, 0x99 on music). */
     priority: number;
+    /**
+     * Sound manager category (the u32 after the volume): 0 effects (default), 2 music (every PS2MUSIC.SDB track on the
+     * disc), 3 / 4 interface and speech. The music category plays one track at a time, follows the Music Volume option
+     * and is what a scene's music level and the category stop act on.
+     */
+    category?: number;
     /** Mono source samples. */
     pcm: Int16Array;
     /** Also write the 0x0305 lip-sync track (`encodeLipSync`) so a speaking actor with a jaw channel moves its mouth. */
@@ -403,7 +409,7 @@ export function writePs2Descriptor(s: Ps2Sound, pcmBytes: number, adpcmBytes: nu
     dv.setUint32(o + 4, 0x00100001, true); // u16 channels 1, u16 bits 16
     dv.setUint32(o + 8, s.rate, true);
     dv.setInt32(o + 12, Math.min(0, Math.round(s.volume)), true);
-    dv.setUint32(o + 16, 0, true);
+    dv.setUint32(o + 16, s.category ?? 0, true);
     dv.setFloat32(o + 20, s.dropoff, true);
     dv.setUint32(o + 24, 0, true);
     const pri = Math.max(0, Math.min(15, Math.round(s.priority)));

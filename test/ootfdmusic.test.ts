@@ -346,6 +346,7 @@ describe('OotF music pack', () => {
         const o = 2 + dv.getUint16(0, true);
         expect(dv.getUint32(o, true)).toBe(0xa);
         expect(dv.getUint32(o + 8, true)).toBe(22050);
+        expect(dv.getUint32(o + 16, true)).toBe(2); // the music category, as every disc track
         expect(dv.getUint32(o + 28, true)).toBe(0x99);
         expect(dv.getUint32(o + 40, true)).toBe(m.files['new/PS2MUSIC.SDB/0304_2_44.bin']!.length);
         const d3 = m.files['new/PS2MUSIC.SDB/0302_3_44.bin']!;

@@ -1176,6 +1176,8 @@ export async function renderOotfMusic(
 export const OOTF_MUSIC_GROUP = 44;
 /** Descriptor volume of the converted tracks (millibel): they are rendered about 4 dB below the disc tracks' loudness. */
 export const OOTF_MUSIC_VOLUME = -100;
+/** Sound manager category of the converted tracks: music, as every disc track (ootfsound.ts `Ps2Sound.category`). */
+export const OOTF_MUSIC_CATEGORY = 2;
 
 export interface OotfMusicPack {
     /** PC music id -> PS2MUSIC.SDB sound id (identical segments share one track). */
@@ -1246,6 +1248,7 @@ export async function buildOotfMusicPack(
             volume: OOTF_MUSIC_VOLUME,
             dropoff: 15,
             priority: 9,
+            category: OOTF_MUSIC_CATEGORY,
             pcm: t.pcm,
         });
         out.tracks.push({ pcId: t.pcId, ps2Id: id, name: t.name, seconds: t.pcm.length / t.rate, bytes: 0 });
