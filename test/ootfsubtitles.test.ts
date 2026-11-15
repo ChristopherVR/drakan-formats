@@ -109,10 +109,16 @@ describe('subtitle file', () => {
             version: 1,
             language: 'english',
             lines: [
-                { bank: 'a', id: 1, cues: [{ start: 0, end: 1, text: 'Find Erokh. I thank you, Rin. Erokhs Rinse' }] },
+                {
+                    bank: 'a',
+                    id: 1,
+                    cues: [
+                        { start: 0, end: 1, text: 'Find Erokh. I thank you, Rin. Erokhs Rinse, Wynn. Riff Crystal' },
+                    ],
+                },
             ],
         });
-        expect(f.lines[0]!.cues[0]!.text).toBe('Find Arokh. I thank you, Rynn. Erokhs Rinse');
+        expect(f.lines[0]!.cues[0]!.text).toBe('Find Arokh. I thank you, Rynn. Erokhs Rinse, Rynn. Rift Crystal');
     });
     it('names the fault of a bad file', () => {
         expect(() => parseSubtitleFile({ format: 'other', version: 1, lines: [] })).toThrow(SubtitleFileError);

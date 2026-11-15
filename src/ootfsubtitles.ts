@@ -85,6 +85,9 @@ export class SubtitleFileError extends Error {}
 export const SUBTITLE_NAME_FIXES: readonly (readonly [RegExp, string])[] = [
     [/\bErokh\b/g, 'Arokh'],
     [/\bRin\b/g, 'Rynn'],
+    [/\bWynn\b/g, 'Rynn'],
+    [/\bHeider\b/g, 'Hider'],
+    [/\bRiff Crystal\b/g, 'Rift Crystal'],
 ];
 
 /** `text` with the misheard names of `SUBTITLE_NAME_FIXES` spelled as in the game. */
