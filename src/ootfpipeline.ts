@@ -2,6 +2,7 @@ import { bridgeMesh } from './ootfbridgemodel.ts';
 import { composeBody } from './ootfpropcompose.ts';
 import { breathStandIn, isArenaPowerUp } from './ootfbreath.ts';
 import { buildBowAimMetadata } from './ootfbowaim.ts';
+import { buildCrystalMetadata } from './ootfcrystal.ts';
 import { requireGenericPropDrawLists, requireRigidWeaponDrawLists } from './ootfpropdraw.ts';
 import { DOOR_AUTO_OPEN_OFF, DOOR_AUTO_OPEN_ON, holdLinkedDoors, sceneAutoOpenDoors } from './ootfdoors.ts';
 import { applyZoneCulls, findZoneCulls } from './ootfzonecull.ts';
@@ -1926,6 +1927,23 @@ export async function convertOotfLevels(
             const bowAim = buildBowAimMetadata(plan, (key) => sourceByKey.get(key));
             if (bowAim.text) res.files['gameplay/bows.ini'] = strToU8(bowAim.text);
             res.warnings.push(...bowAim.warnings);
+            // Magic Crystals cast their PC effect at Rynn through the runtime (drakan_crystals.cpp, ootfcrystal.ts).
+            const crystals = buildCrystalMetadata(
+                plan,
+                (key) => sourceByKey.get(key),
+                (from, ref) => {
+                    const ow = ownerOf.get(from);
+                    const container = ow && builder.resolveContainer(ow, ref >>> 16);
+                    const cls = container ? ownedClasses.get(ownedClassKey(container, ref & 0xffff)) : undefined;
+                    if (!cls) return null;
+                    const key = planKey.get(sig(cls));
+                    const target = key && plan!.resolve(key.db, key.id);
+                    return { pc: cls, target: target ? { dbIndex: target.dbIndex, classId: target.classId } : null };
+                },
+                ps2Odbs,
+            );
+            if (crystals.text) res.files['gameplay/crystals.ini'] = strToU8(crystals.text);
+            res.warnings.push(...crystals.warnings);
             // Drakan 2 particle fire for converted flames (ootfps2model.ts flames rows, ootfflames.ts): the class names the fire
             // generator of the row's Drakan 2 torch and shows the invisible particle carrier; its objects move to the flame foot.
             if (hostOk && ps2.hostMod) {
