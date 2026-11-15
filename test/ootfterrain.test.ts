@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import { SrscReader, decodeTxd } from '../src/index.ts';
 import { writePs2Srsc } from '../src/ootfcontainer.ts';
-import { buildPs2Txd, encodePs2Texture } from '../src/ootftex.ts';
+import { buildPs2Txd, encodePs2Texture, setExactSink } from '../src/ootftex.ts';
 import {
     PS2_LAVA_TEXTURE,
     PS2_SURDANA_WATER_TEXTURE,
@@ -14,6 +14,7 @@ import {
     convertTerrainTextures,
     nativeWaterTextures,
     findSplatDbIndex,
+    opaqueTextureCopy,
 } from '../src/ootfterrain.ts';
 import { planTerrainSlots } from '../src/terrainblob.ts';
 import type { TerrainLayer } from '../src/terrain.ts';
@@ -130,6 +131,87 @@ describe('terrain textures', () => {
         // the far textures take a Drakan 2 entry's own picture, shrunk like a converted tile
         expect(b.texelsOfRef(map(6, pc)!)).not.toBeNull();
         expect(b.meanOfRef(map(6, pc)!)).toEqual([255, 255, 255]);
+    });
+
+    /** Proc Textures style 32 bpp record: 4 x 4, header +16 alpha selector, +37 feature byte, +40 material. */
+    const procTex32 = (alpha: (i: number) => number, selector = 7, feature = 0x02): Uint8Array => {
+        const b = new Uint8Array(0x40 + 64);
+        const dv = new DataView(b.buffer);
+        [4, 4, 16, 32, selector].forEach((v, i) => dv.setUint32(i * 4, v, true));
+        dv.setInt32(20, -1, true);
+        b.set([10, feature, 0x80], 36);
+        dv.setUint32(40, 92, true);
+        dv.setFloat32(44, 1, true);
+        for (let i = 0; i < 16; i++) b.set([130, 104, 68, alpha(i)], 0x40 + i * 4);
+        return b;
+    };
+
+    it('makes an opaque copy of a texture drawn with texture alpha, and only then', () => {
+        const rock = procTex32((i) => (i < 9 ? 0 : 0x20 + i));
+        const copy = opaqueTextureCopy(rock)!;
+        expect(copy).not.toBeNull();
+        expect(Array.from(copy.subarray(0, 0x40))).toEqual(Array.from(rock.subarray(0, 0x40)));
+        for (let i = 0; i < 16; i++) {
+            expect(Array.from(copy.subarray(0x40 + i * 4, 0x44 + i * 4))).toEqual([130, 104, 68, 0x80]);
+        }
+        expect(rock[0x40 + 3]).toBe(0); // the source is left alone
+        expect(opaqueTextureCopy(procTex32(() => 0x80))).toBeNull(); // already opaque
+        expect(opaqueTextureCopy(procTex32(() => 0, 0))).toBeNull(); // selector 0: drawn without texture alpha
+        expect(opaqueTextureCopy(procTex32(() => 0, 7, 0))).toBeNull(); // no alpha feature bit
+        const pal = new Uint8Array(0x40 + 16 + 1024 + 16);
+        const pv = new DataView(pal.buffer);
+        [4, 4, 4, 8, 8].forEach((v, i) => pv.setUint32(i * 4, v, true));
+        pv.setInt32(20, -1, true);
+        pal[37] = 0x02;
+        pv.setUint32(0x40, 1, true);
+        pal.set([10, 20, 30, 0x40], 0x50); // palette entry 0, B G R A
+        const pcopy = opaqueTextureCopy(pal)!;
+        expect(Array.from(pcopy.subarray(0x50, 0x54))).toEqual([10, 20, 30, 0x80]);
+    });
+
+    it('points mapped ground at an opaque copy of a partly transparent Drakan 2 entry, once per pack', async () => {
+        const rock = procTex32((i) => (i < 9 ? 0 : 0x40));
+        const grass = encodePs2Texture({ width: 8, height: 8, rgba: new Uint8Array(256).fill(255) }).body;
+        const base2 = buildPs2Txd([
+            { id: 3, body: grass },
+            { id: 621, body: rock },
+        ]);
+        const native = new Map([
+            ['lvl/lvl#6', 621],
+            ['lvl/lvl#7', 3],
+        ]);
+        const sunk: { body: Uint8Array; alpha: number[] }[] = [];
+        setExactSink((body, img) => sunk.push({ body, alpha: Array.from(img.rgba.filter((_, i) => i % 4 === 3)) }));
+        try {
+            const b = await TerrainTextureBuilder.create(src, base2, 24, { minSize: 0, native });
+            const map = await b.addLevel(pc);
+            const ref = map(6, pc)!;
+            expect(ref >>> 16).toBe(24);
+            const cid = ref & 0xffff;
+            expect(cid).toBeGreaterThan(621);
+            expect(map(7, pc)).toBe(((24 << 16) | 3) >>> 0); // opaque entries are used as they are
+            expect(b.report.nativeOpaque).toEqual(new Map([[621, cid]]));
+            const again = await b.addLevel(pc);
+            expect(again(6, pc)).toBe(ref); // one copy per pack
+            const r = await SrscReader.fromBytes(b.build());
+            expect(r.entries.filter((e) => e.type === 0x40 && e.id > 621).length).toBe(2); // the copy + converted #5
+            expect(Array.from(await r.readRaw(r.find(0x40, 621)!))).toEqual(Array.from(rock)); // disc entry unchanged
+            const copy = await r.readRaw(r.find(0x40, cid)!);
+            expect(Array.from(copy.subarray(0, 0x40))).toEqual(Array.from(rock.subarray(0, 0x40)));
+            expect(
+                decodeTxd(copy)
+                    .rgba.filter((_, i) => i % 4 === 3)
+                    .every((a) => a === 255),
+            ).toBe(true);
+            // HD source of the copy: the disc entry's picture with its own alpha (PNG scale), so HD-on looks as before
+            const hd = sunk.find((s) => Array.from(s.body).join() === Array.from(copy).join())!;
+            expect(hd.alpha).toEqual(Array.from({ length: 16 }, (_, i) => (i < 9 ? 0 : 128)));
+            expect(b.texelsOfRef(ref)).not.toBeNull();
+            const off = await TerrainTextureBuilder.create(src, base2, 24, { minSize: 0, native, nativeOpaque: false });
+            expect((await off.addLevel(pc))(6, pc)).toBe(((24 << 16) | 621) >>> 0);
+        } finally {
+            setExactSink(null);
+        }
     });
 
     it('finds the splat dependency', () => {

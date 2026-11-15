@@ -4180,6 +4180,8 @@ export async function convertOotfLevels(
     // ---- files
     if (terrBuilder) res.files[TERRAIN_TXD_PATH] = terrBuilder.build();
     if (terrBuilder?.report.nativeCells) log(`drakan 2 ground: ${terrBuilder.report.nativeCells} cells`);
+    const opaque = terrBuilder?.report.nativeOpaque;
+    if (opaque?.size) log(`drakan 2 ground, opaque copies: ${[...opaque].map(([b, c]) => `${b} -> ${c}`).join(', ')}`);
     res.assets = builder.report;
     res.ps2Models = { used: [...modelSwapsUsed.values()] };
     for (const u of modelSwapsUsed.values()) log(`drakan 2 model: ${u.ootf} -> ${u.ps2}`);

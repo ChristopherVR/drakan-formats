@@ -478,6 +478,10 @@ let exactSink: ((body: Uint8Array, image: RgbaImage) => void) | null = null;
 export function setExactSink(fn: ((body: Uint8Array, image: RgbaImage) => void) | null): void {
     exactSink = fn;
 }
+/** Hand the HD source of a record built outside `encodePs2Texture` to the exact sink (no-op when unset). */
+export function emitHdSource(body: Uint8Array, image: RgbaImage): void {
+    exactSink?.(body, image);
+}
 /** Attach the lossless final-size pixels (`exact`, lossy encodes only) and the HD source, and hand the source to the sink. */
 function hdResult(t: Ps2Texture, exact: RgbaImage | undefined, source: RgbaImage, emit = true): Ps2Texture {
     if (emit) exactSink?.(t.body, source);
@@ -703,7 +707,14 @@ export function upgradeIndexedSquareTexture(body: Uint8Array): Ps2Texture | null
                     indices[
                         Math.floor((y * source.height) / size) * source.width + Math.floor((x * source.width) / size)
                     ]!;
-        const t: Ps2Texture = { body: next, width: size, height: size, bpp: 8, hasAlpha: (body[37]! & 2) !== 0, lossy: false };
+        const t: Ps2Texture = {
+            body: next,
+            width: size,
+            height: size,
+            bpp: 8,
+            hasAlpha: (body[37]! & 2) !== 0,
+            lossy: false,
+        };
         return squared ? hdResult(t, undefined, original) : t;
     }
     // Resample before encoding, so opaque enlargement cannot select the separate smoothing path.

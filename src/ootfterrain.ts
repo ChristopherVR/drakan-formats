@@ -3,6 +3,7 @@ import {
     type Ps2TextureOptions,
     type RgbaImage,
     PC_TEX_MIPMAP,
+    emitHdSource,
     encodePs2Texture,
     isSkip,
     parsePcTextureInfo,
@@ -85,6 +86,13 @@ export interface TerrainTextureOptions {
      * (`Proc Textures`) TXD the cells use instead (`effectiveTerrainSubstitutions`). Ids the base TXD lacks are ignored.
      */
     native?: ReadonlyMap<string, number>;
+    /**
+     * A `native` entry drawn with texture alpha that is not fully opaque is replaced by an opaque copy under a new id
+     * (`opaqueTextureCopy`; default true). Without HD textures the port draws such an entry's transparent texels black on
+     * the ground (Proc Textures 621 "Brown Rock Outdoor", 59 % alpha 0; journal 2026-11-15/ootf-ground-textures.md 7).
+     * Dev knob `DRAKAN_TERRAIN_NATIVE_OPAQUE=0` turns it off when the option is unset.
+     */
+    nativeOpaque?: boolean;
 }
 
 export interface TerrainTextureReport {
@@ -98,6 +106,75 @@ export interface TerrainTextureReport {
     liquids?: number;
     /** Ground cells (summed over the levels) drawn with a Drakan 2 ground texture (`TerrainTextureOptions.native`). */
     nativeCells?: number;
+    /** Base TXD id -> id of its opaque copy, for the `native` entries that needed one (`nativeOpaque`). */
+    nativeOpaque?: Map<number, number>;
+}
+
+/**
+ * An opaque copy of a texture record that the engine draws with texture alpha (header +37 bit 0x02 with an alpha selector
+ * at +16 the draw path honours) and that has texels below full alpha (0x80): the same header
+ * (size, material at +40, flags) and colours, every alpha set to 0x80. Handles 32 bpp and 8 bpp with a 32 bit palette
+ * stored raw; returns null for anything else, and for records that are already opaque or drawn without texture alpha. A
+ * colour-key index at +20 is not looked at and stays in the copy (the five ground entries of the defaults have none).
+ */
+export function opaqueTextureCopy(body: Uint8Array): Uint8Array | null {
+    if (body.length < 0x40) return null;
+    const dv = view(body);
+    const [w, h, , bpp, selector] = [0, 4, 8, 12, 16].map((o) => dv.getUint32(o, true)) as [
+        number,
+        number,
+        number,
+        number,
+        number,
+    ];
+    const alphaOn = (body[37]! & 0x02) !== 0 && [1, 2, 4, 7, 8].includes(selector);
+    if (!alphaOn) return null;
+    let first: number;
+    let count: number;
+    if (bpp === 32 && body.length === 0x40 + w * h * 4) {
+        first = 0x40;
+        count = w * h;
+    } else if (bpp === 8 && dv.getUint32(0x40, true) === 1 && body.length === 0x40 + 16 + 1024 + w * h) {
+        first = 0x40 + 16;
+        count = 256;
+    } else {
+        return null;
+    }
+    let partial = false;
+    for (let i = 0; i < count && !partial; i++) partial = body[first + i * 4 + 3]! < 0x80;
+    if (!partial) return null;
+    const out = body.slice();
+    for (let i = 0; i < count; i++) out[first + i * 4 + 3] = 0x80;
+    return out;
+}
+
+/**
+ * A record's picture as the HD pack indexes it (`hd_pack.py decode_runtime` + `to_png_rgba`): stored row order, PNG alpha
+ * (0x80 -> 255). Only the layouts `opaqueTextureCopy` handles.
+ */
+function hdPictureOf(body: Uint8Array): RgbaImage {
+    const dv = view(body);
+    const w = dv.getUint32(0, true);
+    const h = dv.getUint32(4, true);
+    const rgba = new Uint8Array(w * h * 4);
+    const png = (a: number): number => Math.min(255, Math.floor((a * 255 + 64) / 128));
+    if (dv.getUint32(12, true) === 32) {
+        for (let i = 0; i < w * h * 4; i += 4) {
+            rgba.set(body.subarray(0x40 + i, 0x40 + i + 3), i);
+            rgba[i + 3] = png(body[0x40 + i + 3]!);
+        }
+    } else {
+        const pal = 0x40 + 16;
+        const pix = pal + 1024;
+        for (let i = 0; i < w * h; i++) {
+            const p = pal + body[pix + i]! * 4; // stored B, G, R, A
+            rgba[i * 4] = body[p + 2]!;
+            rgba[i * 4 + 1] = body[p + 1]!;
+            rgba[i * 4 + 2] = body[p]!;
+            rgba[i * 4 + 3] = png(body[p + 3]!);
+        }
+    }
+    return { width: w, height: h, rgba };
 }
 
 /** The dependency index of the template's `Proc Textures` entry (9 in LEVEL1NA), or undefined. */
@@ -163,6 +240,8 @@ export class TerrainTextureBuilder {
     private readonly odbs = new Map<string, Promise<Map<number, OdbClass> | null>>();
     private readonly dbs = new Map<string, Promise<Map<number, string> | null>>();
     private nextId: number;
+    /** Base entries `opaqueNative` has looked at. */
+    private readonly opaqueChecked = new Set<number>();
 
     private constructor(
         private readonly src: PcFileSource,
@@ -248,7 +327,7 @@ export class TerrainTextureBuilder {
             }
             const native = opt.native?.get(key);
             if (native !== undefined && this.hasEntry(native)) {
-                const nref = ((this.db << 16) | native) >>> 0;
+                const nref = ((this.db << 16) | this.opaqueNative(native)) >>> 0;
                 level.set(ref, nref);
                 colors.push({ ref, mean: this.meanOfRef(nref) ?? [128, 128, 128], made: true });
                 this.report.nativeCells = (this.report.nativeCells ?? 0) + (uses.get(ref) ?? 0);
@@ -317,6 +396,29 @@ export class TerrainTextureBuilder {
             noRef
                 ? null
                 : ((layer?.type === LAYER_TYPE_WATER ? liquids.get(ref) : undefined) ?? level.get(ref) ?? null);
+    }
+
+    /**
+     * The id cells use for the base entry `id` (`TerrainTextureOptions.nativeOpaque`): `id` itself, or the id of its opaque
+     * copy, appended once per pack under the next free id. The base entry stays as it is, because Drakan 2 levels draw it
+     * while the pack is on. The copy's HD source is the base entry's own picture with its alpha, so the HD pack upscales
+     * it like the disc entry and the copy looks the same with HD textures on (the runtime takes an exact-hash image's alpha
+     * as it is).
+     */
+    private opaqueNative(id: number): number {
+        if ((this.opt.nativeOpaque ?? env('DRAKAN_TERRAIN_NATIVE_OPAQUE') !== 0) === false) return id;
+        const done = this.report.nativeOpaque?.get(id);
+        if (done !== undefined) return done;
+        if (this.opaqueChecked.has(id)) return id;
+        this.opaqueChecked.add(id);
+        const e = this.entries.find((x) => x.type === TXD_ENTRY_TYPE && x.id === id)!;
+        const copy = opaqueTextureCopy(e.data);
+        if (!copy || this.nextId > 0xffff) return id;
+        const nid = this.nextId++;
+        this.entries.push({ type: TXD_ENTRY_TYPE, id: nid, sub: 0, data: copy });
+        emitHdSource(copy, hdPictureOf(e.data));
+        (this.report.nativeOpaque ??= new Map()).set(id, nid);
+        return nid;
     }
 
     private hasEntry(id: number): boolean {
