@@ -4882,8 +4882,8 @@ async function nativePose(
 /**
  * `OotfPipelineOptions.modelUpgrade`, defaulting to the `DRAKAN_MODEL_UPGRADE` environment switch: unset or `on` = the
  * table of ootfskinupgrade.ts (jaws only where seen in game), `off` / `0` = none, anything else = a regular expression of
- * the PC model names of the table to upgrade, with their jaws (e.g. `^(delon|farmer)`). Returns the builder's
- * `skinUpgrade` (undefined = the default table).
+ * PC model names whose rows also get their jaw (e.g. `^(farmer|warrior2)$`; every row is upgraded either way). Returns the
+ * builder's `skinUpgrade` (undefined = the default table).
  */
 function modelUpgradeFilter(opt: {
     modelUpgrade?: boolean;
@@ -4901,7 +4901,7 @@ function modelUpgradeFilter(opt: {
     } catch {
         throw new Error('DRAKAN_MODEL_UPGRADE must be on, off or a regular expression of PC model names.');
     }
-    return (name) => (re.test(name.trim()) ? skinUpgradeFor(name, undefined, true) : null);
+    return (name) => skinUpgradeFor(name, undefined, re.test(name.trim()));
 }
 
 /**

@@ -569,8 +569,8 @@ export interface SkinUpgradeRow {
     /** Add a jaw joint and channel (`addJaw`); converted scenes then move it while the character speaks. */
     jaw: boolean;
     /**
-     * The jaw only when asked for by name (`DRAKAN_MODEL_UPGRADE=<regex>`): rows whose jaw placement was not looked at in
-     * game. The smoother mesh is on either way.
+     * The jaw only when asked for by name (`DRAKAN_MODEL_UPGRADE=<regex>` naming the PC model): rows whose jaw placement was
+     * not looked at in game. The smoother mesh is on either way.
      */
     jawAskOnly?: boolean;
 }
