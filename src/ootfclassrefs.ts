@@ -56,6 +56,16 @@ export function relocateClassDefaultReferences(
     familyOf?: (sourceKey: string, ref: number) => string | undefined,
     /** The PC name of the referenced class, for the itemised notes. */
     nameOf?: (sourceKey: string, ref: number) => string | undefined,
+    /**
+     * For an unresolved reference: a native reference that stands in for it (a Dragon Power-up's PC-only breath takes the
+     * same field of a Drakan 2 power-up, `breathStandIn`), with the note to report; null keeps it empty.
+     */
+    standIn?: (
+        target: ClassPlan['synthesized'][number],
+        fieldName: string,
+        sourceKey: string,
+        ref: number,
+    ) => { ref: number; note: string } | null,
 ): string[] {
     const warnings: string[] = [];
     const families = new Map<string, { refs: number; classes: Set<string> }>();
@@ -80,7 +90,11 @@ export function relocateClassDefaultReferences(
             const mapped: number[] = [];
             for (const ref of refs) {
                 const target = ref === 0 ? 0 : map(sourceKey, ref, s.file);
-                if (target === null) {
+                const stood = target === null ? (standIn?.(s, f.name, sourceKey, ref) ?? null) : null;
+                if (stood) {
+                    warnings.push(`class ${s.name}: ${f.name}: ${stood.note}`);
+                    mapped.push(stood.ref >>> 0);
+                } else if (target === null) {
                     const family = familyOf?.(sourceKey, ref);
                     if (family) {
                         const fam =

@@ -1,5 +1,6 @@
 import { bridgeMesh } from './ootfbridgemodel.ts';
 import { composeBody } from './ootfpropcompose.ts';
+import { breathStandIn } from './ootfbreath.ts';
 import { buildBowAimMetadata } from './ootfbowaim.ts';
 import { requireGenericPropDrawLists, requireRigidWeaponDrawLists } from './ootfpropdraw.ts';
 import { DOOR_AUTO_OPEN_OFF, DOOR_AUTO_OPEN_ON, holdLinkedDoors, sceneAutoOpenDoors } from './ootfdoors.ts';
@@ -1857,6 +1858,20 @@ export async function convertOotfLevels(
                         const ow = source && ownerOf.get(source);
                         const container = ow && builder.resolveContainer(ow, ref >>> 16);
                         return container ? ownedClasses.get(ownedClassKey(container, ref & 0xffff))?.name : undefined;
+                    },
+                    (target, fieldName, key, ref) => {
+                        // A Dragon Power-up whose PC breath has no PS2 class takes a Drakan 2 power-up's breath.
+                        const source = sourceByKey.get(key);
+                        const ow = source && ownerOf.get(source);
+                        const container = ow && builder.resolveContainer(ow, ref >>> 16);
+                        const pc = container ? ownedClasses.get(ownedClassKey(container, ref & 0xffff)) : undefined;
+                        const hit = breathStandIn(target, fieldName, pc, ps2Odbs);
+                        return hit
+                            ? {
+                                  ref: hit.ref,
+                                  note: `PC breath "${pc?.name.trim()}" has no PS2 class; the ${fieldName} of Drakan 2's "${hit.powerUp}" stands in`,
+                              }
+                            : null;
                     },
                 ),
             );
