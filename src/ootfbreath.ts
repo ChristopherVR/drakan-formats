@@ -23,6 +23,15 @@ export const BREATH_STAND_INS: ReadonlyMap<number, string> = new Map([
 ]);
 
 /**
+ * Arena power-ups (the multiplayer "Multi ... PwrUp" and "QOD ..." classes, or any class of a multiplayer ODB) keep their
+ * empty breath: the converted air arenas breathe through the host (`drakan_pvp.cpp`), and a native breath on top of it
+ * was never played.
+ */
+export function isArenaPowerUp(pc: Pick<OdbClass, 'name'>, owner: string | undefined): boolean {
+    return /^\s*(multi|qod)\b/i.test(pc.name) || /(^|[\/])multiplayer([\/]|$)/i.test(owner ?? '');
+}
+
+/**
  * The PS2 reference a converted power-up's breath field takes when its PC reference has no PS2 class: the same field of
  * the Drakan 2 power-up named by `BREATH_STAND_INS` for the PC projectile's engine id. Only within the power-up's own ODB,
  * so the native reference keeps its meaning (class references are relative to the owning ODB's dependency list). Null when

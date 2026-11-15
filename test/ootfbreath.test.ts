@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { OdbClass } from '../src/odb.ts';
-import { BREATH_STAND_INS, breathStandIn } from '../src/ootfbreath.ts';
+import { BREATH_STAND_INS, breathStandIn, isArenaPowerUp } from '../src/ootfbreath.ts';
 import type { Ps2OdbIn } from '../src/ootfclass.ts';
 import { REFERENCE_ENGINES } from '../src/ootfcoverage.ts';
 
@@ -53,5 +53,13 @@ describe('OotF dragon power-up breath', () => {
 
     it('only stands in for projectiles the converter cannot carry', () => {
         for (const rfl of BREATH_STAND_INS.keys()) expect(REFERENCE_ENGINES.has(rfl)).toBe(true);
+    });
+
+    it('keeps the arena power-ups out (their breath comes from the host)', () => {
+        expect(isArenaPowerUp({ name: 'Multi Fire PwrUp' }, 'Common/Resources/Resources')).toBe(true);
+        expect(isArenaPowerUp({ name: 'QOD Standard Weapon' }, 'Common/Resources/Resources')).toBe(true);
+        expect(isArenaPowerUp({ name: 'Some Power Up' }, 'Common/Multiplayer/Multiplayer Common')).toBe(true);
+        expect(isArenaPowerUp({ name: 'Fireball Power Up' }, 'Common/Resources/Resources')).toBe(false);
+        expect(isArenaPowerUp({ name: 'Multiplier' }, undefined)).toBe(false);
     });
 });
