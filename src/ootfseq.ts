@@ -152,6 +152,14 @@ export interface SequenceMaps {
     /** Set per actor by convertActor from `lipSyncForActor`. */
     lipSync?: boolean;
     /**
+     * Actors whose converted model has a synthetic jaw (ootfskinupgrade.ts) but whose class cannot bind lip-sync tracks (scene
+     * props, engine class 17): each of their speech actions (PC speech bit 0x10) also starts a jaw clip on the jaw channel,
+     * made from that line's samples (`clip(soundRef)` returns its id in the actor's ADB, undefined when there is none).
+     */
+    jawForActor?: (actor: PcSeqActor, targetObjectId: number) => SceneJaw | undefined;
+    /** Set per actor by convertActor from `jawForActor`. */
+    jaw?: SceneJaw;
+    /**
      * Native idle clip (id in the actor's own ADB) to play, with a blend, just before the actor's release (a type-5 action that
      * hands the actor back to the game). Without it the engine drops the last scene clip at the release and the body snaps
      * into its gameplay idle; with it the pose under the fade is already the idle stance. Used for the player.
@@ -173,6 +181,16 @@ export interface SequenceMaps {
     /** PC music id (first u32 of the music action; 0 = stop) -> PS2 music ref word (`(db << 16) | id`). */
     musicMap?: RefLookup;
 }
+
+/** A speaking scene actor's jaw: its skeleton channel and the clip of a PC speech sound ref. */
+export interface SceneJaw {
+    channel: number;
+    clip(pcSoundRef: number): number | undefined;
+}
+
+/** Blend into a jaw clip (seconds), and the animation flags the disc's and the PC's channel clips use. */
+const JAW_BLEND = 0.08;
+const CHANNEL_CLIP_FLAGS = 0x3f;
 
 export interface SequenceConvertOptions {
     maps: SequenceMaps;
@@ -268,6 +286,8 @@ export interface SequenceReport {
     droppedActions: Map<string, number>;
     /** Messages passed through that the PS2 data does not contain (value -> count). */
     unverifiedMessages: Map<number, number>;
+    /** Jaw clips started with speech (`SequenceMaps.jawForActor`). */
+    jawClips?: number;
     warnings: string[];
 }
 
@@ -734,6 +754,7 @@ function convertActor(a: PcSeqActor, opts: SequenceConvertOptions, report: Seque
     if (opts.maps.animMapForActor) maps.animMap = opts.maps.animMapForActor(a, target.ref);
     maps.channelMap = opts.maps.channelMapForActor?.(a, target.ref);
     maps.lipSync = opts.maps.lipSyncForActor?.(a, target.ref) ?? false;
+    maps.jaw = maps.lipSync ? undefined : opts.maps.jawForActor?.(a, target.ref);
     maps.endIdle = opts.maps.endIdleForActor?.(a, target.ref);
     const scale = opts.maps.scaleForActor?.(a, target.ref);
     maps.scale = scale && scale.length === 3 && scale.every((v) => Number.isFinite(v) && v > 0) ? scale : undefined;
@@ -782,6 +803,22 @@ function convertActor(a: PcSeqActor, opts: SequenceConvertOptions, report: Seque
             report,
         );
         if (b) chunks.push(b);
+        if (b && x.type === 3 && maps.jaw && view(x.payload).getUint16(10, true) & 0x10) {
+            const clip = maps.jaw.clip(view(x.payload).getUint32(0, true));
+            if (clip !== undefined) {
+                const jaw = pcBytes(1, x.time, 24);
+                const dv = view(jaw);
+                dv.setUint32(6, maps.jaw.channel >>> 0, true);
+                dv.setUint32(10, clip >>> 0, true);
+                dv.setUint32(14, 0, true);
+                dv.setFloat32(18, JAW_BLEND, true);
+                dv.setFloat32(22, 1, true);
+                dv.setUint32(26, CHANNEL_CLIP_FLAGS, true);
+                chunks.push(jaw);
+                report.actionsOut++;
+                report.jawClips = (report.jawClips ?? 0) + 1;
+            }
+        }
         lastTime = Math.max(lastTime, x.time);
     });
     const j = joinActions(chunks);

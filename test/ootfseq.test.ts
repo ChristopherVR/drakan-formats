@@ -693,6 +693,49 @@ describe('ootfseq', () => {
         expect(flags(seq.actors[1]!)).toEqual([0x10]);
     });
 
+    it('starts a jaw clip on the jaw channel with the speech of actors that have a synthetic jaw', async () => {
+        const speech = act(3, 1.5, [...u32(0x13f), ...f32(6.2), ...u16(10000), ...u16(0x18)]);
+        const step = act(3, 2, [...u32(0x7d), ...f32(0.3), ...u16(6000), ...u16(0)]);
+        const bytes = w(
+            str('Talk'),
+            u32(126),
+            u32(0),
+            u32(3),
+            u32(2),
+            actor('Rynn', 1, 1740, [speech]),
+            actor('Delon', 2, 1841, [speech, step]),
+        );
+        const asked: number[] = [];
+        const result = await convertPcSequences(stub(bytes), {
+            maps: {
+                objectIdMap: new Map([
+                    [1740, 42],
+                    [1841, 43],
+                ]),
+                soundMap: { get: (r) => r },
+                lipSyncForActor: (_a, target) => target === 42,
+                jawForActor: () => ({ channel: 10, clip: (ref) => (asked.push(ref), 3001) }),
+            },
+            usedIds: new Set(),
+        });
+        const entry = result.entries.find((e) => e.type === 0x311)!;
+        const seq = parseSequence(entry.id, entry.sub, entry.data)!;
+        const field = (x: ReturnType<typeof parseActions> & object, i: number, n: string) =>
+            x[i]!.fields.find((f) => f.name === n)!.value;
+        // the lip-synced player gets no jaw clip; the speaker does, the footstep does not
+        expect(parseActions(seq.actors[0]!)!.map((x) => x.type)).toEqual([3]);
+        const delon = parseActions(seq.actors[1]!)!;
+        expect(delon.map((x) => [x.type, x.time])).toEqual([
+            [3, 1.5],
+            [1, 1.5],
+            [3, 2],
+        ]);
+        expect([field(delon, 1, 'mode'), field(delon, 1, 'animation'), field(delon, 1, 'flags')]).toEqual([
+            10, 3001, 0x3f,
+        ]);
+        expect(asked).toEqual([0x13f]);
+    });
+
     it('plays the native idle just before an actor is released to the game', async () => {
         const clip = act(1, 2, [...u32(0), ...u32(7), ...u32(0), ...f32(0), ...f32(1), ...u32(0x15)]);
         const release = act(5, 10, u32(1));

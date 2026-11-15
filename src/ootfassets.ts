@@ -3,9 +3,12 @@ import { type ModelTextureRef, ModelError, MOD_BOUNDS, MOD_CHARACTER } from './m
 import {
     type Skeleton,
     type PcAnim,
+    type Ps2Anim,
     parseSkeleton,
     parsePcAnim,
+    parsePs2Anim,
     ps2AnimFlags,
+    writePs2Anim,
     withPs2AnimFlags,
     writePs2Skeleton,
 } from './ootfanim.ts';
@@ -52,6 +55,7 @@ import {
 import { lightBeamMesh, smoothSubdivide } from './ootfpropremake.ts';
 import { palmCrownMesh } from './ootfpalm.ts';
 import { type Ps2SubstituteTexture, substituteMismatch } from './ootfps2tex.ts';
+import { type JawRig, type SkinUpgradeRow, skinUpgradeFor, upgradeSkin, withJawTrack } from './ootfskinupgrade.ts';
 
 /**
  * Packaging of converted Order of the Flame assets for a mod pack: one PS2 MOD + TXD + DB for a converted level (or for
@@ -87,6 +91,11 @@ export interface AssetBuilderOptions {
     displayList?: RegExp;
     /** Convert skinned models (default true); false skips them like before. */
     skinned?: boolean;
+    /**
+     * Characters refined at convert time (ootfskinupgrade.ts): the row for a PC skinned model name, or null to convert it as
+     * it is. Default `skinUpgradeFor` (the table there); `() => null` turns the upgrade off.
+     */
+    skinUpgrade?: (pcModelName: string) => Pick<SkinUpgradeRow, 'smooth' | 'jaw'> | null;
     /** Drakan 2 disc textures copied in place of OotF ones, by lower-case `container#id` (ootfps2tex.ts). */
     ps2Textures?: ReadonlyMap<string, Ps2SubstituteTexture>;
 }
@@ -100,6 +109,8 @@ export interface AssetReport {
     ps2Textures?: Map<string, { ps2: string; used: boolean; reason?: string }>;
     /** Skinned models converted, with the number of clips written and skipped. */
     creatures: { key: string; id: number; joints: number; groups: number; anims: number; animsSkipped: number }[];
+    /** Skinned models refined at convert time (ootfskinupgrade.ts): triangles after the upgrade, jaw added. */
+    upgraded: { key: string; name: string; triangles: number; jaw: boolean }[];
     warnings: string[];
 }
 
@@ -113,6 +124,8 @@ const lower = (s: string): string => s.toLowerCase();
 const MOD_DISPLAY_LIST = 0x0211;
 const MOD_NAME_RECORD = 0x0200;
 const MOD_VERTICES_RECORD = 0x0203;
+/** Upgraded characters stay under this many vertices (the disc's biggest skinned humans have about 2,200). */
+const DL_MAX_SKIN_VERTICES = 4000;
 
 /** A Drakan 2 model read from the disc for `OotfAssetBuilder.useDiscModel`. */
 export interface DiscModelSource {
@@ -302,6 +315,7 @@ export class OotfAssetBuilder {
         textures: { converted: 0, bytes: 0, byBpp: {}, lossy: 0 },
         skipped: new Map(),
         creatures: [],
+        upgraded: [],
         warnings: [],
     };
     private readonly containers = new Map<string, SrscReader | null>();
@@ -309,6 +323,10 @@ export class OotfAssetBuilder {
     /** `container#id` (lower case) -> new PS2 texture id. */
     private readonly texIds = new Map<string, number>();
     private readonly texAlpha = new Map<number, boolean>();
+    /** Skinned models whose upgraded mesh did not fit the display list: converted as they are. */
+    private readonly noUpgrade = new Set<string>();
+    /** Jaw rigs of upgraded models, by `container#id` (`jawRigOf`). */
+    private readonly jaws = new Map<string, JawRig>();
     /** Texture (base id) -> the models that use it; `'level'` marks the terrain's. Lets `pruneSkinned` drop what only dropped models used. */
     private readonly texUse = new Map<number, Set<string>>();
     /** Texture base id -> number of animation frames (ids base .. base + n - 1). */
@@ -592,6 +610,35 @@ export class OotfAssetBuilder {
             if (nid !== null) this.useTexture(nid, key);
             map.set(`${t.db}/${t.id}`, nid === null ? null : { id: nid, db: 0 });
         }
+        let jaw: JawRig | null = null;
+        let pcJoints = skin?.sk.joints.length ?? 0;
+        const upgrade = skin && !this.noUpgrade.has(key) ? (this.options.skinUpgrade ?? skinUpgradeFor)(pc.name) : null;
+        if (skin && upgrade) {
+            // Alpha cards (hair fringes) stay flat: their list entries are the PC textures whose converted copy has alpha.
+            const keep = new Set<number>();
+            pc.textures.forEach((t, ti) => {
+                const r = map.get(`${t.db}/${t.id}`);
+                if (r && this.texAlpha.get(r.id)) keep.add(ti);
+            });
+            try {
+                const u = upgradeSkin(
+                    { positions: skin.positions, polygons: pc.polygons, skeleton: skin.sk },
+                    upgrade,
+                    keep,
+                );
+                if (u.positions.length / 3 > DL_MAX_SKIN_VERTICES)
+                    throw new Error(`${u.positions.length / 3} vertices`);
+                pc = { ...pc, positions: u.positions, polygons: u.polygons };
+                skin = { ...skin, sk: u.skeleton, positions: u.positions };
+                jaw = u.jaw;
+                pcJoints = u.pcJoints;
+                this.report.upgraded.push({ key, name: pc.name, triangles: u.polygons.length, jaw: !!u.jaw });
+            } catch (e) {
+                this.report.warnings.push(
+                    `model ${key}: upgrade skipped (${e instanceof Error ? e.message : String(e)})`,
+                );
+            }
+        }
         const { model, stats } = pcToNeutral(pc, {
             ...this.options.model,
             dropPolygons: skin ? undefined : this.polygonDrops.get(key),
@@ -616,9 +663,16 @@ export class OotfAssetBuilder {
             try {
                 dl = withDisplayList(model, { vertexJoints: (v) => vertexJoints[v] ?? [] });
             } catch (e) {
+                if (upgrade && !this.noUpgrade.has(key)) {
+                    // The refined mesh does not fit the display list: convert the PC mesh as it is.
+                    this.noUpgrade.add(key);
+                    this.report.upgraded = this.report.upgraded.filter((u) => u.key !== key);
+                    this.report.warnings.push(`model ${key}: upgrade dropped (display list: ${String(e)})`);
+                    return this.addModel(container, id, requireDisplayList);
+                }
                 return fail(`display list: ${e instanceof Error ? e.message : String(e)}`);
             }
-            const anims = await this.convertClips(container, sk, key);
+            const anims = await this.convertClips(container, sk, key, jaw ?? undefined, pcJoints);
             const base: Skeleton = {
                 ...sk,
                 lodNames: [],
@@ -721,6 +775,7 @@ export class OotfAssetBuilder {
         const nid = this.nextModel++;
         this.modelIds.set(key, nid);
         if (skin) this.report.creatures[this.report.creatures.length - 1]!.id = nid;
+        if (jaw) this.jaws.set(key, jaw);
         this.models.push({
             id: nid,
             model: out,
@@ -941,11 +996,27 @@ export class OotfAssetBuilder {
         container: string,
         sk: Skeleton,
         key: string,
+        jaw?: JawRig,
+        pcJoints = sk.joints.length,
     ): Promise<{ ids: number[]; skipped: number }> {
-        const loaded = await this.loadClips(container, sk, key);
+        // An upgraded skeleton with a jaw has one joint more than the PC clips: they convert on the PC joints and get a
+        // resting jaw track.
+        const pcSk: Skeleton =
+            pcJoints < sk.joints.length
+                ? {
+                      ...sk,
+                      joints: sk.joints.slice(0, pcJoints).map((j) => ({
+                          ...j,
+                          firstChild: j.firstChild >= pcJoints ? 0 : j.firstChild,
+                          nextSibling: j.nextSibling >= pcJoints ? 0 : j.nextSibling,
+                      })),
+                      channels: sk.channels.filter((c) => c.joint < pcJoints),
+                  }
+                : sk;
+        const loaded = await this.loadClips(container, pcSk, key);
         let skipped = loaded.skipped;
         const r = convertCreatureAssets({
-            pcSkeleton: sk,
+            pcSkeleton: pcSk,
             pcAnims: loaded.pcAnims,
             ps2Skeleton: null,
             keepChannels: true,
@@ -959,7 +1030,10 @@ export class OotfAssetBuilder {
             }
             const nid = this.nextAnim++;
             map.set(a.id, nid);
-            this.anims.push({ id: nid, info: a.info, data: a.data });
+            if (jaw) {
+                const w = writePs2Anim(withJawTrack(parsePs2Anim(a.info, a.data), jaw));
+                this.anims.push({ id: nid, info: w.info, data: w.data });
+            } else this.anims.push({ id: nid, info: a.info, data: a.data });
         }
         this.animMaps.set(key, map);
         return { ids: [...map.values()].sort((x, y) => x - y), skipped };
@@ -994,6 +1068,25 @@ export class OotfAssetBuilder {
             if (k >= 0) this.report.creatures.splice(k, 1);
         }
         for (let i = this.anims.length - 1; i >= 0; i--) if (drop.has(this.anims[i]!.id)) this.anims.splice(i, 1);
+    }
+
+    /**
+     * Add a clip made after the models were converted (a scene's jaw clip, ootfskinupgrade.ts `jawClip`) to the clips that
+     * ship with the converted creatures; its id is at least `floor` (past ids handed out elsewhere). Null when ids run out.
+     */
+    addClip(anim: Ps2Anim, floor = 0): number | null {
+        this.nextAnim = Math.max(this.nextAnim, floor);
+        if (this.nextAnim > 0xffff) return null;
+        const id = this.nextAnim++;
+        const w = writePs2Anim(anim);
+        this.anims.push({ id, info: w.info, data: w.data });
+        return id;
+    }
+
+    /** The jaw of an upgraded converted creature model (ootfskinupgrade.ts `jawClip`), or null. */
+    jawRigOf(pcDb: number, pcId: number, owner: string): JawRig | null {
+        const c = this.resolveContainer(owner, pcDb);
+        return c ? (this.jaws.get(`${lower(c)}#${pcId}`) ?? null) : null;
     }
 
     /** PC animation id -> id in the host ADB for a converted creature model (see `mapModelRef`); null when none. */

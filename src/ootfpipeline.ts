@@ -59,6 +59,7 @@ import {
     type PcSound,
     type PcSoundBank,
 } from './ootfsound.ts';
+import { jawClip, skinUpgradeFor, speechOpenings } from './ootfskinupgrade.ts';
 import {
     DEFAULT_TEMPLATE_VOICE_CLEARS,
     templateVoiceClears,
@@ -489,6 +490,11 @@ export interface OotfPipelineOptions {
     /** Convert skinned models with their skeletons and clips (default true). */
     skinned?: boolean;
     /**
+     * Refine the OotF characters that keep their PC model (ootfskinupgrade.ts: smoother mesh, a jaw that moves while they
+     * speak in scenes). Default: the `DRAKAN_MODEL_UPGRADE` environment switch (`modelUpgradeFilter`), on when unset.
+     */
+    modelUpgrade?: boolean;
+    /**
      * Name-mapped creatures (PC class with a same-named PS2 class): retarget the PC clips onto the PS2 rig when it shares at least half
      * of the PC joints (overrides the PS2 clips of the same name), else convert the PC model instead (default true).
      */
@@ -830,6 +836,7 @@ export async function convertOotfLevels(
             Math.max(maxId(ps2.hostAdb, 0x0501), ...[...(ps2.adbs?.values() ?? [])].map((a) => maxId(a, 0x0501)), 99) +
             1,
         skinned: opt.skinned,
+        skinUpgrade: modelUpgradeFilter(opt),
         texture: ootfTextureEnv(),
         displayList:
             (opt.displayListAll ??
@@ -876,6 +883,8 @@ export async function convertOotfLevels(
     // Scene-only Wartoks (rfl 17 props cloned from the Lil' Goblin) shown with the disc Wartok model and rig (ootfps2model.ts).
     const sceneTocks = new Map<OdbClass, SceneTock>();
     const sceneClips = discClipWriter(adbOf);
+    // Jaw clips of speaking scene actors (ootfskinupgrade.ts), by rig, SSD owner and PC sound ref; null = none possible.
+    const jawClips = new Map<string, number | null>();
     /** PC classes whose converted model is cloned instead of name-mapping them to a PS2 class with a foreign rig. */
     const convertOwn = new Set<OdbClass>();
 
@@ -2331,6 +2340,8 @@ export async function convertOotfLevels(
         sequenceSsdStem(stem, ps2.ssds ?? new Map(), sequencePlayer?.stem ?? null);
     // ---- sounds: the sounds that object parameters name, in one new SDB of the shared container
     let soundLookup: ((ownerPath: string, ref: number) => number | null) | null = null;
+    // Samples of a converted sound (for the jaw clips of speaking scene actors), by owner and PC ref.
+    let soundSamples: ((ownerPath: string, ref: number) => { pcm: Int16Array; rate: number } | null) | null = null;
     if (opt.sounds === true) {
         await stage('sounds', async () => {
             const banks = new Map<string, PcSoundBank>();
@@ -2635,6 +2646,11 @@ export async function convertOotfLevels(
                 const c = builder.resolveContainer(ow, ref >>> 16);
                 const m = c ? conv.map.get(sdbKey(`${c}.sdb`), ref & 0xffff) : null;
                 return m === null ? null : m & 0xffff;
+            };
+            soundSamples = (ow, ref) => {
+                const id = soundLookup!(ow, ref);
+                const x = id === null ? undefined : conv.sounds.find((y) => y.id === id);
+                return x ? { pcm: x.pcm, rate: x.rate } : null;
             };
             let written = 0;
             let cleared = 0;
@@ -3060,6 +3076,45 @@ export async function convertOotfLevels(
                                       : tockOf(actor, targetId)?.channels,
                             // The PS2 Rynn class has a Jaw Channel: her speech gets the lip-sync bit (tracks: ootfsound.ts).
                             lipSyncForActor: (_actor, targetId) => targetId === playerId,
+                            // Upgraded speakers with a synthetic jaw (scene props cannot bind lip-sync tracks): a jaw clip per line.
+                            jawForActor: (actor, targetId) => {
+                                if (targetId === playerId || targetId === dragonId || tockOf(actor, targetId))
+                                    return undefined;
+                                const sourceId =
+                                    actor.actorType === 1 && first.objectIdMap.get(actor.objectId) === targetId
+                                        ? actor.objectId
+                                        : undefined;
+                                const object = pc.list.objects.find((o) =>
+                                    sourceId !== undefined
+                                        ? o.id === sourceId
+                                        : first.objectIdMap.get(o.id) === targetId,
+                                );
+                                const cls = object && pc.classes.get(object.dbIndex)?.get(object.classId);
+                                const ow = cls && ownerOf.get(cls);
+                                const rig = cls?.model && ow ? builder.jawRigOf(cls.model.db, cls.model.id, ow) : null;
+                                if (!rig || !cls?.model || !ow) return undefined;
+                                const rigKey = `${ow}#${cls.model.db}:${cls.model.id}`;
+                                return {
+                                    channel: rig.channel,
+                                    clip: (ref) => {
+                                        const k = `${rigKey}|${c}|${ref}`;
+                                        if (jawClips.has(k)) return jawClips.get(k) ?? undefined;
+                                        const samples = c && soundSamples ? soundSamples(c, ref) : null;
+                                        const id = samples
+                                            ? builder.addClip(
+                                                  jawClip(
+                                                      rig,
+                                                      speechOpenings(samples.pcm, samples.rate),
+                                                      `jaw ${ref & 0xffff}`,
+                                                  ),
+                                                  sceneClips.top(),
+                                              )
+                                            : null;
+                                        jawClips.set(k, id);
+                                        return id ?? undefined;
+                                    },
+                                };
+                            },
                             endIdleForActor: (_actor, targetId) =>
                                 targetId === playerId ? playerScene?.idle : undefined,
                             // Every key keeps the actor's object scale (the two Wartoks of scene 1.1 placed at 1.5).
@@ -4825,6 +4880,31 @@ async function nativePose(
 }
 
 /**
+ * `OotfPipelineOptions.modelUpgrade`, defaulting to the `DRAKAN_MODEL_UPGRADE` environment switch: unset or `on` = the
+ * table of ootfskinupgrade.ts (jaws only where seen in game), `off` / `0` = none, anything else = a regular expression of
+ * the PC model names of the table to upgrade, with their jaws (e.g. `^(delon|farmer)`). Returns the builder's
+ * `skinUpgrade` (undefined = the default table).
+ */
+function modelUpgradeFilter(opt: {
+    modelUpgrade?: boolean;
+}): ((name: string) => ReturnType<typeof skinUpgradeFor>) | undefined {
+    if (opt.modelUpgrade === false) return () => null;
+    if (opt.modelUpgrade === true) return undefined;
+    const v = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.[
+        'DRAKAN_MODEL_UPGRADE'
+    ]?.trim();
+    if (!v || /^(on|1|true|yes)$/i.test(v)) return undefined;
+    if (/^(off|0|false|no)$/i.test(v)) return () => null;
+    let re: RegExp;
+    try {
+        re = new RegExp(v, 'i');
+    } catch {
+        throw new Error('DRAKAN_MODEL_UPGRADE must be on, off or a regular expression of PC model names.');
+    }
+    return (name) => (re.test(name.trim()) ? skinUpgradeFor(name, undefined, true) : null);
+}
+
+/**
  * New clips for disc creatures that scenes drive (the scene Wartoks): fresh ids past the ADB's own and past the converted
  * creature clips shipped to it (`floor`), as `new/<stem>.ADB/` entries plus the ADB header override (clip count, highest id + 1;
  * an override already written for the same ADB by the converted clips is extended, not replaced).
@@ -4833,6 +4913,12 @@ function discClipWriter(adbOf: (stem: string) => SrscReader | undefined) {
     const next = new Map<string, number>();
     const entries = new Map<string, { id: number; info: Uint8Array; data: Uint8Array }[]>();
     return {
+        /** One past the highest id handed out (0 before the first). */
+        top(): number {
+            let t = 0;
+            for (const v of next.values()) t = Math.max(t, v);
+            return t;
+        },
         put(stem: string, floor: number, anim: Parameters<typeof writePs2Anim>[0]): number {
             const adb = adbOf(stem);
             const id =
