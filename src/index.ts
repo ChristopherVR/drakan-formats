@@ -54,3 +54,4 @@ export * from './ootfmap.ts';
 export * from './ootfshell.ts';
 export * from './ootfstomp.ts';
 export * from './packbuild.ts';
+export * from './savelayout.ts';

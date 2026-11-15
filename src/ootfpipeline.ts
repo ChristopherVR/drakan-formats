@@ -105,6 +105,7 @@ import {
     usedIdsOf,
 } from './ootfseq.ts';
 import { SrscReader } from './srsc.ts';
+import { ClassIdPinner, type ClassIdPins } from './savelayout.ts';
 import {
     TERRAIN_TXD_PATH,
     limitVisibleEntries,
@@ -472,6 +473,11 @@ export interface OotfPs2Context {
 }
 
 export interface OotfPipelineOptions {
+    /**
+     * Class ids of the previous build of the pack (`classIdPins` of its files): classes keep their ids and new ones are
+     * added above them, so saves of the previous pack stay valid (savelayout.ts). Default none (ids in plan order).
+     */
+    classIdPins?: ClassIdPins;
     /** Lower trees that float over the ground all round onto it (ootftreeground.ts). Default true; env DRAKAN_TREE_GROUNDING=off. */
     treeGrounding?: boolean;
     textures?: boolean;
@@ -1586,6 +1592,7 @@ export async function convertOotfLevels(
                 return id !== null && skinnedIds.has(id);
             };
             const planOpts: PlanOptions = {
+                ...(opt.classIdPins ? { pinnedIds: opt.classIdPins } : {}),
                 modelOdbFiles: modelFiles,
                 keepOwnModel: (cls) => convertOwn.has(cls),
                 // A PC weapon shown with a disc weapon model carries that weapon's child part (the mace head ...); the part
@@ -1921,11 +1928,14 @@ export async function convertOotfLevels(
                 // record holds the disc generator's values (the disc torch generators carry a torch-head model, which drew
                 // as a dark block in the OotF cages), and each particle class it spawns is copied with the scale applied.
                 const fxOdb = ps2Odbs.find((o) => o.file.toUpperCase() === 'FX.ODB');
+                // Pinned (savelayout.ts): a grown fire class keeps the id the previous pack gave its name.
+                const firePins = new ClassIdPinner(opt.classIdPins);
                 let fxTop = fxOdb
                     ? Math.max(
                           0,
                           ...fxOdb.classes.keys(),
                           ...plan.synthesized.filter((s) => s.file === fxOdb.file).map((s) => s.classId),
+                          firePins.top(fxOdb.file),
                       )
                     : 0;
                 const grownFires = new Map<string, number | string>();
@@ -1956,7 +1966,9 @@ export async function convertOotfLevels(
                     if (!genTpl) return done(`FX has no model-less class to copy the fire of ${row.ps2} into`);
                     const add = (name: string, tpl: [number, OdbClass], data: number[]): number => {
                         const [tplId, tplCls] = tpl;
-                        const classId = ++fxTop;
+                        const classId =
+                            firePins.take(fxOdb.file, name, tplCls.rflClass ?? 0, new Set(fxOdb.classes.keys())) ??
+                            ++fxTop;
                         const group = fxOdb.group?.(tplId) ?? tplCls.group;
                         plan!.synthesized.push({
                             pcKeys: [],
@@ -2801,10 +2813,13 @@ export async function convertOotfLevels(
                 return;
             }
             const overrides: Readonly<Record<string, LevelMapOverride>> = opt.levelMaps || {};
+            // Pinned (savelayout.ts): a level's map class keeps the id the previous pack gave its name.
+            const mapPins = new ClassIdPinner(opt.classIdPins);
             let top = Math.max(
                 0,
                 ...tpl.odb.classes.keys(),
                 ...plan.synthesized.filter((x) => x.file === tpl.odb.file).map((x) => x.classId),
+                mapPins.top(tpl.odb.file),
             );
             for (const pc of pcs) {
                 if (isOotfArenaLevel(pc)) continue;
@@ -2813,8 +2828,9 @@ export async function convertOotfLevels(
                     overrides[pc.path.toLowerCase()],
                 );
                 if (!spec) continue;
-                const classId = ++top;
                 const name = `OotF Map ${pcLevelName(pc.header)}`.slice(0, 40);
+                const classId =
+                    mapPins.take(tpl.odb.file, name, tpl.cls.rflClass ?? 0, new Set(tpl.odb.classes.keys())) ?? ++top;
                 const data = [...tpl.cls.data!];
                 for (const [fname, v] of mapClassValues(spec)) {
                     const j = classFieldIndex(tpl.cls, fname);

@@ -10,6 +10,7 @@
 // Added records ship as `new/<FILE>.ODB/0102_<id>_<sub>.bin` plus a replaced 0x0103 field-list entry (modding.md).
 
 import { ootfClassDebug } from './ootfdebug.ts';
+import { ClassIdPinner, type ClassIdPins } from './savelayout.ts';
 import {
     FIELD_ANIMATION,
     FIELD_CLASS,
@@ -437,6 +438,12 @@ export interface PlanOptions {
     mapClassRef?: (pcRef: number) => number | null;
     /** Class ids that must not be handed out, per ODB file (e.g. ids already used by other mods). */
     reservedIds?: ReadonlyMap<string, ReadonlySet<number>>;
+    /**
+     * The class ids of the previous build of the pack (`classIdPins`): a class of a pinned name keeps its id, every
+     * pinned id stays reserved and new classes go above them, so saves made with the previous pack keep naming the
+     * same classes (savelayout.ts, docs/reference/modding.md "Saves and pack builds").
+     */
+    pinnedIds?: ClassIdPins;
     /**
      * Classes that need a model (scenery, mechanisms, creatures ...) are cloned from a PS2 class of the same engine id
      * *with a model* and get the model this returns: `(PC class, target ODB file) -> {id, db}` (`db` = index in that ODB's
@@ -1023,13 +1030,25 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
         }
     }
     const free = new Map<string, number[]>();
-    const nextId = (file: string): number | undefined => {
+    const pins = new ClassIdPinner(opt.pinnedIds);
+    const handed = new Set<string>();
+    // `name` / `rflOf`: the class's name and engine class, for its pinned id. A fresh id skips every pinned id of the file.
+    const nextId = (file: string, name: string, rflOf: number): number | undefined => {
+        const pinned = pins.take(file, name, rflOf, taken.get(file));
+        if (pinned !== undefined) {
+            handed.add(`${file}|${pinned}`);
+            return pinned;
+        }
         let list = free.get(file);
         if (!list) {
-            list = freeIds(taken.get(file) ?? new Set(), opt.reservedIds?.get(file));
+            const reserved = new Set([...(opt.reservedIds?.get(file) ?? []), ...pins.reserved(file)]);
+            list = freeIds(taken.get(file) ?? new Set(), reserved);
             free.set(file, list);
         }
-        return list.shift();
+        let id = list.shift();
+        while (id !== undefined && handed.has(`${file}|${id}`)) id = list.shift();
+        if (id !== undefined) handed.add(`${file}|${id}`);
+        return id;
     };
     const done = new Map<string, Synthesized>();
     const usedTemplates = new Set<string>();
@@ -1048,16 +1067,16 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
             const host = ps2.find((o) => o.file === opt.modelOdbFile);
             const model = host ? opt.modelFor(cls, host.file) : null;
             const bounds = model ? opt.modelBounds?.(model.id, host!.file, model.db) : undefined;
-            const classId = host ? nextId(host.file) : undefined;
-            if (
+            // The id is taken only when the record is written, so a pinned id is not spent on a class that goes on below.
+            const fits =
                 host &&
                 model &&
                 bounds?.length === 64 &&
-                classId !== undefined &&
                 cls.data?.length === PRESSURE_PLATE_FIELDS.length &&
                 cls.fields?.length === PRESSURE_PLATE_FIELDS.length &&
-                cls.fields.every((f, i) => f.name.trim() === PRESSURE_PLATE_FIELDS[i])
-            ) {
+                cls.fields.every((f, i) => f.name.trim() === PRESSURE_PLATE_FIELDS[i]);
+            const classId = fits ? nextId(host.file, cls.name.trim() || 'OotF Pressure Plate', 29) : undefined;
+            if (fits && classId !== undefined && host && model && cls.data && cls.fields) {
                 const name = cls.name.trim() || 'OotF Pressure Plate';
                 // The two sounds are PC sound references; they stay silent until they are converted.
                 const data = cls.data.map((v, i) => (/Sound$/.test(PRESSURE_PLATE_FIELDS[i]!) ? 0 : v));
@@ -1168,7 +1187,7 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
                 });
                 continue;
             }
-            const classId = nextId(host.file);
+            const classId = nextId(host.file, cls.name.trim() || 'OotF Trail Master', 81);
             if (classId === undefined) {
                 unsupported.set(key, { reason: 'no-free-id', detail: `${host.file} has no free class id` });
                 continue;
@@ -1432,13 +1451,13 @@ export function planClassMapping(pc: readonly PcClassIn[], ps2: readonly Ps2OdbI
             if (rigidBow) prev.rigidBowTemplate = true;
             continue;
         }
-        const newId = nextId(c.odb.file);
+        const name = cls.name.trim() || `OotF class ${rfl}`;
+        const newId = nextId(c.odb.file, name, c.cls.rflClass ?? rfl);
         if (newId === undefined) {
             unsupported.set(key, { reason: 'no-free-id', detail: `${c.odb.file} has no free class id` });
             continue;
         }
         const group = c.odb.group?.(c.id) ?? c.cls.group;
-        const name = cls.name.trim() || `OotF class ${rfl}`;
         let record = raw
             ? cloneClassRecord(raw, name, m.data)
             : buildPlainClassRecord({
