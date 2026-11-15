@@ -26,6 +26,12 @@ export interface SaveAddedObjects {
     revision: number;
     level: string;
     ids: number[];
+    /**
+     * Per id (same order), a level object that must still be named by the save for the id to be added (0 = none): a
+     * blow-up generator's prop only while the generator exists (`3353@2855`), so a save made after the generator burst
+     * does not get the statue back.
+     */
+    requires?: number[];
 }
 export interface SaveEffectSwap {
     level: string;
@@ -74,7 +80,8 @@ export const NO_SAVE_REVISIONS: SaveRevisions = {
 const hex = (n: number): string => n.toString(16);
 
 export function formatSaveAddedObjects(a: SaveAddedObjects): string {
-    return `${a.revision} | ${a.level} | ${a.ids.join(' ')}`;
+    const ids = a.ids.map((id, i) => (a.requires?.[i] ? `${id}@${a.requires[i]}` : `${id}`));
+    return `${a.revision} | ${a.level} | ${ids.join(' ')}`;
 }
 export function formatSaveReplacedEffects(r: SaveReplacedEffects): string {
     return `${r.revision} | ${r.level} | ${hex(r.fromClass)} ${hex(r.toClass)} | ${Math.round(r.x)} ${Math.round(r.z)}`;
@@ -106,9 +113,24 @@ export function readSaveRevisions(manifest: string): SaveRevisions {
     const added: SaveAddedObjects[] = [];
     for (const line of tomlStrings(manifest, 'save_added_objects')) {
         const f = line.split('|').map((s) => s.trim());
-        const ids = (f[2] ?? '').split(/\s+/).filter(Boolean).map(Number);
-        if (f.length === 3 && Number(f[0]) > 0 && f[1] && ids.length && ids.every((n) => Number.isInteger(n) && n > 0))
-            added.push({ revision: Number(f[0]), level: f[1], ids });
+        const tokens = (f[2] ?? '').split(/\s+/).filter(Boolean);
+        const ids = tokens.map((t) => Number(t.split('@')[0]));
+        const requires = tokens.map((t) => (t.includes('@') ? Number(t.split('@')[1]) : 0));
+        const ok = (n: number) => Number.isInteger(n) && n >= 0;
+        if (
+            f.length === 3 &&
+            Number(f[0]) > 0 &&
+            f[1] &&
+            ids.length &&
+            ids.every((n) => ok(n) && n > 0) &&
+            requires.every(ok)
+        )
+            added.push({
+                revision: Number(f[0]),
+                level: f[1],
+                ids,
+                ...(requires.some(Boolean) ? { requires } : {}),
+            });
     }
     const replaced: SaveReplacedEffects[] = [];
     for (const line of tomlStrings(manifest, 'save_replaced_effects')) {
@@ -183,14 +205,22 @@ export function planSaveRevisions(
     swaps: readonly SaveEffectSwap[],
     relinks: readonly SaveRelink[] = [],
     togglers: ReadonlyMap<string, readonly number[]> = new Map(),
+    requires: ReadonlyMap<string, number> = new Map(),
 ): SaveRevisionPlan {
     if (!kept) return { revisions: NO_SAVE_REVISIONS, bumped: false };
     const next = previous.revision + 1;
     const known = new Set(previous.added.flatMap((a) => a.ids.map((id) => `${a.level}|${id}`)));
-    const added = previous.added.map((a) => ({ ...a, ids: [...a.ids] }));
+    const added = previous.added.map((a) => ({
+        ...a,
+        ids: [...a.ids],
+        ...(a.requires ? { requires: [...a.requires] } : {}),
+    }));
     for (const [level, ids] of addedObjects) {
         const fresh = ids.filter((id) => !known.has(`${level}|${id}`));
-        if (fresh.length) added.push({ revision: next, level, ids: [...fresh].sort((a, b) => a - b) });
+        if (!fresh.length) continue;
+        const sorted = [...fresh].sort((a, b) => a - b);
+        const req = sorted.map((id) => requires.get(`${level}|${id}`) ?? 0);
+        added.push({ revision: next, level, ids: sorted, ...(req.some(Boolean) ? { requires: req } : {}) });
     }
     const same = (a: SaveEffectSwap, b: SaveEffectSwap) =>
         a.level === b.level && a.fromClass === b.fromClass && Math.abs(a.x - b.x) < 1 && Math.abs(a.z - b.z) < 1;

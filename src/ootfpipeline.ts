@@ -685,6 +685,8 @@ export interface OotfPipelineResult {
     saveRelinks?: SaveRelink[];
     /** Zone-culling togglers per level title (the pack's `save_reset_togglers`, saverevisions.ts). */
     saveTogglers?: Record<string, number[]>;
+    /** `<level title>|<object id>` -> the object an old save must still name for the id to be added (saverevisions.ts). */
+    saveAddRequires?: Record<string, number>;
     /** Drakan 2 textures used in place of OotF ones (`OotfPipelineOptions.ps2Textures`), and rows that could not be used. */
     ps2Textures?: { used: { ootf: string; ps2: string; label: string }[]; skipped: { ootf: string; reason: string }[] };
     /** Drakan 2 models used for OotF classes (`OotfPipelineOptions.ps2Models`), by OotF class name. */
@@ -3600,6 +3602,10 @@ export async function convertOotfLevels(
                     .map((z) => z.toggler)
                     .filter((id) => lvl.objects.objects.some((x) => x.id === id));
                 if (zoneTogglers.length) (res.saveTogglers ??= {})[title] = zoneTogglers;
+                // A blow-up generator's prop is only added to an old save that still holds the generator (it is gone once
+                // it burst under an earlier pack, and the prop would stand in an empty lair).
+                for (const b of blowUpProps.get(pc) ?? [])
+                    (res.saveAddRequires ??= {})[`${title}|${b.prop}`] = b.generator;
                 const rep = applyPuzzleLogic({
                     pc,
                     list: lvl.objects,

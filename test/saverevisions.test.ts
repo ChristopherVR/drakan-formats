@@ -112,6 +112,22 @@ describe('save revisions', () => {
         expect(
             planSaveRevisions(togs.revisions, true, new Map(), [swap], [], new Map([[RV, [2337, 2684]]])).bumped,
         ).toBe(false);
+        // an object that needs another one: written and read as id@required
+        const cond = planSaveRevisions(
+            NO_SAVE_REVISIONS,
+            true,
+            new Map([[RV, [3353, 3390]]]),
+            [],
+            [],
+            new Map(),
+            new Map([[`${RV}|3353`, 2855]]),
+        );
+        expect(cond.revisions.added).toEqual([{ revision: 1, level: RV, ids: [3353, 3390], requires: [2855, 0] }]);
+        const line = formatSaveAddedObjects(cond.revisions.added[0]!);
+        expect(line).toBe(`1 | ${RV} | 3353@2855 3390`);
+        expect(readSaveRevisions(`save_revision = 1\nsave_added_objects = ["${line}"]`).added).toEqual(
+            cond.revisions.added,
+        );
         // a new build (old saves are refused) starts again
         expect(planSaveRevisions(first.revisions, false, new Map([[RV, [1]]]), [swap]).revisions).toEqual(
             NO_SAVE_REVISIONS,
