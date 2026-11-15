@@ -336,6 +336,14 @@ export function freeClassId(table: ReadonlyMap<number, OdbClass>): number {
 }
 
 /** Mover sound fields: the fall is heard through the PC links (a Triggered Sound), the template's disc sounds stay silent. */
+/**
+ * The PS2 Mover's "Special Effect" (a class reference the Mover spawns and carries). The planner clones the tree's Mover
+ * from the closest PS2 Mover and keeps its defaults for the fields the PC side does not name; in the campaign pack that
+ * template was RESOURES "!! Flaming Bolt  test!!", whose effect drew a square of flame beside Ruined Village's push tree,
+ * hidden or not, and turned with the trunk when it fell (journal 2026-11-16/rv-campfire.md). Each Mover clears it.
+ */
+const MOVER_EFFECT = 'Special Effect';
+
 const MOVER_SOUNDS = [
     'Stop Sound',
     'Reverse motion Stop Sound',
@@ -420,6 +428,7 @@ export function placeFallingTrees(
             }
             const m2 = newObject(fm, fo, !!opt.visible);
             for (const name of MOVER_SOUNDS) set(m2, fieldsOf(m2), name, 0);
+            setNamedParam(list, m2, fieldsOf(m2), MOVER_EFFECT, 0);
             extra.push(m2);
             standing.push(fo.id);
         });
@@ -438,6 +447,7 @@ export function placeFallingTrees(
         m.data = [];
         const mf = fieldsOf(m);
         for (const name of MOVER_SOUNDS) set(m, mf, name, name === 'Stop Sound' && stopSound ? stopSound : 0);
+        setNamedParam(list, m, mf, MOVER_EFFECT, 0);
         const links = [m.id];
         // A hidden object turns on On but stays unseen and passes through Rynn; the level's own Visibility Toggler class
         // shows it first (as the tomb's toggler shows its hidden stair Movers before they move).

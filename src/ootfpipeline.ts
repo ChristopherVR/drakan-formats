@@ -4,6 +4,7 @@ import { breathStandIn, isArenaPowerUp } from './ootfbreath.ts';
 import { buildBowAimMetadata } from './ootfbowaim.ts';
 import { requireGenericPropDrawLists, requireRigidWeaponDrawLists } from './ootfpropdraw.ts';
 import { DOOR_AUTO_OPEN_OFF, DOOR_AUTO_OPEN_ON, holdLinkedDoors, sceneAutoOpenDoors } from './ootfdoors.ts';
+import { applyZoneCulls, findZoneCulls } from './ootfzonecull.ts';
 import { splitClassRecord } from './odbwrite.ts';
 import { carryStartingInventory } from './ootfstartinventory.ts';
 import {
@@ -4152,6 +4153,21 @@ export async function convertOotfLevels(
         const pullArr = dbgEnv['DRAKAN_DBG_PULLIDS'] ? dbgEnv['DRAKAN_DBG_PULLIDS'].split(',').map(Number) : null;
         const pullIds = pullArr ? new Set(pullArr) : null;
         const pullIdOk = (o: LvlObject): boolean => !pullIds || pullIds.has(o.id);
+        {
+            // Zone culling togglers (ootfzonecull.ts): scenery the PC hides until a detector pair shows it is shown from the
+            // start, with the hidden creatures the Show detector wakes among it; the Hide detectors no longer reach the toggler.
+            const culls = findZoneCulls(
+                pc.list,
+                (o) => pc.classes.get(o.dbIndex)?.get(o.classId),
+                (rfl) => ENGINE_CLASSES.get(rfl)?.kind === 'creature',
+            );
+            const shown = applyZoneCulls(parts.objects, culls);
+            for (const z of culls)
+                log(
+                    `${pc.path}: zone culling toggler ${z.toggler}: ${z.shown.length} hidden object(s) and ${z.creatures.length} creature(s) shown from the start, hide source(s) ${z.hideSources.join(' ') || 'none'} cut`,
+                );
+            if (culls.length) log(`${pc.path}: zone culling: ${culls.length} toggler(s), ${shown} object(s) shown`);
+        }
         {
             // PC creatures whose "visible" flag (0x01) is clear start hidden: a Detect and Execute / timer link shows them later (Death Mages,
             // Hueges: proven in game). One that nothing links to would stay invisible for ever (the Queen has no links at all), so it is shown.

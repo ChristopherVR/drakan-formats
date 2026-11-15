@@ -267,6 +267,7 @@ describe('falling trees', () => {
             ['Forward Rotate Sound', 5],
             ['Reverse Rotate Sound', 5],
             ['Rotate Distance (r)', F],
+            ['Special Effect', 0x4003],
         ];
         const tree = obj(7, 50, [5500, 1050, 1000], 90, [8]);
         const list: LvlObjectList = { objects: [tree, obj(8, 60, [0, 0, 0], 0)], warnings: [] };
@@ -304,7 +305,8 @@ describe('falling trees', () => {
         expect(mover.pos).toEqual([5500, 1050, 1000]);
         expect(mover.rot).toEqual([0, 90, 0]);
         expect(mover.flags & FLAG_VISIBLE).toBe(0);
-        expect(Object.values(named(mover))).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
+        expect(Object.values(named(mover))).toEqual([0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        expect(named(mover)['Special Effect']).toBe(0);
         expect(fbits(0)).toBe(0);
     });
 
