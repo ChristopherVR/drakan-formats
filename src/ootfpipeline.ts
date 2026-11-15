@@ -254,7 +254,14 @@ import {
 import { buildRig, invertMat12, localToWorld, mat12ToQuat, mulMat12 } from './skeleton.ts';
 import { bindBasis, convertPcAnimToPs2 } from './ootfcreature.ts';
 import { addBlowUpPropActors, addBlowUpProps, type BlowUpProp } from './ootfblowup.ts';
-import { dragonChannelMap, dragonPartners, isDragonPair, nativeDragonClips, retargetDragonClip } from './ootfdragon.ts';
+import {
+    dragonChannelMap,
+    dragonPartners,
+    dragonReadyClip,
+    isDragonPair,
+    nativeDragonClips,
+    retargetDragonClip,
+} from './ootfdragon.ts';
 import { sampleClip } from './anim.ts';
 import { MOD_CHARACTER, parseModel, parseModelName } from './model.ts';
 import {
@@ -3092,7 +3099,7 @@ export async function convertOotfLevels(
                             disc ? nativeDragonClips(cls, disc) : new Map(),
                         );
                         for (const w of r.warnings) res.warnings.push(`sequences ${pc.path}: dragon clips: ${w}`);
-                        return r.map.size ? r : null;
+                        return r.map.size ? { ...r, idle: disc ? dragonReadyClip(disc) : undefined } : null;
                     })();
                     // Skeleton and clips of every skinned creature the scenes place, for the carried-creature poses (ootfcarry.ts).
                     const creatureRigs = new Map<number, CarrierRig>();
@@ -3222,7 +3229,11 @@ export async function convertOotfLevels(
                                 };
                             },
                             endIdleForActor: (_actor, targetId) =>
-                                targetId === playerId ? playerScene?.idle : undefined,
+                                targetId === playerId
+                                    ? playerScene?.idle
+                                    : targetId === dragonId
+                                      ? dragonScene?.idle
+                                      : undefined,
                             // Every key keeps the actor's object scale (the two Wartoks of scene 1.1 placed at 1.5).
                             scaleForActor: (actor, targetId) => {
                                 if (targetId === playerId || targetId === dragonId) return undefined;

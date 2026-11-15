@@ -164,6 +164,16 @@ export function nativeDragonClips(
     return out;
 }
 
+/**
+ * The disc Dragon class's Ready clip: played as the end idle when a scene gives Arokh back to the game (as the player gets
+ * hers), so he does not hold the last acting clip of the scene. Undefined without one.
+ */
+export function dragonReadyClip(disc: Pick<OdbClass, 'fields' | 'data'>): number | undefined {
+    const i = disc.fields?.findIndex((f) => f.name.trim().toLowerCase() === 'ready') ?? -1;
+    const v = i >= 0 ? classFieldDefault(disc, i) : undefined;
+    return typeof v === 'number' && v > 0 ? v & 0xffff : undefined;
+}
+
 const rotationOnly = (m: ArrayLike<number>): Float32Array => Float32Array.from([...Array.from(m).slice(0, 9), 0, 0, 0]);
 
 export interface DragonRetargetOptions {

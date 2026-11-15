@@ -5,6 +5,7 @@ import {
     DRAGON_JOINTS,
     dragonChannelMap,
     dragonPartners,
+    dragonReadyClip,
     isDragonPair,
     nativeDragonClips,
     retargetDragonClip,
@@ -95,6 +96,8 @@ describe('ootfdragon', () => {
             ['Fly', 1595],
             ['Bite', 0],
         ]);
+        expect(dragonReadyClip(disc)).toBe(1607);
+        expect(dragonReadyClip(cls([['Ready', 0]]))).toBeUndefined();
         expect([...nativeDragonClips(pc, disc)]).toEqual([
             [545, 1607],
             [535, 1595],
