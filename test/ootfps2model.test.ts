@@ -167,6 +167,33 @@ describe('health of a swapped enemy whose Drakan 2 class never flees', () => {
     });
 });
 
+describe('Order of the Flame values a swapped enemy keeps', () => {
+    it('the dragons keep their hit points, the Ice Dragon also how far and wide it sees', () => {
+        const plan = planPs2Models();
+        expect(plan.enemyPcFields('Crimson Dragon')).toEqual(['Initial Health']);
+        expect(plan.enemyPcFields(' blade dragon')).toEqual(['Initial Health']);
+        expect(plan.enemyPcFields('Ice Dragon')).toEqual(['Initial Health', 'Detect Radius (lu)', 'Field of Vision']);
+        expect(plan.enemyTarget('Ice Dragon')).toBe('Ice Dragon 1');
+        expect(plan.enemyPcFields('Spider')).toEqual([]);
+        expect(plan.enemyPcFields('Short Sword')).toEqual([]);
+    });
+
+    it('the boss Blade Dragon (its own green skin) and the Ebon Dragon are not swapped', () => {
+        const plan = planPs2Models();
+        expect(plan.enemy('Boss Blade Dragon')).toBeNull();
+        expect(plan.enemy('Ebon Dragon')).toBeNull();
+        expect(PC_CLASS_ALIASES.has(modelKey('Boss Blade Dragon'))).toBe(false);
+    });
+
+    it('nothing is kept with the row off or the swaps off, and only enemy rows carry PC fields', () => {
+        expect(planPs2Models({ off: ['Crimson Dragon'] }).enemyPcFields('Crimson Dragon')).toEqual([]);
+        expect(planPs2Models({ enabled: false }).enemyPcFields('Blade Dragon')).toEqual([]);
+        expect(planPs2Models({ off: ['Ice Dragon'] }).enemyOff('Ice Dragon')).toBe(true);
+        for (const r of DEFAULT_PS2_MODEL_SUBSTITUTIONS)
+            if (r.pcFields?.length) expect(r.category === 'enemies' && !r.scene).toBe(true);
+    });
+});
+
 describe('Drakan 2 prop models', () => {
     const src: PcFileSource = { read: async () => null, list: async () => [] };
     it('answers only for the PC model a row names, and leaves default-off rows off', () => {

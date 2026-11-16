@@ -570,6 +570,10 @@ export const PC_CLASS_ALIASES: ReadonlyMap<string, string> = new Map(
             ['Orc Plate (yellow)', 'Yellow Orc : Center'],
             ['War Giant', 'Primitive Giant'],
             ['starving wargiant', 'Primitive Giant'],
+            // The Drakan 2 dragons are remakes of these (same class and model numbers for the first two).
+            ['Crimson Dragon', 'Crimson Dragon (Bat)'],
+            ['Blade Dragon', 'Blade Dragon (Crow)'],
+            ['Ice Dragon', 'Ice Dragon 1'],
             // The multiplayer "Ambient Sound" box is the PS2 Ambient Transition with one slot named (`pcParamAlias`).
             ['Ambient Sound', 'AmbientTransition'],
         ] as const

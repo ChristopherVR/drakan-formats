@@ -1476,14 +1476,23 @@ export async function convertOotfLevels(
                 const norm = (c: OdbClass): string =>
                     `${c.rflClass}|${c.name.toLowerCase().replace(/[^a-z0-9]+/g, '')}`;
                 const byName = new Map<string, { odb: Ps2OdbIn; cls: OdbClass }>();
+                // Disc models a Drakan 2 enemy row plays with its own clips: a class of the same model (the dragons'
+                // AnimWay Points) must not retarget PC clips over them in the shared ADB.
+                const discClipModels = new Set<number>();
                 for (const odb of [...ps2Odbs].sort((a, b) => b.dbIndex - a.dbIndex))
                     for (const cls of odb.classes.values()) byName.set(norm(cls), { odb, cls });
+                const hitOf = (c: OdbClass) =>
+                    byName.get(norm(c)) ?? byName.get(`${c.rflClass}|${aliasSquash(c.name)}`);
+                for (const i of input) {
+                    const model = modelSwap.enemy(i.cls.name) === 'drakan2' ? hitOf(i.cls)?.cls.model : undefined;
+                    if (model) discClipModels.add(model.id);
+                }
                 for (const i of input) {
                     const ow = ownerOf.get(i.cls);
                     const m = i.cls.model;
                     const newId = ow && m ? builder.mapModelRef(m.db, m.id, ow) : null;
                     if (!ow || !m || newId === null || !builder.report.creatures.some((c) => c.id === newId)) continue;
-                    const hit = byName.get(norm(i.cls)) ?? byName.get(`${i.cls.rflClass}|${aliasSquash(i.cls.name)}`);
+                    const hit = hitOf(i.cls);
                     if (!hit?.cls.model) continue;
                     // Drakan 2 enemies (ootfps2model.ts): the disc's own clips need no retarget; a row turned off keeps the PC model.
                     if (modelSwap.enemyOff(i.cls.name)) {
@@ -1499,7 +1508,7 @@ export async function convertOotfLevels(
                             ps2: hit.cls.name.trim(),
                             label: `${i.cls.name.trim()} as ${hit.cls.name.trim()}`,
                         });
-                    if (enemy === 'drakan2') {
+                    if (enemy === 'drakan2' || discClipModels.has(hit.cls.model.id)) {
                         retargetNotes.push(`drakan 2 ${i.cls.name}: PS2 model ${hit.cls.model.id} with its own clips`);
                         // Its scene clips name PC animations the disc model does not have: play the disc clip of the same
                         // name instead (Ruined Village scene 1.3: the Scavenger's "run" was dropped and it slid across the
@@ -4335,44 +4344,61 @@ export async function convertOotfLevels(
         }
         {
             // An enemy played by a Drakan 2 class that never flees (ootfps2model.ts `healthUntilFlee`: the Scavenger) gets the hit
-            // points its Order of the Flame class loses before it runs away, as an object parameter. The object's own PC values
-            // count before the PC class defaults; a creature placed dead keeps its health.
+            // points its Order of the Flame class loses before it runs away, as an object parameter; an enemy row's `pcFields`
+            // (a dragon's hit points) take the PC value. The object's own PC values count before the PC class defaults; a
+            // creature placed dead keeps its health.
             const pcById = new Map(pc.list.objects.map((x) => [x.id, x]));
-            let set = 0;
+            let fled = 0;
+            const kept = new Map<string, number>();
             for (const o of parts.objects.objects) {
                 const src = pcById.get(o.id);
                 const pcCls = src ? pc.classes.get(src.dbIndex)?.get(src.classId) : undefined;
-                if (!src || !pcCls || !modelSwap.enemyHealthUntilFlee(pcCls.name)) continue;
+                if (!src || !pcCls) continue;
+                const untilFlee = modelSwap.enemyHealthUntilFlee(pcCls.name);
+                const pcFields = modelSwap.enemyPcFields(pcCls.name);
+                if (!untilFlee && !pcFields.length) continue;
                 const ps2Cls = classes.get(o.dbIndex)?.get(o.classId);
                 if (!ps2Cls?.fields || modelKey(ps2Cls.name) !== modelKey(modelSwap.enemyTarget(pcCls.name) ?? ''))
                     continue;
                 const pcSpecs = objectParamSpecs(src);
                 const pcValue = (name: string): unknown => {
-                    const own = pcSpecs.find((sp) => sp.name === name);
+                    const own = pcSpecs.find((sp) => sp.name.trim() === name);
                     if (own) return own.value;
-                    const i = pcCls.fields?.findIndex((f) => f.name === name) ?? -1;
+                    const i = pcCls.fields?.findIndex((f) => f.name.trim() === name) ?? -1;
                     return i >= 0 ? classFieldDefault(pcCls, i) : undefined;
                 };
                 const pcHealth = pcValue('Initial Health');
-                const health =
-                    typeof pcHealth === 'number' && pcHealth <= 0
-                        ? null
-                        : healthUntilFlee(pcHealth, pcValue('Flee Health Limit'));
-                const fieldIndex = ps2Cls.fields.findIndex((f) => f.name === 'Initial Health');
-                if (health === null || fieldIndex < 0) continue;
-                const specs = objectParamSpecs(o).filter((sp) => sp.name !== 'Initial Health');
-                specs.push({
-                    fieldIndex,
-                    type: ps2Cls.fields[fieldIndex]!.type,
-                    name: 'Initial Health',
-                    value: health,
-                });
+                const dead = typeof pcHealth === 'number' && pcHealth <= 0;
+                const values = new Map<string, number>();
+                for (const name of pcFields) {
+                    const v = pcValue(name);
+                    if (typeof v === 'number' && Number.isFinite(v) && !(dead && name === 'Initial Health'))
+                        values.set(name, v);
+                }
+                const health = untilFlee && !dead ? healthUntilFlee(pcHealth, pcValue('Flee Health Limit')) : null;
+                if (health !== null) values.set('Initial Health', health);
+                const specs = objectParamSpecs(o);
+                let changed = false;
+                for (const [name, value] of values) {
+                    const fieldIndex = ps2Cls.fields.findIndex((f) => f.name.trim() === name);
+                    if (fieldIndex < 0) continue;
+                    const at = specs.findIndex((sp) => sp.name.trim() === name);
+                    if (at >= 0) specs.splice(at, 1);
+                    specs.push({ fieldIndex, type: ps2Cls.fields[fieldIndex]!.type, name, value });
+                    changed = true;
+                }
+                if (!changed) continue;
                 setObjectParams(parts.objects, o.id, specs);
-                set++;
+                if (health !== null) fled++;
+                else kept.set(pcCls.name.trim(), (kept.get(pcCls.name.trim()) ?? 0) + 1);
             }
-            if (set)
+            if (fled)
                 res.warnings.push(
-                    `${pc.path}: ${set} creature(s) of a Drakan 2 class that never flees got the health until the PC one flees`,
+                    `${pc.path}: ${fled} creature(s) of a Drakan 2 class that never flees got the health until the PC one flees`,
+                );
+            if (kept.size)
+                res.warnings.push(
+                    `${pc.path}: swapped creatures kept Order of the Flame values: ${[...kept].map(([n, c]) => `${n} x${c}`).join(', ')}`,
                 );
         }
         {

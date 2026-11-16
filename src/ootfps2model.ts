@@ -48,6 +48,12 @@ export interface Ps2ModelSubstitution {
      * ends after the same number of blows as in the original. Every other value is the disc class's.
      */
     healthUntilFlee?: boolean;
+    /**
+     * Enemy rows: plain value fields (numbers) that each placed creature takes from its Order of the Flame class or object
+     * instead of the Drakan 2 class, as object parameters: a dragon keeps the hit points it had in the original while the
+     * disc class flies, attacks and animates it. Fields the Drakan 2 class does not have are skipped.
+     */
+    pcFields?: readonly string[];
     /** Props: the ODB stem of the Drakan 2 class (`MOUNTAON`) whose model is copied; flames: of the torch class. */
     odb?: string;
     /**
@@ -368,6 +374,30 @@ export const DEFAULT_PS2_MODEL_SUBSTITUTIONS: readonly Ps2ModelSubstitution[] = 
         why: 'The disc Scavenger class and model. The Order of the Flame Scavenger could not be hit by melee from most sides (its PC sphere hit volumes do not suit the PS2 engine, see the 2026-11-09 journal), while the disc one is hit normally; it keeps its PC placement, takes the attacks of the disc class, and plays the disc clips. The Order of the Flame Scavenger runs away once it is down to 20 of its 35 hit points; the disc class never flees (2026-11-12 journal), so each one gets the 15 hit points it takes to drive the original off. Turn it off to keep the converted PC model.',
         healthUntilFlee: true,
     },
+    {
+        category: 'enemies',
+        ootf: 'Crimson Dragon',
+        ps2: 'Crimson Dragon (Bat)',
+        label: 'Crimson Dragon',
+        why: 'The same creature in both games: the Drakan 2 class has the Order of the Flame class and model numbers and is its remake (about 2,600 triangles against 811). It keeps the Order of the Flame hit points (175, the disc class has 200).',
+        pcFields: ['Initial Health'],
+    },
+    {
+        category: 'enemies',
+        ootf: 'Blade Dragon',
+        ps2: 'Blade Dragon (Crow)',
+        label: 'Blade Dragon',
+        why: 'The same creature in both games: the Drakan 2 class has the Order of the Flame class and model numbers and is its remake (about 2,700 triangles against 181, the same 36 joints). It keeps the Order of the Flame hit points (150, the disc class has 125). The boss Blade Dragon is not swapped: it is the same mesh with its own green skin, which the disc model does not have.',
+        pcFields: ['Initial Health'],
+    },
+    {
+        category: 'enemies',
+        ootf: 'Ice Dragon',
+        ps2: 'Ice Dragon 1',
+        label: 'Ice Dragon',
+        why: "The Drakan 2 Ice Dragon (about 2,700 triangles against 450) plays the Grotto's Ice Dragon with its own clips and ice breath. It keeps the Order of the Flame hit points (400, the disc class has 175) and how far and how wide it sees (25 units and 210 degrees; the disc dragon sees 40 units all around), so it wakes where the original did.",
+        pcFields: ['Initial Health', 'Detect Radius (lu)', 'Field of Vision'],
+    },
     weapon('Short Sword', 'Steel Short Sword', 'Short sword', 'A plain one-handed short sword in both games.'),
     weapon('Long Sword', 'Steel Longsword', 'Long sword', 'A plain one-handed long sword in both games.'),
     weapon('2-Handed', 'Steel Two Handed Sword', 'Two-handed sword', 'A plain two-handed sword in both games.'),
@@ -640,6 +670,8 @@ export interface Ps2ModelPlan {
     harmlessShow(name: string): Ps2ModelSubstitution | null;
     /** The swapped enemy gets the health after which its Order of the Flame class flees (`healthUntilFlee`, disc clips only). */
     enemyHealthUntilFlee(name: string): boolean;
+    /** The fields the swapped enemy takes from its Order of the Flame class or object (`pcFields`), empty for none. */
+    enemyPcFields(name: string): readonly string[];
 }
 
 /**
@@ -669,6 +701,10 @@ export function planPs2Models(o: Ps2ModelSwapOptions = {}): Ps2ModelPlan {
         enemyHealthUntilFlee: (name) => {
             const r = on.get(modelKey(name));
             return r?.category === 'enemies' && anim === 'drakan2' && r.healthUntilFlee === true;
+        },
+        enemyPcFields: (name) => {
+            const r = on.get(modelKey(name));
+            return r?.category === 'enemies' ? (r.pcFields ?? []) : [];
         },
         enemyTarget: (name) => {
             const r = on.get(modelKey(name));
