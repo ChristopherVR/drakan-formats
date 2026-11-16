@@ -21,8 +21,12 @@ import {
     parseSkeleton,
     readPcTexture,
     skinnedLodPolygons,
+    fitAuthored,
+    authoredProblem,
+    type AuthoredModel,
     type RgbaImage,
 } from '../src/index.ts';
+import { vertexWeights } from '../src/ootfskinupgrade.ts';
 
 const MOD_CHARACTER = 0x0208;
 
@@ -110,7 +114,7 @@ for (const want of free) {
     if (id < 0) {
         for (const i of ids) if ((await modelName(i)).toLowerCase() === want.toLowerCase()) id = i;
     }
-    const pc = id >= 0 ? await parsePcModel(mod, id) : null;
+    let pc = id >= 0 ? await parsePcModel(mod, id) : null;
     if (!pc) {
         console.error(`no model ${want}`);
         continue;
@@ -121,11 +125,39 @@ for (const want of free) {
     let polys = pc.polygons;
     let skeleton: unknown = null;
     if (pc.character) {
-        const sk = parseSkeleton(await mod.readRaw(mod.find(MOD_CHARACTER, id)!), 'pc');
+        let sk = parseSkeleton(await mod.readRaw(mod.find(MOD_CHARACTER, id)!), 'pc');
         const L = sk.lods[0]!;
         first = L.firstVertex;
         count = L.vertexCount;
         polys = skinnedLodPolygons(pc.polygons, sk); // LOD 0 without the limb stump caps
+        if (opt.authored) {
+            // --authored <json>: write the authored mesh as the converter fits it on this model (UVs, textures, weights)
+            const a = JSON.parse(readFileSync(opt.authored, 'utf-8')) as AuthoredModel;
+            const why = authoredProblem(a);
+            if (why) throw new Error(`${opt.authored}: ${why}`);
+            const lodPos = pc.positions.slice(first * 3, (first + count) * 3);
+            // cut-out textures (alpha), as the converter excludes them from slots that do not name them
+            const alpha = new Set<number>();
+            for (const [ti, t] of pc.textures.entries()) {
+                const tex = txd && t.db === 0 ? await readPcTexture(txd, t.id) : null;
+                if (tex && !isSkip(tex) && tex.image.rgba.some((v, k) => k % 4 === 3 && v < 128)) alpha.add(ti);
+            }
+            const fit = fitAuthored(
+                a,
+                { positions: lodPos, polygons: polys, weights: vertexWeights(sk, count) },
+                sk,
+                alpha,
+            );
+            const nv = fit.positions.length / 3;
+            pc = { ...pc, positions: fit.positions };
+            first = 0;
+            count = nv;
+            polys = fit.polygons;
+            const per: { vertex: number; weight: number }[][] = sk.joints.map(() => []);
+            fit.weights.forEach((list, v) => list.forEach((x) => per[x.j]!.push({ vertex: v, weight: x.w })));
+            sk = { ...sk, joints: sk.joints.map((j, ji) => ({ ...j, weights: [per[ji]!] })) };
+            console.log(`authored ${a.label}: ${nv} vertices, ${polys.length} triangles, ${fit.dropped} dropped`);
+        }
         const parent = jointParents(sk);
         const names = new Array<string>(sk.joints.length).fill('');
         for (const n of sk.nodes)

@@ -55,7 +55,16 @@ import {
 import { lightBeamMesh, smoothSubdivide } from './ootfpropremake.ts';
 import { palmCrownMesh } from './ootfpalm.ts';
 import { type Ps2SubstituteTexture, substituteMismatch } from './ootfps2tex.ts';
-import { type JawRig, type SkinUpgradeRow, skinUpgradeFor, upgradeSkin, withJawTrack } from './ootfskinupgrade.ts';
+import {
+    type JawRig,
+    type SkinUpgradeRow,
+    skinUpgradeFor,
+    upgradeSkin,
+    vertexWeights,
+    withJawTrack,
+    withVertexWeights,
+} from './ootfskinupgrade.ts';
+import { type AuthoredModel, fitAuthored } from './ootfauthored.ts';
 
 /**
  * Packaging of converted Order of the Flame assets for a mod pack: one PS2 MOD + TXD + DB for a converted level (or for
@@ -96,6 +105,11 @@ export interface AssetBuilderOptions {
      * it is. Default `skinUpgradeFor` (the table there); `() => null` turns the upgrade off.
      */
     skinUpgrade?: (pcModelName: string) => Pick<SkinUpgradeRow, 'smooth' | 'jaw'> | null;
+    /**
+     * Authored replacement meshes (ootfauthored.ts): the one for a PC skinned model name, or null. A replaced model is not
+     * subdivided; its skin upgrade row still adds the jaw.
+     */
+    authored?: (pcModelName: string) => AuthoredModel | null;
     /** Drakan 2 disc textures copied in place of OotF ones, by lower-case `container#id` (ootfps2tex.ts). */
     ps2Textures?: ReadonlyMap<string, Ps2SubstituteTexture>;
 }
@@ -111,6 +125,8 @@ export interface AssetReport {
     creatures: { key: string; id: number; joints: number; groups: number; anims: number; animsSkipped: number }[];
     /** Skinned models refined at convert time (ootfskinupgrade.ts): triangles after the upgrade, jaw added. */
     upgraded: { key: string; name: string; triangles: number; jaw: boolean }[];
+    /** Characters drawn with an authored mesh (ootfauthored.ts). */
+    authored: { key: string; name: string; label: string; triangles: number; vertices: number; dropped: number }[];
     warnings: string[];
 }
 
@@ -316,6 +332,7 @@ export class OotfAssetBuilder {
         skipped: new Map(),
         creatures: [],
         upgraded: [],
+        authored: [],
         warnings: [],
     };
     private readonly containers = new Map<string, SrscReader | null>();
@@ -614,14 +631,47 @@ export class OotfAssetBuilder {
         }
         let jaw: JawRig | null = null;
         let pcJoints = skin?.sk.joints.length ?? 0;
-        const upgrade = skin && !this.noUpgrade.has(key) ? (this.options.skinUpgrade ?? skinUpgradeFor)(pc.name) : null;
+        // Alpha cards (hair fringes) stay flat: their list entries are the PC textures whose converted copy has alpha.
+        const keep = new Set<number>();
+        pc.textures.forEach((t, ti) => {
+            const r = map.get(`${t.db}/${t.id}`);
+            if (r && this.texAlpha.get(r.id)) keep.add(ti);
+        });
+        const authored = skin && !this.noUpgrade.has(key) ? (this.options.authored?.(pc.name) ?? null) : null;
+        let upgrade = skin && !this.noUpgrade.has(key) ? (this.options.skinUpgrade ?? skinUpgradeFor)(pc.name) : null;
+        if (skin && authored) {
+            try {
+                const fit = fitAuthored(
+                    authored,
+                    {
+                        positions: skin.positions,
+                        polygons: pc.polygons,
+                        weights: vertexWeights(skin.sk, skin.positions.length / 3),
+                    },
+                    skin.sk,
+                    keep,
+                );
+                const nv = fit.positions.length / 3;
+                if (nv > DL_MAX_SKIN_VERTICES) throw new Error(`${nv} vertices`);
+                if (!fit.polygons.length) throw new Error('no triangle found a PC texture');
+                pc = { ...pc, positions: fit.positions, polygons: fit.polygons };
+                skin = { ...skin, sk: withVertexWeights(skin.sk, fit.weights), positions: fit.positions };
+                upgrade = upgrade?.jaw ? { smooth: false, jaw: true } : null;
+                this.report.authored.push({
+                    key,
+                    name: pc.name,
+                    label: authored.label,
+                    triangles: fit.polygons.length,
+                    vertices: nv,
+                    dropped: fit.dropped,
+                });
+            } catch (e) {
+                this.report.warnings.push(
+                    `model ${key}: authored mesh skipped (${e instanceof Error ? e.message : String(e)})`,
+                );
+            }
+        }
         if (skin && upgrade) {
-            // Alpha cards (hair fringes) stay flat: their list entries are the PC textures whose converted copy has alpha.
-            const keep = new Set<number>();
-            pc.textures.forEach((t, ti) => {
-                const r = map.get(`${t.db}/${t.id}`);
-                if (r && this.texAlpha.get(r.id)) keep.add(ti);
-            });
             try {
                 const u = upgradeSkin(
                     { positions: skin.positions, polygons: pc.polygons, skeleton: skin.sk },
@@ -665,10 +715,11 @@ export class OotfAssetBuilder {
             try {
                 dl = withDisplayList(model, { vertexJoints: (v) => vertexJoints[v] ?? [] });
             } catch (e) {
-                if (upgrade && !this.noUpgrade.has(key)) {
-                    // The refined mesh does not fit the display list: convert the PC mesh as it is.
+                if ((upgrade || authored) && !this.noUpgrade.has(key)) {
+                    // The refined or authored mesh does not fit the display list: convert the PC mesh as it is.
                     this.noUpgrade.add(key);
                     this.report.upgraded = this.report.upgraded.filter((u) => u.key !== key);
+                    this.report.authored = this.report.authored.filter((u) => u.key !== key);
                     this.report.warnings.push(`model ${key}: upgrade dropped (display list: ${String(e)})`);
                     return this.addModel(container, id, requireDisplayList);
                 }

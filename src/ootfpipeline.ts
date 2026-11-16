@@ -63,6 +63,7 @@ import {
     type PcSoundBank,
 } from './ootfsound.ts';
 import { jawClip, skinUpgradeFor, speechOpenings } from './ootfskinupgrade.ts';
+import { type AuthoredModel, authoredIndex } from './ootfauthored.ts';
 import {
     DEFAULT_TEMPLATE_VOICE_CLEARS,
     templateVoiceClears,
@@ -525,6 +526,11 @@ export interface OotfPipelineOptions {
      */
     modelUpgrade?: boolean;
     /**
+     * Authored replacement meshes (ootfauthored.ts, files made by the Blender scripts): a character whose PC model name has
+     * one is drawn with it, with UVs, textures and weights taken from the PC model. Off with `modelUpgrade: false`.
+     */
+    authoredModels?: readonly AuthoredModel[];
+    /**
      * Name-mapped creatures (PC class with a same-named PS2 class): retarget the PC clips onto the PS2 rig when it shares at least half
      * of the PC joints (overrides the PS2 clips of the same name), else convert the PC model instead (default true).
      */
@@ -891,6 +897,7 @@ export async function convertOotfLevels(
             1,
         skinned: opt.skinned,
         skinUpgrade: modelUpgradeFilter(opt),
+        authored: authoredFilter(opt),
         texture: ootfTextureEnv(),
         displayList:
             (opt.displayListAll ??
@@ -5445,6 +5452,16 @@ async function nativePose(
  * PC model names whose rows also get their jaw (e.g. `^(farmer|warrior2)$`; every row is upgraded either way). Returns the
  * builder's `skinUpgrade` (undefined = the default table).
  */
+/** The builder's `authored` lookup: the pipeline's authored models unless the model upgrade is off. */
+function authoredFilter(opt: {
+    modelUpgrade?: boolean;
+    authoredModels?: readonly AuthoredModel[];
+}): ((name: string) => AuthoredModel | null) | undefined {
+    if (opt.modelUpgrade === false || !opt.authoredModels?.length) return undefined;
+    const byName = authoredIndex(opt.authoredModels);
+    return (name) => byName.get(name.trim().toLowerCase()) ?? null;
+}
+
 function modelUpgradeFilter(opt: {
     modelUpgrade?: boolean;
 }): ((name: string) => ReturnType<typeof skinUpgradeFor>) | undefined {

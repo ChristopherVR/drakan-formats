@@ -29,6 +29,7 @@ export * from './ootftex.ts';
 export * from './ootfps2tex.ts';
 export * from './ootfps2model.ts';
 export * from './ootfassets.ts';
+export * from './ootfauthored.ts';
 export * from './ootfseq.ts';
 export * from './ootfsound.ts';
 export * from './ootfsubtitles.ts';
