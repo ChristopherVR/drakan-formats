@@ -1,6 +1,7 @@
 import { view } from './bytes.ts';
 import { SrscReader } from './srsc.ts';
 import { TXD_ENTRY_TYPE, parseTxdHeader } from './txd.ts';
+import { WORLD_TERRAIN_FAMILIES, WORLD_TEXTURE_SUBSTITUTIONS } from './ootfps2world.ts';
 
 /**
  * Drakan 2 textures in place of Order of the Flame ones. Some OotF objects have a Drakan: The Ancients' Gates counterpart on
@@ -158,6 +159,7 @@ export const DEFAULT_PS2_TEXTURE_SUBSTITUTIONS: readonly Ps2TextureSubstitution[
         label: 'Brown rock (cliffs, boulders and rock walls)',
         why: 'Drakan 2 weathered tan rock at twice the resolution, the object counterpart of the Drakan 2 ground rock the Mountain World slopes now draw (DEFAULT_PS2_TERRAIN_FAMILIES).',
     })),
+    ...WORLD_TEXTURE_SUBSTITUTIONS,
 ];
 
 export interface Ps2TextureSwapOptions {
@@ -423,6 +425,7 @@ export const DEFAULT_PS2_TERRAIN_FAMILIES: readonly Ps2TerrainFamily[] = [
         ps2: 535,
         why: 'Drakan 2 "Rock - Gray (Outdoor)", the grey mountain rock of every snow level, for the grey stony tracks through OotF snow.',
     },
+    ...WORLD_TERRAIN_FAMILIES,
 ];
 
 /** The ground families as `container#id` -> `PS2_TERRAIN_TXD#id` rows (for edits, listings and `--ps2-texture-map`). */
