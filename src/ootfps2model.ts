@@ -24,6 +24,7 @@
  */
 
 import type { BridgeOptions } from './ootfbridgemodel.ts';
+import { WORLD_PROP_SUBSTITUTIONS } from './ootfps2worldprops.ts';
 import type { ComposeOptions } from './ootfpropcompose.ts';
 
 export type Ps2ModelCategory = 'enemies' | 'weapons' | 'props' | 'flames' | 'effects';
@@ -510,6 +511,7 @@ export const DEFAULT_PS2_MODEL_SUBSTITUTIONS: readonly Ps2ModelSubstitution[] = 
     flame('banner flame', 'Banner torch flame'),
     effect('Barrel (explode)', 'MOUNTAON', 'TNT Barrel', [BARREL_FIELD], 'Exploding barrel', BARREL_WHY),
     effect('Barrel (Exploding)', 'MOUNTAON', 'TNT Barrel', [BARREL_FIELD], 'Exploding barrel', BARREL_WHY),
+    ...WORLD_PROP_SUBSTITUTIONS,
 ];
 
 export type EnemyAnimations = 'drakan2' | 'ootf';
