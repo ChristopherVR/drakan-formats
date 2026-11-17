@@ -15,7 +15,10 @@
  *   corners), capped at 4 joints, unless the file carries its own weights by joint name.
  */
 
-import type { Skeleton } from './ootfanim.ts';
+import { sampleClip } from './anim.ts';
+import { type PcAnim, type Skeleton, jointParents } from './ootfanim.ts';
+import { bindBasis, convertPcAnimToPs2 } from './ootfcreature.ts';
+import { buildRig, localToWorld, skinMatrices } from './skeleton.ts';
 import type { RgbaImage } from './ootftex.ts';
 import { type SkinPoly, type VertexWeights, mixWeights, subdivideSkin } from './ootfskinupgrade.ts';
 
@@ -192,6 +195,144 @@ function dominant(lists: readonly (VertexWeights | undefined)[]): number {
     return best;
 }
 
+export interface AuthoredFitOptions {
+    /**
+     * Sample poses of the model's own clips: per pose the skin matrices of every joint (inverse bind times posed world,
+     * 12 floats per joint, as `skinMatrices` gives them). With them the transferred weights are fitted so each authored
+     * vertex follows the PC surface it was taken from through those poses (`poseFittedWeights`).
+     */
+    poses?: readonly Float32Array[];
+}
+
+/**
+ * Sample poses for `AuthoredFitOptions.poses`: the PC clips converted as the game plays them (`convertPcAnimToPs2`) and
+ * sampled `perClip` times each (at most `max` poses, spread over the clips), as skin matrices of `sk`'s joints.
+ */
+export function authoredPoses(sk: Skeleton, clips: readonly PcAnim[], perClip = 4, max = 240): Float32Array[] {
+    const rig = buildRig(sk, 0);
+    const basis = bindBasis(rig);
+    const per = Math.max(1, Math.min(perClip, Math.floor(max / Math.max(1, clips.length))));
+    const out: Float32Array[] = [];
+    for (const pc of clips) {
+        let a;
+        try {
+            a = convertPcAnimToPs2(pc, basis);
+        } catch {
+            continue;
+        }
+        for (let i = 0; i < per && out.length < max; i++) {
+            const world = localToWorld(rig, sampleClip(rig, a, (a.duration * (i + 0.5)) / per));
+            out.push(skinMatrices(rig, world));
+        }
+    }
+    return out;
+}
+
+/** Row-vector skin transform of point p by the 12-float matrix at `m[o..]` (as `skinVertices`). */
+function skinPoint(m: Float32Array, o: number, p: V3): V3 {
+    return [
+        p[0] * m[o]! + p[1] * m[o + 3]! + p[2] * m[o + 6]! + m[o + 9]!,
+        p[0] * m[o + 1]! + p[1] * m[o + 4]! + p[2] * m[o + 7]! + m[o + 10]!,
+        p[0] * m[o + 2]! + p[1] * m[o + 5]! + p[2] * m[o + 8]! + m[o + 11]!,
+    ];
+}
+
+/**
+ * Weights of an authored vertex `p` fitted to sample poses. The barycentric mix of the PC triangle's corner weights
+ * (`base`) blends the joints linearly across the triangle, but the PC surface there is a straight face between rigidly
+ * moved corners: on the long faces that span a joint (the 1999 upper arm runs from a ring on the collar to a ring on the
+ * upper arm at the elbow) a mixed vertex is pulled inside when the limb turns, and shoulders, elbows and the robe fold in.
+ * Here the weights (the corner joints and their parents, at most 4 kept) minimise, over the poses, the distance between
+ * the skinned vertex and the point of the posed PC face it was taken from (carrying its offset off the face), with a
+ * small pull towards `base`; non-negative, summing to 1 (projected gradient on the simplex).
+ */
+export function poseFittedWeights(
+    p: V3,
+    corners: readonly [number, number, number],
+    bary: V3,
+    pc: { positions: ArrayLike<number>; weights: readonly VertexWeights[] },
+    poses: readonly Float32Array[],
+    parents: readonly number[],
+    base: VertexWeights,
+    max = 4,
+): VertexWeights {
+    const cand: number[] = [];
+    const addJ = (j: number) => {
+        if (j >= 0 && !cand.includes(j)) cand.push(j);
+    };
+    for (const v of corners) for (const x of pc.weights[v] ?? []) addJ(x.j);
+    for (const j of [...cand]) addJ(parents[j] ?? -1);
+    for (const x of base) addJ(x.j);
+    const k = cand.length;
+    if (k < 2 || !poses.length) return base;
+    const cs = corners.map((v) => at(pc.positions, v));
+    const q: V3 = [0, 1, 2].map((c) => cs[0]![c]! * bary[0] + cs[1]![c]! * bary[1] + cs[2]![c]! * bary[2]) as V3;
+    const off = sub(p, q);
+    // normal equations H w = g of sum over poses |A w - t|^2 (A: one column per candidate joint)
+    const H = new Float64Array(k * k);
+    const g = new Float64Array(k);
+    for (const S of poses) {
+        const cols = cand.map((j) => skinPoint(S, j * 12, p));
+        const t: V3 = [0, 0, 0];
+        corners.forEach((v, ci) => {
+            const cp: V3 = [cs[ci]![0] + off[0], cs[ci]![1] + off[1], cs[ci]![2] + off[2]];
+            for (const x of pc.weights[v] ?? []) {
+                const s = skinPoint(S, x.j * 12, cp);
+                for (let c = 0; c < 3; c++) t[c] = t[c]! + bary[ci]! * x.w * s[c]!;
+            }
+        });
+        for (let a = 0; a < k; a++) {
+            g[a] = g[a]! + dot(cols[a]!, t);
+            for (let b = 0; b < k; b++) H[a * k + b] = H[a * k + b]! + dot(cols[a]!, cols[b]!);
+        }
+    }
+    let tr = 0;
+    for (let a = 0; a < k; a++) tr += H[a * k + a]!;
+    // the pull towards the barycentric weights: 2 % of the mean diagonal (keeps the fit unique where poses do not decide)
+    const lam = (tr / k) * 0.02;
+    const w0 = cand.map((j) => base.find((x) => x.j === j)?.w ?? 0);
+    for (let a = 0; a < k; a++) {
+        H[a * k + a] = H[a * k + a]! + lam;
+        g[a] = g[a]! + lam * w0[a]!;
+    }
+    let w = w0.slice();
+    const step = 1 / (tr + lam * k || 1);
+    const proj = (y: number[]): number[] => {
+        // Euclidean projection onto the simplex (Duchi et al. 2008)
+        const u = [...y].sort((m, n) => n - m);
+        let css = 0;
+        let theta = 0;
+        for (let i = 0; i < u.length; i++) {
+            css += u[i]!;
+            const th = (css - 1) / (i + 1);
+            if (u[i]! - th > 0) theta = th;
+        }
+        return y.map((x) => Math.max(0, x - theta));
+    };
+    // accelerated (FISTA) projected gradient
+    let y = w.slice();
+    let tk = 1;
+    for (let it = 0; it < 1500; it++) {
+        const grad = y.map((_, a) => {
+            let s = -g[a]!;
+            for (let b = 0; b < k; b++) s += H[a * k + b]! * y[b]!;
+            return s;
+        });
+        const next = proj(y.map((x, a) => x - step * grad[a]!));
+        const tn = (1 + Math.sqrt(1 + 4 * tk * tk)) / 2;
+        y = next.map((x, a) => x + ((tk - 1) / tn) * (x - w[a]!));
+        w = next;
+        tk = tn;
+    }
+    const list = cand
+        .map((j, a) => ({ j, w: w[a]! }))
+        .filter((x) => x.w > 1e-4)
+        .sort((m, n) => n.w - m.w || m.j - n.j)
+        .slice(0, max);
+    const total = list.reduce((s, x) => s + x.w, 0);
+    return total > 0 ? list.map((x) => ({ j: x.j, w: x.w / total })) : base;
+}
+
 /** Closest point of triangle abc to p, as barycentric weights (Ericson, Real-Time Collision Detection 5.1.5). */
 export function closestBary(p: V3, a: V3, b: V3, c: V3): V3 {
     const ab = sub(b, a);
@@ -354,6 +495,7 @@ export function fitAuthored(
     skeleton: Skeleton,
     alphaTextures: ReadonlySet<number> = new Set(),
     pcTextureCount = 0,
+    opts: AuthoredFitOptions = {},
 ): AuthoredFit {
     const images: string[] = [];
     const byName = new Map<string, number>();
@@ -408,6 +550,7 @@ export function fitAuthored(
 
     // weights
     const nv = positions.length / 3;
+    const parents = jointParents(skeleton);
     let weights: VertexWeights[];
     if (m.weights) {
         weights = m.weights.map((list) => {
@@ -432,7 +575,13 @@ export function fitAuthored(
                 for (const x of pc.weights[v] ?? []) acc.set(x.j, (acc.get(x.j) ?? 0) + x.w * hit.bary[k]!);
             });
             const list = [...acc].map(([j, w]) => ({ j, w }));
-            weights.push(mixWeights(list, list));
+            const mixed = mixWeights(list, list);
+            const poses = opts.poses ?? [];
+            weights.push(
+                poses.length
+                    ? poseFittedWeights(at(positions, i), [a, b, c], hit.bary, pc, poses, parents, mixed)
+                    : mixed,
+            );
         }
     }
 
@@ -541,6 +690,50 @@ export function fitAuthored(
         { positions: Float32Array.from(pc.positions), polygons: kept, weights: pc.weights.slice() },
         { keepTextures: alphaTextures },
     );
+    // Close the seam: the authored corners that belong to a kept joint (the triangles along the neck keep them) move onto
+    // the kept surface and take its weights there. Left where the authored part had them, they stood out of the 1999 neck
+    // as a ledge under the chin (Julian), and with the authored weights they pulled the collar up to the mouth in a pose.
+    const keptTris = smooth.polygons
+        .filter((p) => !alphaTextures.has(p.texture))
+        .flatMap((p) => {
+            const out: [number, number, number][] = [];
+            for (let k = 1; k + 1 < p.indices.length; k++) out.push([p.indices[0]!, p.indices[k]!, p.indices[k + 1]!]);
+            return out;
+        });
+    if (keptTris.length) {
+        const seam = new Set<number>();
+        for (const p of polygons) for (const v of p.indices) if (keepJoints.has(dominant([weights[v]]))) seam.add(v);
+        for (const v of seam) {
+            const p = at(positions, v);
+            let best = Infinity;
+            let bt = -1;
+            let bb: V3 = [1, 0, 0];
+            keptTris.forEach((t, ti) => {
+                const [a, b, c] = t.map((i) => at(smooth.positions, i)) as [V3, V3, V3];
+                const w = closestBary(p, a, b, c);
+                const d = sub(p, [
+                    a[0] * w[0] + b[0] * w[1] + c[0] * w[2],
+                    a[1] * w[0] + b[1] * w[1] + c[1] * w[2],
+                    a[2] * w[0] + b[2] * w[1] + c[2] * w[2],
+                ]);
+                const dd = dot(d, d);
+                if (dd < best) {
+                    best = dd;
+                    bt = ti;
+                    bb = w;
+                }
+            });
+            if (bt < 0) continue;
+            const t = keptTris[bt]!;
+            const acc = new Map<number, number>();
+            for (let c = 0; c < 3; c++) {
+                positions[v * 3 + c] = t.reduce((s, i, k) => s + smooth.positions[i * 3 + c]! * bb[k]!, 0);
+                for (const x of smooth.weights[t[c]!] ?? []) acc.set(x.j, (acc.get(x.j) ?? 0) + x.w * bb[c]!);
+            }
+            const list = [...acc].map(([j, w]) => ({ j, w }));
+            weights[v] = mixWeights(list, list);
+        }
+    }
     const remap = new Map<number, number>();
     const outPos = Array.from(positions);
     const outW = weights.slice();

@@ -10,6 +10,7 @@ import {
     jointOrigin,
     piecewise,
     placeAuthored,
+    poseFittedWeights,
 } from '../src/ootfauthored.ts';
 import type { SkinPoly, VertexWeights } from '../src/ootfskinupgrade.ts';
 import { decodePng } from '../src/png.ts';
@@ -137,6 +138,107 @@ describe('fitting an authored mesh on a PC model', () => {
         const fit = fitAuthored({ ...authoredTetra(), keepPcJoints: ['head'] }, pcTetra(), skeleton);
         expect(fit.polygons.length).toBeGreaterThan(0);
         for (const p of fit.polygons) for (const v of p.indices) expect(v).toBeLessThan(fit.positions.length / 3);
+    });
+});
+
+describe('weights that follow the PC surface', () => {
+    /** Row-vector skin matrix: rotation by `deg` about +Z around `c`. */
+    const rotZ = (deg: number, c: [number, number, number]) => {
+        const r = (deg * Math.PI) / 180;
+        const [co, si] = [Math.cos(r), Math.sin(r)];
+        // p' = (p - c) R + c with R rows [co si 0; -si co 0; 0 0 1]
+        return [co, si, 0, -si, co, 0, 0, 0, 1, c[0] - (c[0] * co - c[1] * si), c[1] - (c[0] * si + c[1] * co), 0];
+    };
+    const skinned = (m: number[], p: number[]) => [
+        p[0]! * m[0]! + p[1]! * m[3]! + p[2]! * m[6]! + m[9]!,
+        p[0]! * m[1]! + p[1]! * m[4]! + p[2]! * m[7]! + m[10]!,
+        p[0]! * m[2]! + p[1]! * m[5]! + p[2]! * m[8]! + m[11]!,
+    ];
+
+    it('fits a vertex on a long PC face across a joint to the posed face, not the blended joints', () => {
+        // A 1999 forearm: a long face from a ring on the forearm joint 0 (elbow at x 0) to a ring on the hand joint 1 (wrist
+        // at x 2). The forearm turns about the elbow and the hand about the wrist: the face follows the forearm, but a vertex
+        // half way with half the hand's weight swings with the hand.
+        const pc = {
+            positions: [0, 0, 0, 2, 0, 0, 2, 0.2, 0],
+            weights: [[{ j: 0, w: 1 }], [{ j: 1, w: 1 }], [{ j: 1, w: 1 }]] as VertexWeights[],
+        };
+        // row vectors: p' = p a then b
+        const mul = (a: number[], b: number[]) => [
+            ...[0, 1, 2].flatMap((r) =>
+                [0, 1, 2].map((c) => a[r * 3]! * b[c]! + a[r * 3 + 1]! * b[3 + c]! + a[r * 3 + 2]! * b[6 + c]!),
+            ),
+            ...[0, 1, 2].map((c) => a[9]! * b[c]! + a[10]! * b[3 + c]! + a[11]! * b[6 + c]! + b[9 + c]!),
+        ];
+        const poses: Float32Array[] = [];
+        for (const f of [0, 40])
+            for (const h of [0, 60, 90]) {
+                const forearm = rotZ(f, [0, 0, 0]);
+                poses.push(Float32Array.from([...forearm, ...mul(rotZ(h, [2, 0, 0]), forearm)]));
+            }
+        const p: [number, number, number] = [1, 0.05, 0];
+        const bary: [number, number, number] = [0.5, 0.25, 0.25];
+        const base: VertexWeights = [
+            { j: 0, w: 0.5 },
+            { j: 1, w: 0.5 },
+        ];
+        const fitted = poseFittedWeights(p, [0, 1, 2], bary, pc, poses, [-1, 0], base);
+        expect(fitted.reduce((s, x) => s + x.w, 0)).toBeCloseTo(1);
+        const err = (w: VertexWeights) => {
+            let e = 0;
+            for (const S of poses) {
+                const m = Array.from(S);
+                const target = [0, 1, 2].map((c) =>
+                    [0, 1, 2].reduce((s, k) => {
+                        const x = pc.positions.slice(k * 3, k * 3 + 3);
+                        const j = pc.weights[k]![0]!.j;
+                        return s + bary[k]! * skinned(m.slice(j * 12, j * 12 + 12), x)[c]!;
+                    }, 0),
+                );
+                const got = [0, 1, 2].map((c) =>
+                    w.reduce((s, x) => s + x.w * skinned(m.slice(x.j * 12, x.j * 12 + 12), p)[c]!, 0),
+                );
+                e += Math.hypot(got[0]! - target[0]!, got[1]! - target[1]!, got[2]! - target[2]!);
+            }
+            return e;
+        };
+        expect(err(fitted)).toBeLessThan(err(base) * 0.5);
+        expect(fitted[0]!.j).toBe(0);
+    });
+
+    it('moves the corners of a kept joint onto the kept PC part (no ledge along the seam)', () => {
+        // PC: a body face (joint 0, y 0..1) and a head face (joint 1, y 1..2), both in z = 0.
+        const pc = {
+            positions: [-1, 0, 0, 1, 0, 0, 0, 1, 0, -1, 1, 0, 1, 1, 0, 0, 2, 0],
+            polygons: [
+                { flags: 0, texture: 0, indices: [0, 2, 1], uvs: [0, 0, 1, 0, 0, 1] },
+                { flags: 0, texture: 0, indices: [3, 5, 4], uvs: [0, 0, 1, 0, 0, 1] },
+            ] as SkinPoly[],
+            weights: [0, 0, 0, 1, 1, 1].map((j) => [{ j, w: 1 }]) as VertexWeights[],
+        };
+        // Authored (Blender space, z up): a face from the body up to a corner that stands 0.3 out of the head face.
+        const authored: AuthoredModel = {
+            format: AUTHORED_FORMAT,
+            model: 'seam',
+            label: 'Seam',
+            fit: 'joints',
+            landmarks: { root: [0, 0, 0], head: [0, 0, 2], top: [0, 0, 2] },
+            positions: [-0.5, 0, 0.5, 0.5, 0, 0.5, 0, -0.3, 1.6],
+            triangles: [0, 1, 2, 0],
+            slots: [{ name: 'skin', texture: 'pc' }],
+            keepPcJoints: ['head'],
+        };
+        const sk = {
+            joints: [joint([0, 0, 0]), joint([0, 2, 0])],
+            nodes: [
+                { name: 'root', joint: 0 },
+                { name: 'head', joint: 1 },
+            ],
+        } as unknown as Skeleton;
+        const fit = fitAuthored(authored, pc, sk);
+        const top = fit.polygons[0]!.indices[2]!;
+        expect(Math.abs(fit.positions[top * 3 + 2]!)).toBeLessThan(1e-3);
+        expect(fit.weights[top]![0]!.j).toBe(1);
     });
 });
 

@@ -22,7 +22,11 @@ import {
     readPcTexture,
     skinnedLodPolygons,
     fitAuthored,
+    authoredPoses,
     authoredProblem,
+    parsePcAnim,
+    type PcAnim,
+    type Skeleton,
     type AuthoredModel,
     type RgbaImage,
 } from '../src/index.ts';
@@ -111,6 +115,24 @@ if (opt.list) {
 }
 
 const txd = await open('txd');
+const adb = await open('adb');
+
+/** The model's clips (as the converter fits authored weights to them). */
+async function clipsOf(sk: Skeleton): Promise<PcAnim[]> {
+    const out: PcAnim[] = [];
+    for (const aid of sk.animIds) {
+        const gi = adb?.find(0x0501, aid);
+        const gd = adb?.find(0x0502, aid);
+        const gl = adb?.find(0x0503, aid);
+        if (!adb || !gi || !gd || !gl) continue;
+        try {
+            out.push(parsePcAnim(await adb.readRaw(gi), await adb.readRaw(gd), await adb.readRaw(gl)));
+        } catch {
+            // a clip that does not decode is left out
+        }
+    }
+    return out;
+}
 mkdirSync(opt.out!, { recursive: true });
 for (const want of free) {
     let id = /^\d+$/.test(want) ? Number(want) : -1;
@@ -151,6 +173,7 @@ for (const want of free) {
                 sk,
                 alpha,
                 pc.textures.length,
+                { poses: authoredPoses(sk, await clipsOf(sk)) },
             );
             // the model's own textures (PNG files beside the JSON) follow the PC entries
             for (const [k, file] of fit.images.entries()) {

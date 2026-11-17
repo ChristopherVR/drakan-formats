@@ -65,7 +65,7 @@ import {
     withJawTrack,
     withVertexWeights,
 } from './ootfskinupgrade.ts';
-import { type AuthoredModel, fitAuthored } from './ootfauthored.ts';
+import { type AuthoredModel, authoredPoses, fitAuthored } from './ootfauthored.ts';
 
 /**
  * Packaging of converted Order of the Flame assets for a mod pack: one PS2 MOD + TXD + DB for a converted level (or for
@@ -671,6 +671,8 @@ export class OotfAssetBuilder {
         let upgrade = skin && !this.noUpgrade.has(key) ? (this.options.skinUpgrade ?? skinUpgradeFor)(pc.name) : null;
         if (skin && authored) {
             try {
+                // the model's own clips, sampled: the transferred weights are fitted to follow the PC surface through them
+                const clips = (await this.loadClips(container, skin.sk, key, true)).pcAnims;
                 const fit = fitAuthored(
                     authored,
                     {
@@ -681,6 +683,7 @@ export class OotfAssetBuilder {
                     skin.sk,
                     keep,
                     pc.textures.length,
+                    { poses: authoredPoses(skin.sk, [...clips.values()]) },
                 );
                 const nv = fit.positions.length / 3;
                 if (nv > DL_MAX_SKIN_VERTICES) throw new Error(`${nv} vertices`);
@@ -1067,6 +1070,7 @@ export class OotfAssetBuilder {
         container: string,
         sk: Skeleton,
         key: string,
+        quiet = false,
     ): Promise<{ pcAnims: Map<number, PcAnim>; skipped: number }> {
         const adb = await this.open(container, 'adb');
         const pcAnims = new Map<number, PcAnim>();
@@ -1083,9 +1087,10 @@ export class OotfAssetBuilder {
                 pcAnims.set(aid, parsePcAnim(await adb.readRaw(gi), await adb.readRaw(gd), await adb.readRaw(gl)));
             } catch (e) {
                 skipped++;
-                this.report.warnings.push(
-                    `creature ${key}: clip ${aid}: ${e instanceof Error ? e.message : String(e)}`,
-                );
+                if (!quiet)
+                    this.report.warnings.push(
+                        `creature ${key}: clip ${aid}: ${e instanceof Error ? e.message : String(e)}`,
+                    );
             }
         }
         return { pcAnims, skipped };
