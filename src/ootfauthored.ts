@@ -466,7 +466,9 @@ export function fitAuthored(
             (ps[0]![2] + ps[1]![2] + ps[2]![2]) / 3,
         ];
         const joint = dominant(ids.map((v) => weights[v]));
-        if (keepJoints.has(joint)) continue; // the PC part is kept instead
+        // the PC part is kept instead: drop a triangle only when every corner belongs to a kept joint, so the triangles
+        // along the seam stay and overlap the kept edge (dropped by their dominant joint they left a hole under the chin)
+        if (keepJoints.size && ids.every((v) => keepJoints.has(dominant([weights[v]])))) continue;
         if (slot.texture === 'image') {
             // the model's own texture: its own UVs (Blender v points up, the PC one down)
             let k = images.indexOf(slot.image!);
