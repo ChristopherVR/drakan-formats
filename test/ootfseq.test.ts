@@ -12,6 +12,9 @@ import {
     PC_DEFAULT_FOV,
     remapSequenceRefs,
     settlePlayerLying,
+    settleCreatureFeet,
+    FEET_FLOAT_MAX,
+    FEET_SINK_MAX,
     convertAction,
     MUSIC_STOP_LEVEL,
     addSceneDoorHolds,
@@ -847,6 +850,150 @@ describe('settlePlayerLying', () => {
         const sitting = [move(0, 260), clip(0, 2)];
         settlePlayerLying(sitting, { groundAt: () => 100, lowestJoint: () => -184 });
         expect(ys(sitting)).toEqual([260]);
+    });
+});
+
+describe('settleCreatureFeet', () => {
+    type Entry = { x: import('../src/ootfseq.ts').PcAction; i: number };
+    const move = (t: number, y: number, opt = 0, rel = 0): Entry => {
+        const payload = new Uint8Array(36);
+        const dv = new DataView(payload.buffer);
+        dv.setFloat32(12, 1, true);
+        dv.setFloat32(16, 1000, true);
+        dv.setFloat32(20, y, true);
+        dv.setFloat32(24, 2000, true);
+        dv.setUint32(28, rel, true);
+        dv.setUint32(32, opt, true);
+        return { x: { type: 0, time: t, payload }, i: 0 };
+    };
+    const clip = (t: number, ref: number, channel = 0): Entry => {
+        const payload = new Uint8Array(24);
+        const dv = new DataView(payload.buffer);
+        dv.setUint32(0, channel, true);
+        dv.setUint32(4, ref, true);
+        dv.setFloat32(16, 1, true);
+        return { x: { type: 1, time: t, payload }, i: 0 };
+    };
+    // the scene 1.1 Wartoks' clips on the disc rig: idle 568 under the origin, ready 536, alpharun 590
+    const IDLE = 1;
+    const READY = 2;
+    const RUN = 3;
+    const lows = new Map([
+        [IDLE, -568],
+        [READY, -536],
+        [RUN, -590],
+    ]);
+    const ground = { groundAt: () => 20000, lowestFoot: (ref: number) => lows.get(ref) };
+    const keys = (a: Entry[]): [number, number, number][] =>
+        a
+            .filter((e) => e.x.type === 0)
+            .map((e) => {
+                const dv = new DataView(e.x.payload.buffer, e.x.payload.byteOffset);
+                return [e.x.time, Math.round(dv.getFloat32(20, true) * 10) / 10, dv.getUint32(32, true)];
+            });
+
+    it('puts the lowest foot of each clip on the ground at 1.5, adding a key where a clip starts on a hold', () => {
+        // Ruined Village 1.1, Wartok 3031: key at 822 over the grass, idle, then ready while it holds, then it runs off on
+        // keys at 530 (written for a scale 1 body, 323 under the grass at 1.5) moving to the next one
+        const sorted = [
+            move(14.1, 20822),
+            clip(15.1, IDLE),
+            clip(50, READY),
+            clip(51.1, RUN),
+            move(51.4, 20530),
+            move(54, 20530, 0x10),
+        ];
+        expect(settleCreatureFeet(sorted, ground, 1.5)).toBe(5);
+        expect(keys(sorted)).toEqual([
+            [14.1, 20822, 0], // no clip yet: kept
+            [15.1, 20852, 0], // idle: 852 = 1.5 x 568 (was 30 under)
+            [50, 20804, 0], // ready: 804 = 1.5 x 536 (was floating 18)
+            [51.1, 20885, 0], // run starts while it still holds: 885 = 1.5 x 590
+            [51.4, 20885, 0],
+            [54, 20885, 0x10], // the move keeps its flag
+        ]);
+        // the added keys come before the clip that starts with them
+        expect(sorted.map((e) => [e.x.type, e.x.time])).toEqual([
+            [0, 14.1],
+            [0, 15.1],
+            [1, 15.1],
+            [0, 50],
+            [1, 50],
+            [0, 51.1],
+            [1, 51.1],
+            [0, 51.4],
+            [0, 54],
+        ]);
+    });
+
+    it('adds no key where a clip starts while the actor moves to the next key, but grounds the moving keys', () => {
+        const sorted = [move(0, 20530), clip(0, RUN), clip(1, IDLE), move(2, 20530, 0x10)];
+        expect(settleCreatureFeet(sorted, ground)).toBe(2);
+        expect(keys(sorted)).toEqual([
+            [0, 20590, 0],
+            [2, 20568, 0x10],
+        ]);
+    });
+
+    it('puts down a Wartok parked with its feet in the air (scene 1.2a, 849 over the grass while it runs)', () => {
+        const sorted = [clip(0, RUN), move(2.57, 20849), move(11.93, 20530)];
+        expect(settleCreatureFeet(sorted, ground)).toBe(2);
+        expect(keys(sorted).map((k) => k[1])).toEqual([20590, 20590]);
+    });
+
+    it('leaves a key where the ground is not known (under a tilted object)', () => {
+        const sorted = [move(0, 20849), clip(0, RUN)];
+        expect(settleCreatureFeet(sorted, { ...ground, groundAt: () => NaN })).toBe(0);
+        expect(keys(sorted)).toEqual([[0, 20849, 0]]);
+    });
+
+    it('leaves keys far over or under the ground, relative keys, other channels and close feet', () => {
+        const up = 20000 + 568 + FEET_FLOAT_MAX + 1; // feet more than FEET_FLOAT_MAX over the ground
+        const down = 20000 + 568 - FEET_SINK_MAX - 1;
+        const sorted = [move(0, up), clip(0, IDLE), move(3, down), move(5, 20300, 0, 7), move(6, 20569)];
+        expect(settleCreatureFeet(sorted, ground)).toBe(0);
+        expect(keys(sorted).map((k) => k[1])).toEqual([up, down, 20300, 20569]);
+        const upper = [move(0, 20500), clip(0, IDLE, 3)];
+        expect(settleCreatureFeet(upper, ground)).toBe(0);
+        expect(keys(upper)).toEqual([[0, 20500, 0]]);
+    });
+
+    it('is applied by convertPcSequences only to actors with feet (the scene Wartoks)', async () => {
+        const pose = (y: number) => [...f32(0), ...f32(0), ...f32(0), ...f32(1), ...f32(10), ...f32(y), ...f32(30)];
+        const ready = act(1, 1, [...u32(0), ...u32(5), ...u32(0), ...f32(0), ...f32(1), ...u32(0)]);
+        const seq = w(
+            str('Feet'),
+            u32(126),
+            u32(0),
+            u32(2),
+            u32(2),
+            actor('Wartok', 1, 3031, [act(0, 1, [...pose(822), ...u32(0), ...u32(0)]), ready]),
+            actor('Villager', 2, 1858, [act(0, 1, [...pose(822), ...u32(0), ...u32(0)])]),
+        );
+        const r = await convertPcSequences(stub(seq), {
+            maps: {
+                objectIdMap: new Map([
+                    [3031, 31],
+                    [1858, 58],
+                ]),
+                animMap: new Map([[5, 0x51bca]]),
+                scaleForActor: (a) => (a.objectId === 3031 ? [1.5, 1.5, 1.5] : null),
+                feetForActor: (a) =>
+                    a.objectId === 3031
+                        ? { groundAt: () => 0, lowestFoot: (ref) => (ref === 5 ? -536 : undefined) }
+                        : undefined,
+            },
+            usedIds: new Set(),
+        });
+        expect(r.report.creatureFeet).toBe(1);
+        const entry = r.entries.find((e) => e.type === 0x311)!;
+        const ys = parseSequence(entry.id, entry.sub, entry.data)!.actors.map(
+            (a) =>
+                parseActions(a)!
+                    .find((q) => q.type === 0)!
+                    .fields.find((f) => f.name === 'y')!.value,
+        );
+        expect(ys).toEqual([804, 822]);
     });
 });
 

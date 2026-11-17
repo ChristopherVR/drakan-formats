@@ -176,6 +176,13 @@ export interface SequenceMaps {
     scaleForActor?: (actor: PcSeqActor, targetObjectId: number) => readonly number[] | null | undefined;
     /** Set per actor by convertActor from `scaleForActor`. */
     scale?: readonly number[];
+    /**
+     * Scene creatures shown on another rig than the PC one (the scene Wartoks on the disc Wartok): the ground and the lowest
+     * foot of each clip, to stand the feet on the ground (`settleCreatureFeet`). Undefined leaves the keys as the PC set them.
+     */
+    feetForActor?: (actor: PcSeqActor, targetObjectId: number) => CreatureGround | undefined;
+    /** Set per actor by convertActor from `feetForActor`. */
+    feet?: CreatureGround;
     /** PC sound ref `(db << 16) | id` -> final PS2 ref word (`(db << 16) | id` in the target SSD's `.DB` frame). */
     soundMap?: RefLookup;
     /** PC music id (first u32 of the music action; 0 = stop) -> PS2 music ref word (`(db << 16) | id`). */
@@ -274,6 +281,13 @@ export interface PlayerGround {
     highestJoint?(ref: number, t: number): number | undefined;
 }
 
+export interface CreatureGround {
+    /** Ground under (x, z) for a body at height y. */
+    groundAt(x: number, z: number, y: number): number;
+    /** Lowest point of the feet over the origin (game units at scale 1, negative under it) over one pass of the PC clip `ref`. */
+    lowestFoot(ref: number): number | undefined;
+}
+
 export interface Ps2SsdEntry {
     type: number;
     id: number;
@@ -296,6 +310,8 @@ export interface SequenceReport {
     unverifiedMessages: Map<number, number>;
     /** Jaw clips started with speech (`SequenceMaps.jawForActor`). */
     jawClips?: number;
+    /** Creature transform keys moved or added to stand the feet on the ground (`settleCreatureFeet`). */
+    creatureFeet?: number;
     warnings: string[];
 }
 
@@ -706,6 +722,81 @@ function carriedDown(clips: readonly PcAction[], lying: PcAction, lastKey: numbe
     return low <= LYING_LOWEST && high - low < LYING_SPAN;
 }
 
+/** A key whose feet are this close to the ground (units) is left. */
+const FEET_TOLERANCE = 2;
+/**
+ * Feet at most this far over the ground (units at scale 1) are put down; higher is left (a fall, a jump). Scene 1.2a parks two
+ * Wartoks 849 over the grass (feet about 255 up) while they run in place in view.
+ */
+export const FEET_FLOAT_MAX = 320;
+/** Feet at most this far under the ground (units at scale 1) are lifted onto it; deeper is left as the PC set it. */
+export const FEET_SINK_MAX = 250;
+/** Option bit of a transform key: the actor moves to it from the previous key (without it, it holds and then jumps). */
+const KEY_MOVES = 0x10;
+
+/**
+ * Stand a scene creature's feet on the ground. The PC keys put a creature's origin at a fixed height over the ground (530
+ * for a Wartok at scale 1, 822 and 796 for Ruined Village's two at 1.5), while the clip under it decides where the feet are:
+ * the retargeted disc Wartok's lowest foot is about 544 under the origin in `ready` and `taunt`, 570 to 588 in `idle`,
+ * `talking` and `WPsignal`, 595 in `alpharun`. So a key sinks the feet in one clip and not in the next; the keys from 51.4 s
+ * of scene 1.1 (530, written for a scale 1 body) hold the 1.5 bodies 360 under the grass while they run off, and scene 1.2a
+ * parks two scale 1 Wartoks at 849, running in place with their feet 255 over the grass. Every key under a whole-body clip
+ * (channel 0) gets the height that puts that clip's lowest foot (`lowestFoot`, times the actor's scale) on the ground
+ * (`groundAt`: the terrain or a mesh under the actor), and where a clip starts while the actor holds still a key with that
+ * height is added. Keys whose feet are more than `FEET_FLOAT_MAX` over or `FEET_SINK_MAX` under the ground, keys where the
+ * ground is not known (NaN) and keys placed relative to another actor are left. Returns the number of keys moved or added.
+ */
+export function settleCreatureFeet(sorted: { x: PcAction; i: number }[], g: CreatureGround, scale = 1): number {
+    const s = Number.isFinite(scale) && scale > 0 ? scale : 1;
+    const clips = sorted.filter((e) => e.x.type === 1 && view(e.x.payload).getUint32(0, true) === 0).map((e) => e.x);
+    const clipAt = (t: number): PcAction | undefined => clips.filter((c) => c.time <= t).pop();
+    const footOf = (c: PcAction | undefined): number | undefined => {
+        const low = c && g.lowestFoot(view(c.payload).getUint32(4, true));
+        return low !== undefined && Number.isFinite(low) ? low : undefined;
+    };
+    const stand = (payload: Uint8Array, low: number): Uint8Array | null => {
+        const dv = view(payload);
+        if (dv.getUint32(28, true) !== 0) return null;
+        const y = dv.getFloat32(20, true);
+        const ground = g.groundAt(dv.getFloat32(16, true), dv.getFloat32(24, true), y);
+        const want = ground - low * s;
+        const d = want - y;
+        if (!Number.isFinite(want) || Math.abs(d) <= FEET_TOLERANCE) return null;
+        if (d < -FEET_FLOAT_MAX * s || d > FEET_SINK_MAX * s) return null;
+        const out = payload.slice();
+        view(out).setFloat32(20, want, true);
+        return out;
+    };
+    const moves = sorted.filter((e) => e.x.type === 0);
+    const original = new Map(moves.map((m) => [m, m.x.payload]));
+    let n = 0;
+    const added: { x: PcAction; i: number }[] = [];
+    for (const c of clips) {
+        const before = moves.filter((m) => m.x.time <= c.time).pop();
+        const next = moves.find((m) => m.x.time > c.time);
+        // only where the actor holds still at the clip's start (moving keys are handled below, each under its own clip)
+        if (!before || before.x.time === c.time || (next && view(next.x.payload).getUint32(32, true) & KEY_MOVES))
+            continue;
+        if (added.some((a) => a.x.time === c.time)) continue;
+        const low = footOf(c);
+        const payload = low === undefined ? null : stand(original.get(before)!, low);
+        if (!payload) continue;
+        view(payload).setUint32(32, view(payload).getUint32(32, true) & ~KEY_MOVES, true);
+        added.push({ x: { type: 0, time: c.time, payload }, i: -1 });
+    }
+    for (const m of moves) {
+        const low = footOf(clipAt(m.x.time));
+        const payload = low === undefined ? null : stand(m.x.payload, low);
+        if (payload) {
+            m.x = { ...m.x, payload };
+            n++;
+        }
+    }
+    sorted.push(...added);
+    sorted.sort((p, q) => p.x.time - q.x.time || p.i - q.i);
+    return n + added.length;
+}
+
 /**
  * The scene keys place the player's origin where the PC clip expects it: 500 over the ground when she stands. A lying
  * pose has its joints within about 100 of the origin, so the same height holds her body 450 and more in the air: Ruined
@@ -784,6 +875,11 @@ function convertActor(a: PcSeqActor, opts: SequenceConvertOptions, report: Seque
         chunks.push(c);
     }
     if (target.special === 'rynn') settlePlayerLying(sorted, opts.playerGround);
+    maps.feet = opts.maps.feetForActor?.(a, target.ref);
+    if (maps.feet) {
+        const n = settleCreatureFeet(sorted, maps.feet, maps.scale?.[1] ?? 1);
+        if (n) report.creatureFeet = (report.creatureFeet ?? 0) + n;
+    }
     // The release is the last run/stop action that gives the actor back to the game (payload non-zero).
     let release = -1;
     if (maps.endIdle !== undefined) sorted.forEach(({ x }, i) => (isRelease(x) ? (release = i) : undefined));

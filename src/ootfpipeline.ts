@@ -90,7 +90,7 @@ import {
 import { SUBTITLE_FORMAT, SUBTITLE_VERSION, type SubtitleLine, type SubtitleTable } from './ootfsubtitles.ts';
 import { applyCulling, planLevelCulling, sceneFileKey, type LevelCulling } from './ootfcull.ts';
 import { carryCreatures, type CarrierRig } from './ootfcarry.ts';
-import type { EndMessage, PcSeqActor, PcSequence, PlayerGround } from './ootfseq.ts';
+import type { CreatureGround, EndMessage, PcSeqActor, PcSequence, PlayerGround } from './ootfseq.ts';
 import { actorKeyPositions, addEndMessages, addSceneDoorHolds } from './ootfseq.ts';
 import { parseSequence, writeSequence, type SsdActor } from './story/ssd.ts';
 import { planShellTrims } from './ootfshell.ts';
@@ -287,6 +287,7 @@ import {
     chooseRetargetTarget,
     creatureChannelTable,
     leafFramePairs,
+    lowestFoot,
     matchJoints,
     retargetCreature,
     rigSize,
@@ -1631,6 +1632,17 @@ export async function convertOotfLevels(
                     });
                     const clips = new Map<number, number>();
                     for (const a of r.anims) clips.set(a.id, sceneClips.put(mStem, floor, a.anim));
+                    // Lowest foot of each clip on the disc model, to stand the scene keys on the ground (settleCreatureFeet).
+                    const feet = new Map<number, number>();
+                    const mesh = await readPs2Neutral(modOf(mStem)!, hit.cls.model!.id).catch(() => null);
+                    const lod = sk.lods[0];
+                    if (mesh && lod) {
+                        const skin = buildRig(sk, mesh.positions.length / 3);
+                        for (const a of r.anims) {
+                            const low = lowestFoot(skin, mesh.positions, lod.firstVertex, lod.vertexCount, a.anim);
+                            if (low !== undefined) feet.set(a.id, low);
+                        }
+                    }
                     const table = creatureChannelTable(src.skeleton, sk);
                     const channels = new Map<number, number>();
                     for (const row of table) if (row.ps2Channel >= 0) channels.set(row.pcChannel, row.ps2Channel);
@@ -1640,6 +1652,7 @@ export async function convertOotfLevels(
                         modelId: hit.cls.model!.id,
                         joints: names.length,
                         clips,
+                        feet,
                         channels,
                         bounds,
                     });
@@ -3278,6 +3291,22 @@ export async function convertOotfLevels(
                     // The scene Wartok class a scene actor plays on (undefined for every other actor). This level's class
                     // objects are not the plan's, so the lookup also matches by signature (`sceneTockLookup`).
                     const tockFor = sceneTockLookup(sceneTocks, sig);
+                    const sceneFeetOn = !/^(off|0)$/i.test(dbgEnv0['DRAKAN_SCENE_FEET'] ?? '');
+                    // What a scene creature may stand on besides the terrain (bridges, carts, rocks), for its feet
+                    // (settleCreatureFeet); only read for a level that places a scene creature.
+                    const supports =
+                        sceneFeetOn &&
+                        pc.list.objects.some((o) => {
+                            const k = pc.classes.get(o.dbIndex)?.get(o.classId);
+                            return !!k && !!tockFor(k);
+                        })
+                            ? await sceneSupports(pc, (k) => {
+                                  const ow = ownerOf.get(k);
+                                  return ow && k.model
+                                      ? builder.readPcModel(ow, k.model.db, k.model.id)
+                                      : Promise.resolve(null);
+                              })
+                            : null;
                     const tockOf = (actor: PcSeqActor, targetId: number): SceneTock | undefined => {
                         if (!sceneTocks.size) return undefined;
                         const sourceId =
@@ -3360,6 +3389,23 @@ export async function convertOotfLevels(
                                         : first.objectIdMap.get(o.id) === targetId,
                                 );
                                 return object?.scale;
+                            },
+                            // A scene Wartok stands its clip's lowest foot on the ground (settleCreatureFeet).
+                            // (DRAKAN_SCENE_FEET=off keeps the PC heights)
+                            feetForActor: (actor, targetId): CreatureGround | undefined => {
+                                const tock = sceneFeetOn ? tockOf(actor, targetId) : undefined;
+                                return tock?.feet.size
+                                    ? {
+                                          groundAt: (x, z, y) => {
+                                              const ground = terrainGroundBelow(pc.terrain, x, z, y);
+                                              const top = supports ? supportUnder(supports, x, z, y) : NaN;
+                                              if (top === Infinity) return NaN;
+                                              return Number.isFinite(top) && !(top <= ground) ? top : ground;
+                                          },
+                                          lowestFoot: (ref) =>
+                                              ref >>> 16 === 0 ? tock.feet.get(ref & 0xffff) : undefined,
+                                      }
+                                    : undefined;
                             },
                             animMapForActor: (actor, targetId) => {
                                 // The PS2 player is the PS2 Rynn whatever the PC class's model: its clips live in its own ADB.
@@ -3467,6 +3513,10 @@ export async function convertOotfLevels(
                     Object.assign(ssdFiles, ssdPackFiles(`${g.stem}.SSD`, conv.entries));
                     for (const warning of conv.report.warnings)
                         res.warnings.push(`sequences ${pc.path} (${c}): ${warning}`);
+                    if (conv.report.creatureFeet)
+                        console.warn(
+                            `sequences ${pc.path} (${c}): ${conv.report.creatureFeet} scene creature key(s) moved or added to stand the feet on the ground`,
+                        );
                     for (const [k, v] of conv.idMap) seqIds.set(`${pc.path}|${g.ow}|${k}`, v);
                     any = any || conv.idMap.size > 0;
                     converted += conv.idMap.size;
@@ -5424,6 +5474,71 @@ async function dragonSceneChannels(
 /** Attach point of the PS2 Arokh's saddle: every disc scene that seats Rynn on him attaches her there (1.02, 3.01, 4.1, ...). */
 export const PS2_AROKH_SADDLE = 14;
 
+/** Placed scenery and mechanism meshes of a PC level (`placeMesh`), and the boxes of the tilted ones. */
+interface SceneSupports {
+    meshes: PlacedMesh[];
+    tilted: { id: number; min: number[]; max: number[] }[];
+}
+
+/** Degrees off upright up to which a support is placed upright (`sceneSupports`). */
+const SUPPORT_TILT = 10;
+
+/** Not something to stand on: trees and plants (their branches hang over the ground), hanging and wall pieces. */
+function isSupportClass(c: OdbClass): boolean {
+    if (isGroundableTree(c, 0)) return false;
+    return !/tree|pine|palm|bush|shrub|plant|grass|fern|flower|weed|sconce|hang|banner|vine|ivy|lamp|torch|light|web|rope|chain|flag|cocoon|cage/i.test(
+        c.name,
+    );
+}
+
+/**
+ * Every drawn, solid object of a PC level (engine kinds `scenery` and `mechanism`: bridges, floors, carts, doors) as
+ * something to stand on, as the ground snap stage reads them: upright ones as triangles, tilted ones (no Euler order known)
+ * by their bounding sphere. Trees, plants and hanging pieces are left out (`isSupportClass`).
+ */
+async function sceneSupports(pc: PcLevel, modelOf: (c: OdbClass) => Promise<PcModel | null>): Promise<SceneSupports> {
+    const models = new Map<OdbClass, Promise<PcModel | null>>();
+    const out: SceneSupports = { meshes: [], tilted: [] };
+    for (const x of pc.list.objects) {
+        const c = pc.classes.get(x.dbIndex)?.get(x.classId);
+        const kind = c ? engineClassInfo(c.rflClass ?? -1)?.kind : undefined;
+        if (!c || (kind !== 'scenery' && kind !== 'mechanism') || !isSupportClass(c)) continue;
+        if (!models.has(c))
+            models.set(
+                c,
+                modelOf(c).catch(() => null),
+            );
+        const m = await models.get(c)!;
+        if (!m) continue;
+        // a few degrees off upright (the trees and rocks of a slope) is placed upright
+        const tilt = (a: number | undefined) => Math.abs(((((a ?? 0) % 360) + 540) % 360) - 180);
+        const upright = tilt(x.rot?.[0]) <= SUPPORT_TILT && tilt(x.rot?.[2]) <= SUPPORT_TILT;
+        const pm = placeMesh(x.id, upright ? { ...x, rot: [0, x.rot?.[1] ?? 0, 0] } : x, m.positions, m.polygons);
+        if (pm) out.meshes.push(pm);
+        else {
+            let r = 0;
+            for (let i = 0; i < m.positions.length; i++) r = Math.max(r, Math.abs(m.positions[i]!));
+            r *= CELL_SIZE * Math.max(...(x.scale ?? [1, 1, 1]));
+            out.tilted.push({
+                id: x.id,
+                min: [x.pos[0] - r, x.pos[1] - r, x.pos[2] - r],
+                max: [x.pos[0] + r, x.pos[1] + r, x.pos[2] + r],
+            });
+        }
+    }
+    return out;
+}
+
+/**
+ * Highest support surface under (x, z) at or below `top` (NaN when none). Infinity under a tilted object's box: its surface is
+ * not known, so the caller leaves the height as it is.
+ */
+function supportUnder(s: SceneSupports, x: number, z: number, top: number): number {
+    for (const t of s.tilted)
+        if (x >= t.min[0]! && x <= t.max[0]! && z >= t.min[2]! && z <= t.max[2]! && t.min[1]! <= top) return Infinity;
+    return meshUnder(s.meshes, x, z, top);
+}
+
 /** A scene-only Wartok class shown with the disc Wartok model (`ootfps2model.ts` scene rows). */
 interface SceneTock {
     /** MOD / ADB stem that holds the disc model and gets the retargeted scene clips (NPCS). */
@@ -5432,6 +5547,8 @@ interface SceneTock {
     joints: number;
     /** PC clip id -> new clip id in the disc ADB (every clip of the PC model, retargeted onto the disc rig). */
     clips: Map<number, number>;
+    /** PC clip id -> lowest foot of the retargeted clip on the disc model (`lowestFoot`, units under the origin). */
+    feet: Map<number, number>;
     /** PC scene channel index -> disc rig channel index (`creatureChannelTable`). */
     channels: Map<number, number>;
     /** The disc class's 64 byte model bounds. */

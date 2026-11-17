@@ -12,7 +12,18 @@
 import { type PcAnim, type Ps2Anim, type Ps2Track, type Skeleton, writePs2Anim } from './ootfanim.ts';
 import { type ConvertAnimOptions, bindBasis, convertPcAnimToPs2 } from './ootfcreature.ts';
 import { sampleClip } from './anim.ts';
-import { buildRig, invertMat12, localToWorld, mulMat12, quatToMat12, mat12ToQuat, type Rig } from './skeleton.ts';
+import {
+    MAX_INFLUENCES,
+    buildRig,
+    invertMat12,
+    localToWorld,
+    mulMat12,
+    quatToMat12,
+    mat12ToQuat,
+    skinMatrices,
+    skinVertices,
+    type Rig,
+} from './skeleton.ts';
 
 // ------------------------------------------------------------------------------------------------ name matching
 
@@ -696,6 +707,83 @@ export function retargetCreatureAssets(input: RetargetAssetsInput, opt: Retarget
     }
     out.reason = `PS2 model ${choice.id}: ${choice.match.matched} joints matched (${(choice.sourceCoverage * 100).toFixed(0)}% of the PC rig)`;
     return out;
+}
+
+// ------------------------------------------------------------------------------------------------ feet
+
+/** Joints a creature stands on: names with foot, toe, hoof or heel (the disc Wartok's `FootL` / `FootR`). */
+const FOOT_JOINT = /foot|toe|hoof|heel/i;
+
+/** Clip samples per pass for `lowestFoot` (both ends included). */
+const FOOT_SAMPLES = 12;
+
+/**
+ * Units (at scale 1) by which another part of the body may hang below the feet in a pose that still stands on them (toes
+ * bent under a heel, a knee on the ground); a pose with the body lower lies or sits (`lowestFoot`).
+ */
+export const FOOT_STAND_SLACK = 48;
+
+/**
+ * Lowest point of a creature's feet over its origin in a clip (game units at scale 1, negative under the origin): the lowest
+ * vertex whose strongest influence is a foot joint, over `FOOT_SAMPLES + 1` poses of one pass of a cycle, in the first pose
+ * of a clip that ends in another stance (feet or body more than `FOOT_STAND_SLACK` higher or lower at the end: a death, a
+ * fall). Vertices are LOD 0 of the
+ * skinned model (`first`, `count` as in the 0x0208 record). Without any foot joint the whole LOD counts. Undefined when the
+ * creature does not stand on its feet in every pose taken (some other vertex more than `FOOT_STAND_SLACK` under the lowest
+ * foot: lying, sitting, hands on the ground), so such clips leave the scene keys as they are, and when no vertex is finite.
+ */
+export function lowestFoot(
+    rig: Rig,
+    positions: Float32Array,
+    first: number,
+    count: number,
+    anim: Ps2Anim,
+): number | undefined {
+    const feet = new Set<number>();
+    rig.names.forEach((n, j) => FOOT_JOINT.test(n) && feet.add(j));
+    const verts: number[] = [];
+    const all: number[] = [];
+    for (let v = first; v < first + count && v < rig.vertexCount; v++) {
+        let best = 0;
+        let joint = -1;
+        for (let k = 0; k < MAX_INFLUENCES; k++) {
+            const w = rig.jointWeight[v * MAX_INFLUENCES + k]!;
+            if (w > best) [best, joint] = [w, rig.jointIndex[v * MAX_INFLUENCES + k]!];
+        }
+        all.push(v);
+        if (!feet.size || feet.has(joint)) verts.push(v);
+    }
+    const out = new Float32Array(positions.length);
+    const pose = (t: number): { foot: number; body: number } => {
+        skinVertices(
+            rig,
+            skinMatrices(rig, localToWorld(rig, sampleClip(rig, anim, t))),
+            positions,
+            null,
+            first,
+            count,
+            out,
+            null,
+        );
+        let foot = Infinity;
+        let body = Infinity;
+        for (const v of verts) foot = Math.min(foot, out[v * 3 + 1]!);
+        for (const v of all) body = Math.min(body, out[v * 3 + 1]!);
+        return { foot: foot * 2048, body: body * 2048 };
+    };
+    // A clip that ends in another stance than it starts (a death, a fall, getting up) plays once from where the previous one
+    // left the feet: its first pose decides. A cycle (stand, walk, run) has its feet on the ground at its lowest.
+    const start = pose(0);
+    const end = pose(anim.duration * (1 - 1e-3));
+    const once =
+        Math.abs(end.foot - start.foot) > FOOT_STAND_SLACK || Math.abs(end.body - start.body) > FOOT_STAND_SLACK;
+    let low = Infinity;
+    for (let k = 0; k <= (once ? 0 : FOOT_SAMPLES); k++) {
+        const p = k === 0 ? start : pose((anim.duration * k) / FOOT_SAMPLES);
+        if (p.foot - p.body > FOOT_STAND_SLACK) return undefined;
+        low = Math.min(low, p.foot);
+    }
+    return Number.isFinite(low) ? low : undefined;
 }
 
 // ------------------------------------------------------------------------------------------------ channel table

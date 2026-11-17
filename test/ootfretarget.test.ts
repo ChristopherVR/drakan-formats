@@ -1,11 +1,13 @@
 // Synthetic data only; no game bytes.
 import { describe, expect, it } from 'vitest';
-import type { PcAnim, Skeleton, SkelJoint } from '../src/ootfanim.ts';
+import type { PcAnim, Ps2Anim, Skeleton, SkelJoint } from '../src/ootfanim.ts';
 import { quatAngle } from '../src/ootfcreature.ts';
 import {
     chooseRetargetTarget,
     creatureChannelTable,
     leafFramePairs,
+    lowestFoot,
+    FOOT_STAND_SLACK,
     matchJoints,
     nameKeys,
     retargetCreature,
@@ -443,5 +445,76 @@ describe('scene creature channel table', () => {
         const pairs = leafFramePairs(c, d);
         expect(pairs.size).toBe(1);
         expect(creatureChannelTable(c, d)[0]!.ps2Channel).toBeGreaterThanOrEqual(0);
+    });
+});
+
+describe('lowestFoot', () => {
+    // root at the origin, a foot joint 0.25 under it; vertex 0 on the foot (0.3 under), 1 on the root (`body` under, the
+    // belly or a lying back), 2 on the root (0.5 over). The clip lowers the root by 0.1 at half a second and back.
+    const rig = (footName: string) => {
+        const sk = skeleton(['Troll', footName], [-1, 0], [I3, I3], -0.25);
+        sk.lods = [{ distance: 0, usage: 0, node: 0, firstVertex: 0, vertexCount: 3, firstPoly: 0, polyCount: 0 }];
+        sk.joints[0]!.weights = [
+            [
+                { vertex: 1, weight: 1 },
+                { vertex: 2, weight: 1 },
+            ],
+        ];
+        sk.joints[1]!.weights = [[{ vertex: 0, weight: 1 }]];
+        return buildRig(sk, 3);
+    };
+    const positions = (body: number) => Float32Array.from([0, -0.3, 0, 0, body, 0, 0, 0.5, 0]);
+    const sink: Ps2Anim = {
+        name: 'sink',
+        duration: 1,
+        flags: 0,
+        frames: 30,
+        channels: 0,
+        thresholds: { rotation: 0, scale: 0, translation: 0 },
+        tracks: [
+            {
+                base: [0, 0, 0],
+                hasPos: true,
+                keys: [
+                    { time: 0, q: [0, 0, 0, 1], pos: [0, 0, 0] },
+                    { time: 0.5, q: [0, 0, 0, 1], pos: [0, -0.1, 0] },
+                    { time: 1, q: [0, 0, 0, 1], pos: [0, 0, 0] },
+                ],
+            },
+            { base: [0, -0.25, 0], hasPos: false, keys: [{ time: 0, q: [0, 0, 0, 1], pos: null }] },
+        ],
+    };
+
+    it('takes the lowest foot vertex over the clip, in game units', () => {
+        expect(lowestFoot(rig('FootL'), positions(-0.2), 0, 3, sink)).toBeCloseTo(-0.4 * 2048, 1);
+        // another part a little under the feet (FOOT_STAND_SLACK) still stands
+        const slack = (FOOT_STAND_SLACK - 1) / 2048;
+        expect(lowestFoot(rig('FootL'), positions(-0.3 - slack), 0, 3, sink)).toBeCloseTo(-0.4 * 2048, 1);
+    });
+
+    it('gives nothing for a clip in which the body lies lower than the feet', () => {
+        expect(lowestFoot(rig('FootL'), positions(-0.5), 0, 3, sink)).toBeUndefined();
+    });
+
+    it('takes the first pose of a clip that ends in another stance (a fall starts from the stance before it)', () => {
+        const root = sink.tracks[0]!;
+        const fall: Ps2Anim = {
+            ...sink,
+            tracks: [
+                {
+                    ...root,
+                    keys: [
+                        { time: 0, q: [0, 0, 0, 1], pos: [0, 0, 0] },
+                        { time: 1, q: [0, 0, 0, 1], pos: [0, -0.2, 0] },
+                    ],
+                },
+                sink.tracks[1]!,
+            ],
+        };
+        expect(lowestFoot(rig('FootL'), positions(-0.2), 0, 3, fall)).toBeCloseTo(-0.3 * 2048, 1);
+    });
+
+    it('falls back to the whole mesh when the rig names no foot joint', () => {
+        expect(lowestFoot(rig('Lleg'), positions(-0.5), 0, 3, sink)).toBeCloseTo(-0.6 * 2048, 1);
     });
 });
