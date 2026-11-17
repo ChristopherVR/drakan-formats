@@ -245,6 +245,7 @@ import {
     type PlacedMesh,
 } from './ootftreeground.ts';
 import { engineClassInfo } from './ootfclass.ts';
+import { dropStompFader, holdLevelStartFaders } from './ootffade.ts';
 import { odbStemForDependency } from './odb.ts';
 import {
     animName,
@@ -3517,9 +3518,29 @@ export async function convertOotfLevels(
                 }
             }
         }
+        {
+            // The engine fades every level in by itself; a PC fader that does the same at the start cut the picture back
+            // to dark a moment into the opening scene (ootffade.ts).
+            const held = holdLevelStartFaders(
+                pc,
+                parts.objects,
+                parts.objectIdMap,
+                (o) =>
+                    classes.get(o.dbIndex)?.get(o.classId) ??
+                    plan?.synthesized.find((x) => x.dbIndex === o.dbIndex && x.classId === o.classId)?.cls,
+            );
+            if (held.length) log(`${pc.path}: ${held.length} level-start fader(s) left to the engine's fade-in`);
+        }
         if (opt.singletons !== false) {
             await stage(`singletons ${pc.path}`, async () => {
                 ensureSingletons(parts, pc, tplList.objects, classes);
+                // No engine fade when a scene takes the camera: the OotF scenes fade with their own faders (ootffade.ts).
+                const levelProps = parts.objects.objects.find(
+                    (o) => classes.get(o.dbIndex)?.get(o.classId)?.rflClass === 54,
+                );
+                const propsFields = levelProps && classes.get(levelProps.dbIndex)?.get(levelProps.classId)?.fields;
+                if (dropStompFader(pc, parts.objects, levelProps, propsFields))
+                    log(`${pc.path}: Level Properties Stomp Fader 0 (scenes fade with their own faders)`);
                 const lm = levelMaps.get(pc.path);
                 const props =
                     lm && parts.objects.objects.find((o) => classes.get(o.dbIndex)?.get(o.classId)?.rflClass === 54);
