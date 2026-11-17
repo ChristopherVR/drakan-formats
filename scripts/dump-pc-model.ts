@@ -9,8 +9,8 @@
 // or by exact name (case-insensitive). Output per model: <name>.obj/.mtl (LOD 0, model space, metres-ish game units),
 // <name>_tex<id>.png, and for skinned models <name>.skeleton.json (joint names, parents, bind matrices, LOD 0 weights)
 // that analysis/scripts/blender/import_pc_model.py turns into an armature. Output is game data: keep it under build/.
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { crc32, deflateSync } from 'node:zlib';
 import {
     SrscReader,
@@ -29,6 +29,9 @@ import {
 import { vertexWeights } from '../src/ootfskinupgrade.ts';
 
 const MOD_CHARACTER = 0x0208;
+/** Texture list db of an authored model's own textures (as in OotfAssetBuilder). */
+const OWN_DB = 0xfffe;
+const ownImages = new Map<number, string>();
 
 const opt: Record<string, string> = {};
 const free: string[] = [];
@@ -147,7 +150,13 @@ for (const want of free) {
                 { positions: lodPos, polygons: polys, weights: vertexWeights(sk, count) },
                 sk,
                 alpha,
+                pc.textures.length,
             );
+            // the model's own textures (PNG files beside the JSON) follow the PC entries
+            for (const [k, file] of fit.images.entries()) {
+                ownImages.set(k, join(dirname(opt.authored), file));
+                pc = { ...pc, textures: [...pc.textures, { db: OWN_DB, id: k }] };
+            }
             const nv = fit.positions.length / 3;
             pc = { ...pc, positions: fit.positions };
             first = 0;
@@ -179,9 +188,11 @@ for (const want of free) {
     const mtl: string[] = [];
     pc.textures.forEach((t, i) => {
         mtl.push(`newmtl tex${i}`, 'Kd 1 1 1');
-        mtl.push(`map_Kd ${base}_tex${t.id}.png`, '');
+        mtl.push(`map_Kd ${base}_${t.db === OWN_DB ? 'own' : 'tex'}${t.id}.png`, '');
     });
+    for (const [k, file] of ownImages) copyFileSync(file, join(opt.out!, `${base}_own${k}.png`));
     for (const t of pc.textures) {
+        if (t.db === OWN_DB) continue;
         if (!txd || t.db !== 0) {
             console.error(`  texture ${t.id} (db ${t.db}) not in ${opt.container}.txd; skipped`);
             continue;

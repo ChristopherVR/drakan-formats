@@ -16,6 +16,7 @@
  */
 
 import type { Skeleton } from './ootfanim.ts';
+import type { RgbaImage } from './ootftex.ts';
 import { type SkinPoly, type VertexWeights, mixWeights, subdivideSkin } from './ootfskinupgrade.ts';
 
 export const AUTHORED_FORMAT = 'drakan-authored-model/1';
@@ -23,10 +24,15 @@ export const AUTHORED_FORMAT = 'drakan-authored-model/1';
 export interface AuthoredSlot {
     /** What the slot is (for the report and the Blender material). */
     name: string;
-    /** `pc`: UVs and texture projected from the PC model. */
-    texture: 'pc';
+    /**
+     * `pc`: UVs and texture projected from the PC model. `image`: the model's own texture (`image`, a PNG beside the file,
+     * original art) with the file's own `uvs`.
+     */
+    texture: 'pc' | 'image';
     /** PC texture list entries the projection may use (default every opaque entry). */
     pcTextures?: readonly number[];
+    /** `image` slots: the PNG file name (beside the model file); several slots may share one. */
+    image?: string;
 }
 
 export interface AuthoredModel {
@@ -62,6 +68,13 @@ export interface AuthoredModel {
      * skinned mostly to them: Delon keeps his 1999 head and face texture on the new body.
      */
     keepPcJoints?: readonly string[];
+    /**
+     * Per triangle corner UVs (u0, v0, u1, v1, u2, v2 per triangle, Blender convention: v up), needed when a slot is `image`;
+     * entries of `pc` slot triangles are ignored.
+     */
+    uvs?: number[];
+    /** Decoded `image` slot pictures by file name; attached by the loader (CLI, editor), not stored in the file. */
+    images?: Record<string, RgbaImage>;
     /** Optional own weights: per vertex [joint name, weight, joint name, weight ...]. */
     weights?: (string | number)[][];
 }
@@ -72,6 +85,11 @@ export interface AuthoredFit {
     weights: VertexWeights[];
     /** Authored triangles whose slot found no PC triangle (dropped). */
     dropped: number;
+    /**
+     * The `image` slot pictures the polygons use, in order: a polygon whose texture is `pcTextureCount + k` shows
+     * `images[k]` (the caller appends them to the PC texture list).
+     */
+    images: string[];
 }
 
 type V3 = [number, number, number];
@@ -90,6 +108,12 @@ export function authoredProblem(m: unknown): string | null {
     if (!Array.isArray(a.positions) || a.positions.length % 3 || a.positions.length === 0) return 'bad positions';
     if (!Array.isArray(a.triangles) || a.triangles.length % 4 || a.triangles.length === 0) return 'bad triangles';
     if (!Array.isArray(a.slots) || a.slots.length === 0) return 'no slots';
+    for (const sl of a.slots) {
+        if (sl.texture !== 'pc' && sl.texture !== 'image') return `slot ${sl.name}: texture must be pc or image`;
+        if (sl.texture === 'image' && !sl.image) return `slot ${sl.name}: an image slot needs an image`;
+    }
+    if (a.slots.some((sl) => sl.texture === 'image') && a.uvs?.length !== (a.triangles.length / 4) * 6)
+        return 'image slots need 6 uvs per triangle';
     const nv = a.positions.length / 3;
     for (let i = 0; i < a.triangles.length; i += 4) {
         for (let k = 0; k < 3; k++) {
@@ -329,7 +353,9 @@ export function fitAuthored(
     pc: { positions: ArrayLike<number>; polygons: readonly SkinPoly[]; weights: readonly VertexWeights[] },
     skeleton: Skeleton,
     alphaTextures: ReadonlySet<number> = new Set(),
+    pcTextureCount = 0,
 ): AuthoredFit {
+    const images: string[] = [];
     const byName = new Map<string, number>();
     for (const n of skeleton.nodes ?? [])
         if (n.joint >= 0 && n.joint < skeleton.joints.length && !byName.has(n.name.trim().toLowerCase()))
@@ -441,6 +467,20 @@ export function fitAuthored(
         ];
         const joint = dominant(ids.map((v) => weights[v]));
         if (keepJoints.has(joint)) continue; // the PC part is kept instead
+        if (slot.texture === 'image') {
+            // the model's own texture: its own UVs (Blender v points up, the PC one down)
+            let k = images.indexOf(slot.image!);
+            if (k < 0) k = images.push(slot.image!) - 1;
+            const t = (i / 4) * 6;
+            const u = m.uvs!;
+            polygons.push({
+                flags: 0,
+                texture: pcTextureCount + k,
+                indices: ids,
+                uvs: [u[t]!, 1 - u[t + 1]!, u[t + 2]!, 1 - u[t + 3]!, u[t + 4]!, 1 - u[t + 5]!],
+            });
+            continue;
+        }
         const origin = radial.get(joint);
         let hitT = -1;
         if (origin) {
@@ -491,7 +531,7 @@ export function fitAuthored(
         }
         polygons.push({ flags: t.flags, texture: t.texture, indices: ids, uvs });
     }
-    if (!keepJoints.size) return compact({ positions, polygons, weights, dropped });
+    if (!keepJoints.size) return compact({ positions, polygons, weights, dropped, images });
     // The PC triangles of the kept joints (a 1999 head with its face texture and hair cards), one smoothing step, appended
     // with only the vertices they use.
     const kept = pc.polygons.filter((p) => keepJoints.has(dominant(p.indices.map((v) => pc.weights[v]))));
@@ -510,7 +550,7 @@ export function fitAuthored(
                 outW.push(smooth.weights[v] ?? [{ j: 0, w: 1 }]);
             }
     for (const p of smooth.polygons) polygons.push({ ...p, indices: p.indices.map((v) => remap.get(v)!) });
-    return compact({ positions: Float32Array.from(outPos), polygons, weights: outW, dropped });
+    return compact({ positions: Float32Array.from(outPos), polygons, weights: outW, dropped, images });
 }
 
 /** Drop vertices no polygon uses (authored parts replaced by kept PC parts). */
@@ -531,7 +571,7 @@ function compact(f: AuthoredFit): AuthoredFit {
             return n;
         }),
     }));
-    return { positions: Float32Array.from(pos), polygons, weights: w, dropped: f.dropped };
+    return { positions: Float32Array.from(pos), polygons, weights: w, dropped: f.dropped, images: f.images };
 }
 
 /** Authored models by PC model name (case and surrounding blanks ignored). */

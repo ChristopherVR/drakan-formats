@@ -31,6 +31,7 @@ import {
 import {
     PC_TEX_NEXT_FRAME,
     type Ps2TextureOptions,
+    type RgbaImage,
     buildPs2Txd,
     encodePs2Texture,
     isSkip,
@@ -142,6 +143,8 @@ const MOD_NAME_RECORD = 0x0200;
 const MOD_VERTICES_RECORD = 0x0203;
 /** Upgraded characters stay under this many vertices (the disc's biggest skinned humans have about 2,200). */
 const DL_MAX_SKIN_VERTICES = 4000;
+/** Texture list db of an authored model's own textures (no PC container uses it). */
+const AUTHORED_TEXTURE_DB = 0xfffe;
 
 /** A Drakan 2 model read from the disc for `OotfAssetBuilder.useDiscModel`. */
 export interface DiscModelSource {
@@ -428,6 +431,33 @@ export class OotfAssetBuilder {
         s.add(user);
     }
 
+    /**
+     * Add a picture that is not from the PC data (an authored model's own texture, by `key`) as an 8 bpp square texture,
+     * like the textures of converted characters. Returns the new PS2 id, the same one for the same key.
+     */
+    addImageTexture(key: string, image: RgbaImage): number | null {
+        const known = this.texIds.get(key);
+        if (known !== undefined) return known;
+        if (this.nextTex > 0xffff) return null;
+        const t = encodePs2Texture(image, {
+            fps: 10,
+            ...this.options.texture,
+            mode: 'indexed' as const,
+            square: true,
+            hardAlpha: true,
+        });
+        const nid = this.nextTex++;
+        this.texBodies.push({ id: nid, body: t.body });
+        this.texAlpha.set(nid, t.hasAlpha);
+        this.texIds.set(key, nid);
+        this.texFrames.set(nid, 1);
+        this.report.textures.converted++;
+        this.report.textures.bytes += t.body.length;
+        this.report.textures.byBpp[t.bpp] = (this.report.textures.byBpp[t.bpp] ?? 0) + 1;
+        if (t.lossy) this.report.textures.lossy++;
+        return nid;
+    }
+
     /** Convert PC texture `id` of `<container>.txd` (and the frames that follow it). Returns the new PS2 id or null. */
     async addTexture(container: string, id: number, indexed = false): Promise<number | null> {
         // Textures of skinned models are written 8 bpp (`indexed`): see the journal, 32 bpp textures do not draw on creature classes.
@@ -650,11 +680,28 @@ export class OotfAssetBuilder {
                     },
                     skin.sk,
                     keep,
+                    pc.textures.length,
                 );
                 const nv = fit.positions.length / 3;
                 if (nv > DL_MAX_SKIN_VERTICES) throw new Error(`${nv} vertices`);
                 if (!fit.polygons.length) throw new Error('no triangle found a PC texture');
-                pc = { ...pc, positions: fit.positions, polygons: fit.polygons };
+                // The model's own textures (original art) follow the PC texture list as entries of a reserved db.
+                const own: ModelTextureRef[] = [];
+                for (const [k, file] of fit.images.entries()) {
+                    const image = authored.images?.[file];
+                    if (!image) throw new Error(`texture ${file} was not loaded`);
+                    const nid = this.addImageTexture(`authored:${file}`, image);
+                    if (nid === null) throw new Error(`texture ${file} could not be added`);
+                    this.useTexture(nid, key);
+                    map.set(`${AUTHORED_TEXTURE_DB}/${k}`, { id: nid, db: 0 });
+                    own.push({ db: AUTHORED_TEXTURE_DB, id: k });
+                }
+                pc = {
+                    ...pc,
+                    positions: fit.positions,
+                    polygons: fit.polygons,
+                    textures: [...pc.textures, ...own],
+                };
                 skin = { ...skin, sk: withVertexWeights(skin.sk, fit.weights), positions: fit.positions };
                 upgrade = upgrade?.jaw ? { smooth: false, jaw: true } : null;
                 this.report.authored.push({

@@ -12,6 +12,8 @@ import {
     placeAuthored,
 } from '../src/ootfauthored.ts';
 import type { SkinPoly, VertexWeights } from '../src/ootfskinupgrade.ts';
+import { decodePng } from '../src/png.ts';
+import { zlibSync } from 'fflate';
 
 /** A joint whose inverse bind is uniform scale `s` and origin `o` (row vectors: p' = p R + t, R = s I, t = -o s). */
 function joint(o: [number, number, number], s = 1) {
@@ -168,5 +170,82 @@ describe('fit helpers', () => {
         expect(b[1] + b[2]).toBeCloseTo(1);
         const inside = closestBary([0.25, 0.25, 1], [0, 0, 0], [1, 0, 0], [0, 1, 0]);
         expect(inside[0]).toBeCloseTo(0.5);
+    });
+});
+
+/** A PNG of RGBA rows (filter 0 on even rows, Sub on odd rows) built by hand. */
+function png(width: number, height: number, rgba: number[]): Uint8Array {
+    const crcTable = Array.from({ length: 256 }, (_, n) => {
+        let c = n;
+        for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+        return c >>> 0;
+    });
+    const crc = (b: Uint8Array) => {
+        let c = 0xffffffff;
+        for (const x of b) c = crcTable[(c ^ x) & 255]! ^ (c >>> 8);
+        return (c ^ 0xffffffff) >>> 0;
+    };
+    const chunk = (type: string, data: Uint8Array) => {
+        const out = new Uint8Array(12 + data.length);
+        const dv = new DataView(out.buffer);
+        dv.setUint32(0, data.length);
+        for (let i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i);
+        out.set(data, 8);
+        dv.setUint32(8 + data.length, crc(out.subarray(4, 8 + data.length)));
+        return out;
+    };
+    const ihdr = new Uint8Array(13);
+    new DataView(ihdr.buffer).setUint32(0, width);
+    new DataView(ihdr.buffer).setUint32(4, height);
+    ihdr.set([8, 6, 0, 0, 0], 8);
+    const raw: number[] = [];
+    for (let y = 0; y < height; y++) {
+        const row = rgba.slice(y * width * 4, (y + 1) * width * 4);
+        if (y % 2 === 0) raw.push(0, ...row);
+        else raw.push(1, ...row.map((v, x) => (x >= 4 ? (v - row[x - 4]! + 256) & 255 : v)));
+    }
+    const parts = [
+        new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
+        chunk('IHDR', ihdr),
+        chunk('IDAT', zlibSync(new Uint8Array(raw))),
+        chunk('IEND', new Uint8Array()),
+    ];
+    const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+    let o = 0;
+    for (const p of parts) {
+        out.set(p, o);
+        o += p.length;
+    }
+    return out;
+}
+
+describe('own textures', () => {
+    it('decodes an 8-bit RGBA PNG with filtered rows', () => {
+        const px = [10, 20, 30, 255, 40, 50, 60, 128, 70, 80, 90, 0, 100, 110, 120, 255];
+        const img = decodePng(png(2, 2, px));
+        expect([img.width, img.height]).toEqual([2, 2]);
+        expect([...img.rgba]).toEqual(px);
+        expect(() => decodePng(new Uint8Array([1, 2, 3]))).toThrow(/not a PNG/);
+    });
+
+    it('image slots keep their own UVs (v flipped to the PC convention) and texture after the PC entries', () => {
+        const a = authoredTetra();
+        const m: AuthoredModel = {
+            ...a,
+            slots: [
+                { name: 'skin', texture: 'pc' },
+                { name: 'armour', texture: 'image', image: 'armour.png' },
+            ],
+            triangles: a.triangles.map((v, i) => (i % 4 === 3 ? (i < 8 ? 1 : 0) : v)),
+            uvs: Array.from({ length: (a.triangles.length / 4) * 6 }, (_, i) => (i % 2 ? 0.25 : 0.5)),
+        };
+        expect(authoredProblem(m)).toBeNull();
+        expect(authoredProblem({ ...m, uvs: [0, 0] })).toMatch(/uvs/);
+        const fit = fitAuthored(m, pcTetra(), skeleton, new Set(), 2);
+        expect(fit.images).toEqual(['armour.png']);
+        const own = fit.polygons.filter((p) => p.texture === 2);
+        expect(own).toHaveLength(2);
+        expect(own[0]!.uvs).toEqual([0.5, 0.75, 0.5, 0.75, 0.5, 0.75]);
+        expect(fit.polygons.filter((p) => p.texture < 2)).toHaveLength(2);
     });
 });
