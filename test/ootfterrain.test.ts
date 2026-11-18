@@ -437,14 +437,22 @@ describe('liquid terrain textures', () => {
         expect(t.report.converted).toBe(2);
     });
 
-    it('picks Surdana water for mountain water and the plain Water entry for the Islands', () => {
-        expect(nativeWaterTextures('Mountain World/Mountain World Common/Mountain World Common TD')).toEqual([
+    it('keeps the authored ripple textures in Wartok Canyons', () => {
+        const mountain = 'Mountain World/Mountain World Common/Mountain World Common TD';
+        expect(nativeWaterTextures(mountain, 'Mountain World/Wartok Canyons/wartok canyons.lvl')).toEqual([
+            PS2_WATER_TEXTURE,
+            PS2_SURDANA_WATER_TEXTURE,
+        ]);
+        expect(nativeWaterTextures(mountain, 'Mountain World/Ruined Village/Ruined Village.lvl')).toEqual([
             PS2_SURDANA_WATER_TEXTURE,
             PS2_WATER_TEXTURE,
         ]);
-        expect(nativeWaterTextures('Islands World/Tropical World Common/Tropical World TD')).toEqual([
-            PS2_WATER_TEXTURE,
-        ]);
+        expect(
+            nativeWaterTextures(
+                'Islands World/Tropical World Common/Tropical World TD',
+                'Islands World/Islands/islands.lvl',
+            ),
+        ).toEqual([PS2_WATER_TEXTURE]);
     });
 
     it('keeps the picture when the template has no native liquid entry', async () => {

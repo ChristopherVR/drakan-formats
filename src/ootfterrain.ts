@@ -60,12 +60,13 @@ export const PS2_LAVA_TEXTURE = 0x1d7;
 /** PROCTEES 0x471d: material 240 "Surdana Water" (Surdana, Ravenshold, Valley, Stratos), the look of mountain water. */
 export const PS2_SURDANA_WATER_TEXTURE = 0x471d;
 /**
- * Native water entries for a PC water texture of `container` (an install path without extension), best first. Mountain water
- * (Ruined Village, Wartok, the Intro, the mines, Volcano) takes Surdana's water; the Islands world keeps the plain "Water"
- * material: its seas carry the 60% shallow vertex kind (0x71), and with Surdana Water they drew pale sand coloured, with
- * PROCTEES 0x467f ("Stormy Water_Level 3a") grey gravel (journal 2026-11-08/ootf-water.md).
+ * Native water entries, best first. Wartok Canyons uses the material that carries its authored ripple textures
+ * and opposing scroll directions. The Islands also use plain Water for their shallow seas.
+ * Other mountain levels prefer Surdana Water (journal 2026-11-08/ootf-water.md).
  */
-export function nativeWaterTextures(container: string): number[] {
+export function nativeWaterTextures(container: string, levelPath: string): number[] {
+    if (/(?:^|[\\/])wartok canyons[\\/]wartok canyons\.lvl$/i.test(levelPath))
+        return [PS2_WATER_TEXTURE, PS2_SURDANA_WATER_TEXTURE];
     return /^islands world\//i.test(container) ? [PS2_WATER_TEXTURE] : [PS2_SURDANA_WATER_TEXTURE, PS2_WATER_TEXTURE];
 }
 
@@ -345,7 +346,8 @@ export class TerrainTextureBuilder {
         for (const ref of waterUses.keys()) {
             const c = containerOf(pc, ref >>> 16);
             const liquid = c ? await this.liquidOf(c, ref & 0xffff) : null;
-            const options = liquid === 'water' ? nativeWaterTextures(c!) : liquid === 'lava' ? [PS2_LAVA_TEXTURE] : [];
+            const options =
+                liquid === 'water' ? nativeWaterTextures(c!, pc.path) : liquid === 'lava' ? [PS2_LAVA_TEXTURE] : [];
             const native = options.find((id) => this.hasEntry(id));
             if (native !== undefined) liquids.set(ref, ((this.db << 16) | native) >>> 0);
         }
