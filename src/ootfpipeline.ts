@@ -147,6 +147,7 @@ import {
     setNamedParam,
 } from './ootfpuzzle.ts';
 import { hideLightMarkers } from './ootfmarkers.ts';
+import { isSeamPlacement, touchingModelOffsets, type SeamPlacement } from './ootfcoincident.ts';
 import { pcTransitionSequences, relayExitSequences } from './ootfexitseq.ts';
 import {
     PUSH_SPHERE_REACH,
@@ -970,6 +971,40 @@ export async function convertOotfLevels(
                 ownedClasses.set(ownedClassKey(ow, id), cls);
             }
         }
+    await stage('touching model faces', async () => {
+        const uses = new Map<string, number>();
+        const byLevel = [];
+        for (const pc of pcs) {
+            const staticMeshes = [];
+            for (const at of pc.list.objects) {
+                const cls = pc.classes.get(at.dbIndex)?.get(at.classId);
+                const ow = cls && ownerOf.get(cls);
+                if (!ow || !cls?.model) continue;
+                const { db, id } = cls.model;
+                await builder.registerOwner(ow);
+                const container = builder.resolveContainer(ow, db);
+                if (!container) continue;
+                const source = container.toLowerCase();
+                const key = `${source}#${id}`;
+                uses.set(key, (uses.get(key) ?? 0) + 1);
+                if (cls.rflClass === GROUND_OBJECT_RFL && isSeamPlacement(at))
+                    staticMeshes.push({ source, key, owner: ow, db, id, at });
+            }
+            byLevel.push({ pc, staticMeshes });
+        }
+        for (const { pc, staticMeshes } of byLevel) {
+            const placements: SeamPlacement[] = [];
+            for (const { source, key, owner: ow, db, id, at } of staticMeshes) {
+                if (uses.get(key) !== 1) continue;
+                const model = await builder.readPcModel(ow, db, id);
+                if (model && model.polygons.length > 4) placements.push({ source, model, at });
+            }
+            for (const [placement, offsets] of touchingModelOffsets(placements)) {
+                builder.offsetSeamFaces(placement.source, placement.model.id, offsets);
+                log(`touching model faces ${pc.path}: separated ${offsets.size} faces of "${placement.model.name}"`);
+            }
+        }
+    });
     // Generators that show a model until they burst (the Ruined Village stone Arokh): the model becomes a prop of its own,
     // which the PS2 draws (ootfblowup.ts); its class is planned with the others and its scenes hide it with the generator.
     const blowUpProps = new Map<PcLevel, BlowUpProp[]>();

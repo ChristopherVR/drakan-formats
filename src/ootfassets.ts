@@ -14,6 +14,7 @@ import {
     writePs2Skeleton,
 } from './ootfanim.ts';
 import { convertCreatureAssets } from './ootfcreature.ts';
+import { offsetModelFaces, separateBackToBackFaces, type FaceOffset } from './ootfcoincident.ts';
 import { remapSkeletonVertices, withDisplayList } from './ootfdisplaylist.ts';
 import { buildDbText, parseDbText } from './ootfcontainer.ts';
 import {
@@ -157,34 +158,6 @@ export interface DiscModelSource {
     textures: ({ ref: string; frames: Uint8Array[]; hasAlpha: boolean } | null)[];
 }
 const DEFAULT_DISPLAY_LIST = /tree|birch/i;
-
-function separateRockArchFace(model: PcModel): PcModel {
-    const face = model.polygons[1];
-    const corners = [0, 3, 4, 7];
-    if (
-        model.name !== 'Arch Hall 2 Rock 01' ||
-        !face ||
-        model.textures[face.texture]?.id !== 3193 ||
-        face.indices.length !== corners.length ||
-        corners.some((vertex, i) => face.indices[i] !== vertex) ||
-        model.positions.length < 24
-    )
-        return model;
-
-    // The PC culls the rock face from the hall. The converted model draws both sides, so the rock
-    // and plaster fight over the same plane. Move only the rock face towards the cave.
-    const originalLength = model.positions.length;
-    const positions = new Float32Array(originalLength + corners.length * 3);
-    positions.set(model.positions);
-    corners.forEach((vertex, i) => {
-        const at = originalLength + i * 3;
-        positions.set(model.positions.subarray(vertex * 3, vertex * 3 + 3), at);
-        positions[at] = positions[at]! + 16 / 2048;
-    });
-    const polygons = model.polygons.slice();
-    polygons[1] = { ...face, indices: corners.map((_, i) => originalLength / 3 + i) };
-    return { ...model, positions, polygons };
-}
 
 /**
  * PC cage models (Cage01wPerson2, Cage02Empty, Cage02wPerson ...: hanging cages, some with a prisoner). The PC collides
@@ -388,6 +361,7 @@ export class OotfAssetBuilder {
     private readonly polygonDrops = new Map<string, ReadonlySet<number>>();
     /** Model key -> offset (model units) taken off every vertex (a flame's embers kept where its object moved from). */
     private readonly modelShifts = new Map<string, readonly [number, number, number]>();
+    private readonly seamOffsets = new Map<string, ReadonlyMap<number, FaceOffset>>();
     /** Model key -> vertex positions (model units) of the Drakan 2 drawing that replaced it (`useDiscModel`, after the fit). */
     private readonly discDrawn = new Map<string, Float32Array>();
     /** Models that get the bounds of a pressure plate, with the box's headroom in model units (`requirePlateBox`). */
@@ -662,7 +636,6 @@ export class OotfAssetBuilder {
             return fail(e instanceof ModelError ? e.message : String(e));
         }
         if (!pc) return fail('no such model');
-        if (key === 'mountain world/ruined village/ruined village#3875') pc = separateRockArchFace(pc);
         const shift = this.modelShifts.get(key);
         if (shift && !pc.character)
             // the bounds are rebuilt from the moved vertices
@@ -686,6 +659,7 @@ export class OotfAssetBuilder {
             }
         }
         const map = new Map<string, ModelTextureRef | null>();
+        const opaqueTextures = new Map<number, number>();
         const used = new Set(pc.polygons.map((p) => p.texture));
         for (const [ti, t] of pc.textures.entries()) {
             if (pc.polygons.length && !used.has(ti)) continue;
@@ -693,6 +667,7 @@ export class OotfAssetBuilder {
             const nid = tc ? await this.addTexture(tc, t.id, !!skin) : null;
             if (nid !== null) this.useTexture(nid, key);
             map.set(`${t.db}/${t.id}`, nid === null ? null : { id: nid, db: 0 });
+            if (!skin && nid !== null && this.texAlpha.get(nid) === false) opaqueTextures.set(ti, nid);
         }
         let jaw: JawRig | null = null;
         let pcJoints = skin?.sk.joints.length ?? 0;
@@ -776,9 +751,20 @@ export class OotfAssetBuilder {
                 );
             }
         }
+        const droppedFaces = skin ? undefined : this.polygonDrops.get(key);
+        if (!skin) {
+            const seam = this.seamOffsets.get(key);
+            if (seam) {
+                const offsets = new Map<number, FaceOffset>();
+                for (const [i, offset] of seam)
+                    if (!droppedFaces?.has(i) && opaqueTextures.has(pc.polygons[i]!.texture)) offsets.set(i, offset);
+                pc = offsetModelFaces(pc, offsets);
+            }
+            pc = separateBackToBackFaces(pc, opaqueTextures, droppedFaces);
+        }
         const { model, stats } = pcToNeutral(pc, {
             ...this.options.model,
-            dropPolygons: skin ? undefined : this.polygonDrops.get(key),
+            dropPolygons: droppedFaces,
             mapTexture: (r) => map.get(`${r.db}/${r.id}`) ?? null,
             doubleSided: (this.options.doubleSidedAlpha ?? true) ? (r) => this.texAlpha.get(r.id) === true : undefined,
             textureFrames: (r) => (r.db === 0 ? (this.texFrames.get(r.id) ?? 1) : 1),
@@ -1340,6 +1326,11 @@ export class OotfAssetBuilder {
         if (!c || this.modelIds.has(key)) return false;
         this.modelShifts.set(key, by);
         return true;
+    }
+
+    /** Register a repair for a seam discovered between two static placements before either asset is converted. */
+    offsetSeamFaces(container: string, pcId: number, offsets: ReadonlyMap<number, FaceOffset>): void {
+        this.seamOffsets.set(`${lower(container)}#${pcId}`, offsets);
     }
 
     /**
