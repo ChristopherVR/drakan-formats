@@ -7,7 +7,6 @@ import {
     Ps2ModelMapError,
     discModelMismatch,
     effectiveModelSubstitutions,
-    healthUntilFlee,
     modelKey,
     planPs2Models,
     ps2ModelSwapFromEdits,
@@ -136,38 +135,15 @@ describe('OotfAssetBuilder.useNativeModel', () => {
     });
 });
 
-describe('health of a swapped enemy whose Drakan 2 class never flees', () => {
-    it('only the Scavenger row asks for it, and only while the row is on with the disc clips', () => {
-        const plan = planPs2Models();
-        expect(plan.enemyHealthUntilFlee('Scavenger')).toBe(true);
-        expect(plan.enemyHealthUntilFlee(' scavenger')).toBe(true);
-        expect(plan.enemyHealthUntilFlee('Spider')).toBe(false);
-        expect(plan.enemyHealthUntilFlee('Troll Leather')).toBe(false);
-        expect(planPs2Models({ off: ['Scavenger'] }).enemyHealthUntilFlee('Scavenger')).toBe(false);
-        expect(planPs2Models({ enemyAnimations: 'ootf' }).enemyHealthUntilFlee('Scavenger')).toBe(false);
-        expect(planPs2Models({ enabled: false }).enemyHealthUntilFlee('Scavenger')).toBe(false);
-        for (const r of DEFAULT_PS2_MODEL_SUBSTITUTIONS)
-            if (r.healthUntilFlee) expect(r.category === 'enemies' && !r.scene).toBe(true);
-    });
-
-    it('is the damage the PC creature takes before it runs', () => {
-        expect(healthUntilFlee(35, 20)).toBe(15);
-        expect(healthUntilFlee(45, 20)).toBe(25);
-        expect(healthUntilFlee(35.4, 20)).toBe(15);
-    });
-
-    it('leaves the disc health alone when the PC creature does not flee or the values make no sense', () => {
-        expect(healthUntilFlee(35, 0)).toBeNull();
-        expect(healthUntilFlee(35, -5)).toBeNull();
-        expect(healthUntilFlee(20, 20)).toBeNull();
-        expect(healthUntilFlee(10, 20)).toBeNull();
-        expect(healthUntilFlee(undefined, 20)).toBeNull();
-        expect(healthUntilFlee(35, [20])).toBeNull();
-        expect(healthUntilFlee(Number.NaN, 20)).toBeNull();
-    });
-});
-
 describe('Order of the Flame values a swapped enemy keeps', () => {
+    it('retains the Scavenger starting health while using the disc creature', () => {
+        const plan = planPs2Models();
+        expect(plan.enemy('Scavenger')).toBe('drakan2');
+        expect(plan.enemyTarget('Scavenger')).toBe('Scavenger');
+        expect(plan.enemyPcFields('Scavenger')).toEqual(['Initial Health']);
+        expect(planPs2Models({ off: ['Scavenger'] }).enemyPcFields('Scavenger')).toEqual([]);
+    });
+
     it('the dragons keep their hit points, the Ice Dragon also how far and wide it sees', () => {
         const plan = planPs2Models();
         expect(plan.enemyPcFields('Crimson Dragon')).toEqual(['Initial Health']);

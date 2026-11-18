@@ -301,6 +301,7 @@ export const DEFAULT_PS2_TERRAIN_FAMILIES: readonly Ps2TerrainFamily[] = [
             363,
             364,
             365,
+            ...range(372, 374),
             408,
         ],
         ps2: 537,
@@ -395,6 +396,13 @@ export const DEFAULT_PS2_TERRAIN_FAMILIES: readonly Ps2TerrainFamily[] = [
         ],
         ps2: 13719,
         why: 'Drakan 2 "Mud" (Ravenshold, Andrellian), dark wet earth of nearly the same colour as the OotF paths.',
+    },
+    {
+        label: 'Scorched earth (Mountain World)',
+        container: MW_TD,
+        ids: [...range(367, 371), 375],
+        ps2: 13719,
+        why: 'Drakan 2 "Mud" gives the burned patches a dark soil surface with a blended edge. The grass-majority scorch edges join the surrounding grass.',
     },
     {
         label: 'Rocky paths in snow (Mountain World)',

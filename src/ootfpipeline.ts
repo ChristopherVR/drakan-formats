@@ -211,7 +211,6 @@ import {
     classCompanionRef,
     discModelMismatch,
     effectiveModelSubstitutions,
-    healthUntilFlee,
     modelKey,
     planPs2Models,
     type Ps2ModelSubstitution,
@@ -1458,8 +1457,12 @@ export async function convertOotfLevels(
     }
     /** Static models appended to a template ODB's own MOD / TXD (no skinned models), by ODB stem. */
     const crossBuilders = new Map<string, OotfAssetBuilder>();
-    const sig = (c: OdbClass): string =>
-        `${c.name}|${c.rflClass}|${(c.data ?? []).join(',')}|${classDefaultReferences(c).length ? (ownerOf.get(c) ?? '') : ''}`;
+    const sig = (c: OdbClass): string => {
+        const owner = ownerOf.get(c) ?? '';
+        const refOwner = classDefaultReferences(c).length ? owner : '';
+        const treeModel = c.model && isGroundableTree(c, 0) ? builder.mapModelRef(c.model.db, c.model.id, owner) : null;
+        return `${c.name}|${c.rflClass}|${(c.data ?? []).join(',')}|${refOwner}|${treeModel ?? ''}`;
+    };
     const planKey = new Map<string, { db: number; id: number }>();
     let plan: ClassPlan | null = null;
     let ps2Odbs: Ps2OdbIn[] = [];
@@ -1473,7 +1476,7 @@ export async function convertOotfLevels(
             }
             const input: PcClassIn[] = [];
             // One plan for all levels: the plan keys classes by (db, id), which differ per level, so each distinct
-            // class (name, engine id, defaults) gets a unique pseudo db.
+            // class gets a unique pseudo db. Tree classes with the same defaults can show different models (pines and palms).
             for (const u of used.values()) {
                 const k = sig(u.cls);
                 if (planKey.has(k)) continue;
@@ -4421,20 +4424,16 @@ export async function convertOotfLevels(
             if (shown) res.warnings.push(`${pc.path}: ${shown} hidden creature(s) nothing links to made visible`);
         }
         {
-            // An enemy played by a Drakan 2 class that never flees (ootfps2model.ts `healthUntilFlee`: the Scavenger) gets the hit
-            // points its Order of the Flame class loses before it runs away, as an object parameter; an enemy row's `pcFields`
-            // (a dragon's hit points) take the PC value. The object's own PC values count before the PC class defaults; a
-            // creature placed dead keeps its health.
+            // An enemy row's pcFields retain their PC values even when a Drakan 2 class plays the creature. The
+            // object's own values take precedence over the PC class defaults.
             const pcById = new Map(pc.list.objects.map((x) => [x.id, x]));
-            let fled = 0;
             const kept = new Map<string, number>();
             for (const o of parts.objects.objects) {
                 const src = pcById.get(o.id);
                 const pcCls = src ? pc.classes.get(src.dbIndex)?.get(src.classId) : undefined;
                 if (!src || !pcCls) continue;
-                const untilFlee = modelSwap.enemyHealthUntilFlee(pcCls.name);
                 const pcFields = modelSwap.enemyPcFields(pcCls.name);
-                if (!untilFlee && !pcFields.length) continue;
+                if (!pcFields.length) continue;
                 const ps2Cls = classes.get(o.dbIndex)?.get(o.classId);
                 if (!ps2Cls?.fields || modelKey(ps2Cls.name) !== modelKey(modelSwap.enemyTarget(pcCls.name) ?? ''))
                     continue;
@@ -4453,8 +4452,6 @@ export async function convertOotfLevels(
                     if (typeof v === 'number' && Number.isFinite(v) && !(dead && name === 'Initial Health'))
                         values.set(name, v);
                 }
-                const health = untilFlee && !dead ? healthUntilFlee(pcHealth, pcValue('Flee Health Limit')) : null;
-                if (health !== null) values.set('Initial Health', health);
                 const specs = objectParamSpecs(o);
                 let changed = false;
                 for (const [name, value] of values) {
@@ -4467,13 +4464,8 @@ export async function convertOotfLevels(
                 }
                 if (!changed) continue;
                 setObjectParams(parts.objects, o.id, specs);
-                if (health !== null) fled++;
-                else kept.set(pcCls.name.trim(), (kept.get(pcCls.name.trim()) ?? 0) + 1);
+                kept.set(pcCls.name.trim(), (kept.get(pcCls.name.trim()) ?? 0) + 1);
             }
-            if (fled)
-                res.warnings.push(
-                    `${pc.path}: ${fled} creature(s) of a Drakan 2 class that never flees got the health until the PC one flees`,
-                );
             if (kept.size)
                 res.warnings.push(
                     `${pc.path}: swapped creatures kept Order of the Flame values: ${[...kept].map(([n, c]) => `${n} x${c}`).join(', ')}`,

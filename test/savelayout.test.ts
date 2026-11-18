@@ -231,4 +231,37 @@ describe('save layout', () => {
         const c = await packSaveLayout(files([object(5, 101)]));
         expect(compareSaveLayouts(a, c).changed).toEqual(['obj|files/english/levels/l/l.lvl|5: 3:100 -> 3:101']);
     });
+
+    it('allows a class split at a sparse database slot when old records still have their original class', async () => {
+        const files = (classId: number, alternate: Uint8Array, database = 3) => {
+            const level = header(['System', 'FX', 'Sounds', 'Magic']);
+            level.dependencies[0]!.dbIndex = 2;
+            level.dependencies[1]!.dbIndex = database;
+            level.dependencies[2]!.dbIndex = 13;
+            level.dependencies[3]!.dbIndex = 6;
+            return {
+                'files/level.lvl': buildSrsc([
+                    { type: 0, id: 0, sub: 0, data: writeLevelHeader(level) },
+                    {
+                        type: 0x20,
+                        id: 0,
+                        sub: 0,
+                        data: writeObjectList({ objects: [object(5, classId)], warnings: [] }),
+                    },
+                ]),
+                'new/FX.ODB/0102_100_5.bin': record('Tree', 17),
+                ...(classId !== 100 ? { 'new/FX.ODB/0102_101_5.bin': alternate } : {}),
+            };
+        };
+        const original = record('Tree', 17);
+        const old = await packSaveLayout(files(100, original));
+        const split = await packSaveLayout(files(101, original));
+        expect(compareSaveLayouts(old, split)).toMatchObject({ compatible: true, added: 1 });
+        const differentClass = await packSaveLayout(files(101, record('Door', 17)));
+        expect(compareSaveLayouts(old, differentClass).compatible).toBe(false);
+        const changedSlot = await packSaveLayout(files(100, original, 9));
+        expect(compareSaveLayouts(old, changedSlot).changed).toEqual(['deps|files/level.lvl: database IDs changed']);
+        split.delete('class|FX.ODB|100');
+        expect(compareSaveLayouts(old, split).compatible).toBe(false);
+    });
 });

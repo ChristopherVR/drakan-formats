@@ -19,12 +19,14 @@
  */
 import { SrscReader } from './srsc.ts';
 import { readLvl } from './lvl.ts';
-import { parseClassBody, parseOdbClasses } from './odb.ts';
+import { odbStemForDependency, parseClassBody, parseOdbClasses } from './odb.ts';
 import { splitClassRecord } from './odbwrite.ts';
 import { crc32 } from './packbuild.ts';
 
 /** Key -> signature. Keys: `class|<ODB file>|<id>`, `deps|<level path>`, `obj|<level path>|<uid>`, `entry|<path>`. */
-export type SaveLayout = Map<string, string>;
+export type SaveLayout = Map<string, string> & {
+    readonly databases?: ReadonlyMap<string, ReadonlyMap<number, string>>;
+};
 
 const upper = (s: string): string => s.replace(/[a-z]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 32));
 const lower = (s: string): string => s.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32));
@@ -47,7 +49,8 @@ export function classSignature(record: Uint8Array): string | null {
 
 /** The save layout of a pack's files (keyed by path inside the pack, as zipped). */
 export async function packSaveLayout(files: Readonly<Record<string, Uint8Array>>): Promise<SaveLayout> {
-    const out: SaveLayout = new Map();
+    const databases = new Map<string, ReadonlyMap<number, string>>();
+    const out = Object.assign(new Map<string, string>(), { databases });
     for (const path of Object.keys(files).sort()) {
         const data = files[path]!;
         const p = norm(path);
@@ -72,6 +75,7 @@ export async function packSaveLayout(files: Readonly<Record<string, Uint8Array>>
             const level = lower(p);
             const lvl = await readLvl(await SrscReader.fromBytes(data));
             out.set(`deps|${level}`, lvl.header.dependencies.map((d) => d.path.text).join('\n'));
+            databases.set(level, new Map(lvl.header.dependencies.map((d) => [d.dbIndex, d.path.text])));
             for (const o of lvl.list.objects) out.set(`obj|${level}|${o.id}`, `${o.dbIndex}:${o.classId}`);
         }
     }
@@ -103,13 +107,56 @@ export interface SaveLayoutDiff {
     added: number;
 }
 
+function canRecreateObject(
+    previous: SaveLayout,
+    next: SaveLayout,
+    key: string,
+    before: string,
+    after: string,
+): boolean {
+    if (!key.startsWith('obj|')) return false;
+    const [, level = ''] = key.split('|');
+    const depsKey = `deps|${level}`;
+    const deps = previous.get(depsKey);
+    if (!deps || deps !== next.get(depsKey)) return false;
+    const [oldDb, oldId] = before.split(':');
+    const [newDb, newId] = after.split(':');
+    if (oldDb !== newDb) return false;
+    const dependency = previous.databases?.get(level)?.get(Number(oldDb));
+    if (!dependency || dependency !== next.databases?.get(level)?.get(Number(newDb))) return false;
+    const odb = odbStemForDependency(dependency);
+    const oldClass = `class|${odb}.ODB|${oldId}`;
+    const newClass = `class|${odb}.ODB|${newId}`;
+    // Untouched objects restore by UID. Written records can still use their original class after a model split.
+    const signature = previous.get(oldClass);
+    return (
+        signature !== undefined &&
+        !signature.startsWith('raw ') &&
+        signature === next.get(oldClass) &&
+        signature === next.get(newClass)
+    );
+}
+
+function databaseSlotsChanged(previous: SaveLayout, next: SaveLayout, key: string): boolean {
+    if (!key.startsWith('deps|')) return false;
+    const level = key.slice('deps|'.length);
+    const before = previous.databases?.get(level);
+    const after = next.databases?.get(level);
+    return (
+        !!before &&
+        !!after &&
+        (before.size !== after.size || Array.from(before).some(([index, name]) => name !== after.get(index)))
+    );
+}
+
 export function compareSaveLayouts(previous: SaveLayout, next: SaveLayout): SaveLayoutDiff {
     const changed: string[] = [];
     const removed: string[] = [];
     for (const [k, v] of previous) {
         const n = next.get(k);
         if (n === undefined) removed.push(k);
-        else if (n !== v) changed.push(`${k}: ${v} -> ${n}`);
+        else if (n !== v && !canRecreateObject(previous, next, k, v, n)) changed.push(`${k}: ${v} -> ${n}`);
+        else if (databaseSlotsChanged(previous, next, k)) changed.push(`${k}: database IDs changed`);
     }
     let added = 0;
     for (const k of next.keys()) if (!previous.has(k)) added++;
