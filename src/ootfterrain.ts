@@ -14,7 +14,7 @@ import { type OdbClass, classFieldDefault } from './odb.ts';
 import { type PcFileSource, type PcLevel, parsePcOdbClasses, resolvePcPath } from './pc.ts';
 import { SrscReader } from './srsc.ts';
 import { CELL_SIZE, TEX_HOLE, TEX_INVISIBLE, type TerrainLayer } from './terrain.ts';
-import { LAYER_TYPE_WATER } from './convert.ts';
+import { LAYER_TYPE_WATER, pcTerrainCellRef } from './convert.ts';
 import { TXD_ENTRY_TYPE, decodeTxd } from './txd.ts';
 import { planTerrainSlots } from './terrainblob.ts';
 import type { LvlHeader } from './lvl.ts';
@@ -334,7 +334,8 @@ export class TerrainTextureBuilder {
         const waterUses = new Map<number, number>();
         for (const L of pc.terrain) {
             const m = L.type === LAYER_TYPE_WATER ? waterUses : uses;
-            for (const r of L.cellTexLeft) {
+            for (let c = 0; c < L.cellTexLeft.length; c++) {
+                const r = pcTerrainCellRef(L, c);
                 if (r !== TEX_HOLE && r !== TEX_INVISIBLE) m.set(r, (m.get(r) ?? 0) + 1);
             }
         }
@@ -429,7 +430,7 @@ export class TerrainTextureBuilder {
             for (const L of pc.terrain) {
                 if (L.type === LAYER_TYPE_WATER || !L.heights) continue;
                 for (let c = 0; c < L.width * L.height; c++) {
-                    const r = L.cellTexLeft[c]!;
+                    const r = pcTerrainCellRef(L, c);
                     if (want.has(r) && cellGradient(L, c) >= steepGradient)
                         steepCount.set(r, (steepCount.get(r) ?? 0) + 1);
                 }

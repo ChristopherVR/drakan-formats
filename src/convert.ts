@@ -541,11 +541,7 @@ function convertLayer(
     for (let c = 0; c < nc; c++) {
         const l = L.cellTexLeft[c]!;
         const r = L.cellTexRight[c]!;
-        // PS2 keeps one ref per cell: the PC left triangle decides (a hole in only one triangle keeps the hole). A water layer
-        // keeps the water instead: the PC cell is water in one half (shore cells on a diagonal), and turning it into a hole
-        // left stair-stepped gaps in pools and streams (418 cells in Ruined Village); the hole cell is also drawn by the water pass.
-        const half = (l === TEX_HOLE) !== (r === TEX_HOLE);
-        const ref = L.type === LAYER_TYPE_WATER ? (half ? (l === TEX_HOLE ? r : l) : l) : ps2CellRef(l, r);
+        const ref = pcTerrainCellRef(L, c);
         if (L.type !== LAYER_TYPE_WATER) triangleBits[c] = ps2TriangleBits(l, r);
         if (ref === TEX_HOLE || ref === TEX_INVISIBLE) {
             cellTexLeft[c] = ref;
@@ -749,6 +745,14 @@ export function ps2CellRef(left: number, right: number): number {
     if (!isHoleRef(left)) return left;
     if (!isHoleRef(right)) return right;
     return left === TEX_HOLE && right === TEX_HOLE ? TEX_HOLE : TEX_INVISIBLE;
+}
+
+/** The source material needed for a converted cell. Shore cells with one hole keep the other half's water. */
+export function pcTerrainCellRef(layer: TerrainLayer, cell: number): number {
+    const left = layer.cellTexLeft[cell]!;
+    const right = layer.cellTexRight[cell]!;
+    if (layer.type === LAYER_TYPE_WATER) return left === TEX_HOLE ? right : left;
+    return ps2CellRef(left, right);
 }
 
 /**

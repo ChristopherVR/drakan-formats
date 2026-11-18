@@ -1,4 +1,5 @@
 import { strToU8 } from 'fflate';
+import { pcTerrainCellRef } from './convert.ts';
 import { type ModelTextureRef, ModelError, MOD_BOUNDS, MOD_CHARACTER } from './model.ts';
 import {
     type Skeleton,
@@ -576,7 +577,12 @@ export class OotfAssetBuilder {
     /** Add every texture a level's terrain uses, so `mapTexture` can answer synchronously. */
     async prepareLevelTextures(pc: PcLevel): Promise<void> {
         const refs = new Set<number>();
-        for (const L of pc.terrain) for (const r of L.cellTexLeft) if (r < 0xfffffffe) refs.add(r);
+        for (const layer of pc.terrain) {
+            for (let c = 0; c < layer.cellTexLeft.length; c++) {
+                const ref = pcTerrainCellRef(layer, c);
+                if (ref < 0xfffffffe) refs.add(ref);
+            }
+        }
         for (const r of refs) {
             const c = this.levelContainer(r >>> 16, pc);
             const t = c ? await this.addTexture(c, r & 0xffff) : null;

@@ -48,7 +48,12 @@ describe('terrain textures', () => {
     const pc = {
         path: 'Lvl/Lvl.lvl',
         header: { dependencies: [{ dbIndex: 24, path: { text: 'Lvl_splats' } }] },
-        terrain: [{ cellTexLeft: new Uint32Array([5, 6, 6, 7, 0xffffffff, 0xfffffffe, 99]) }],
+        terrain: [
+            {
+                cellTexLeft: new Uint32Array([5, 6, 6, 0xffffffff, 0xffffffff, 0xfffffffe, 99]),
+                cellTexRight: new Uint32Array([5, 6, 6, 7, 0xffffffff, 0xfffffffe, 99]),
+            },
+        ],
     } as unknown as PcLevel;
     const base = buildPs2Txd([
         { id: 3, body: encodePs2Texture({ width: 8, height: 8, rgba: new Uint8Array(256).fill(255) }).body },
@@ -144,7 +149,8 @@ describe('terrain textures', () => {
             width: 3,
             height: 1,
             heights: Float32Array.from([...row, ...row]),
-            cellTexLeft: new Uint32Array([6, 6, 6]),
+            cellTexLeft: new Uint32Array([6, 6, 0xfffffffe]),
+            cellTexRight: new Uint32Array([6, 6, 6]),
         } as unknown as TerrainLayer;
         expect(cellGradient(L, 0)).toBeCloseTo(0);
         expect(cellGradient(L, 2)).toBeCloseTo(Math.sqrt(3));
@@ -397,8 +403,16 @@ describe('liquid terrain textures', () => {
         read: async (p) => ({ 'lvl/lvl.txd': pcTxd, 'lvl/lvl.odb': pcOdb })[p.toLowerCase()] ?? null,
         list: async () => [],
     };
-    const water = { type: 2, cellTexLeft: new Uint32Array([5, 6, 7, 5]) } as unknown as TerrainLayer;
-    const floor = { type: 0, cellTexLeft: new Uint32Array([7, 5]) } as unknown as TerrainLayer;
+    const water = {
+        type: 2,
+        cellTexLeft: new Uint32Array([5, 0xffffffff, 7, 5]),
+        cellTexRight: new Uint32Array([5, 6, 7, 5]),
+    } as unknown as TerrainLayer;
+    const floor = {
+        type: 0,
+        cellTexLeft: new Uint32Array([7, 5]),
+        cellTexRight: new Uint32Array([7, 5]),
+    } as unknown as TerrainLayer;
     const pc = { path: 'Lvl/Lvl.lvl', header: { dependencies: [] }, terrain: [water, floor] } as unknown as PcLevel;
     const opaque = { width: 8, height: 8, rgba: new Uint8Array(256).fill(255) };
     const base = buildPs2Txd(

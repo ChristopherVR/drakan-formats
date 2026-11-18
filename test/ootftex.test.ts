@@ -1128,7 +1128,12 @@ describe('containers and the asset builder', () => {
         const pc = {
             path: 'Lvl/Lvl.lvl',
             header: { dependencies: [{ dbIndex: 1, path: { text: '..\\Common\\C\\C' } }] },
-            terrain: [{ cellTexLeft: new Uint32Array([3, (1 << 16) | 8, 0xffffffff, 0xfffffffe, (1 << 16) | 77]) }],
+            terrain: [
+                {
+                    cellTexLeft: new Uint32Array([3, 0xfffffffe, 0xffffffff, 0xfffffffe, (1 << 16) | 77]),
+                    cellTexRight: new Uint32Array([3, (1 << 16) | 8, 0xffffffff, 0xfffffffe, (1 << 16) | 77]),
+                },
+            ],
         } as unknown as PcLevel;
         await b.prepareLevelTextures(pc);
         expect(b.mapTexture(3, pc)).toBe(1); // db 0: the level's own TXD
