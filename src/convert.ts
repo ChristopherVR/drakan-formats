@@ -210,6 +210,7 @@ export interface Ps2LevelParts {
     header: LvlHeader;
     objects: LvlObjectList;
     terrain: TerrainLayer[];
+    terrainTextureUnderlays?: ReadonlyMap<number, number>;
     report: ConversionReport;
 }
 
@@ -1203,7 +1204,11 @@ export function ps2VertexMask(w: number, h: number, cellTextures?: ArrayLike<num
 // ---------------------------------------------------------------- PS2 serialisation
 
 /** `all` is the whole layer list (for builders that assign groups and slots across layers). */
-export type BlobBuilder = (layer: TerrainLayer, all?: readonly TerrainLayer[]) => Uint8Array;
+export type BlobBuilder = (
+    layer: TerrainLayer,
+    all?: readonly TerrainLayer[],
+    textureUnderlays?: ReadonlyMap<number, number>,
+) => Uint8Array;
 
 function layerDef(L: TerrainLayer): Uint8Array {
     const name = encodeString(L.name);
@@ -1253,13 +1258,17 @@ export function ps2TerrainBlock(L: TerrainLayer): Uint8Array {
 }
 
 /** LVL 0x0001 payload in the PS2 layout (definition + inline blob per layer, `u32 1`, zlib block per layer). */
-export function writePs2Terrain(layers: readonly TerrainLayer[], blob: BlobBuilder): Uint8Array {
+export function writePs2Terrain(
+    layers: readonly TerrainLayer[],
+    blob: BlobBuilder,
+    textureUnderlays?: ReadonlyMap<number, number>,
+): Uint8Array {
     const parts: Uint8Array[] = [];
     const head = new Uint8Array(4);
     view(head).setUint32(0, layers.length, true);
     parts.push(head);
     for (const L of layers) {
-        parts.push(layerDef(L), blob(L, layers));
+        parts.push(layerDef(L), blob(L, layers, textureUnderlays));
     }
     const one = new Uint8Array(4);
     view(one).setUint32(0, 1, true);
@@ -1311,7 +1320,7 @@ export async function buildPs2Lvl(template: SrscReader, parts: Ps2LevelParts, bl
     };
     const replace = new Map<number, Uint8Array>([
         [slot(LVL_TYPE_HEADER), writeLevelHeader(parts.header)],
-        [slot(LVL_TYPE_LAYERS), writePs2Terrain(parts.terrain, blob)],
+        [slot(LVL_TYPE_LAYERS), writePs2Terrain(parts.terrain, blob, parts.terrainTextureUnderlays)],
         [slot(LVL_TYPE_GROUPS), writeLayerGroups(parts.terrain)],
         [slot(LVL_TYPE_OBJECTS), writeObjectList(parts.objects)],
     ]);
@@ -1388,7 +1397,7 @@ let warnedReducedChunks = false;
 export const ps2BlobBuilder = (levelTag: number): BlobBuilder => {
     const plans = new WeakMap<readonly TerrainLayer[], Map<number, TerrainSlot>>();
     const grounds = new WeakMap<readonly TerrainLayer[], ReturnType<typeof groundBeyond>>();
-    return (L, all) => {
+    return (L, all, textureUnderlays) => {
         const list = all ?? [L];
         let plan = plans.get(list);
         if (!plan) plans.set(list, (plan = planTerrainSlots(list)));
@@ -1404,6 +1413,7 @@ export const ps2BlobBuilder = (levelTag: number): BlobBuilder => {
             maxChunkTextures: chunkTextureLimit(),
             noDrawData: L.type === LAYER_TYPE_WATER,
             heightBeyond: L.type === LAYER_TYPE_WATER ? undefined : ground,
+            textureUnderlays,
         });
         if (stats.reducedChunks > 0 && !warnedReducedChunks) {
             warnedReducedChunks = true;

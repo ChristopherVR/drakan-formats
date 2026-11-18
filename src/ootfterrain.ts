@@ -13,7 +13,7 @@ import { view } from './bytes.ts';
 import { type OdbClass, classFieldDefault } from './odb.ts';
 import { type PcFileSource, type PcLevel, parsePcOdbClasses, resolvePcPath } from './pc.ts';
 import { SrscReader } from './srsc.ts';
-import { CELL_SIZE, TEX_HOLE, TEX_INVISIBLE, type TerrainLayer } from './terrain.ts';
+import { CELL_FLAG_BACKSLASH, CELL_SIZE, TEX_HOLE, TEX_INVISIBLE, type TerrainLayer } from './terrain.ts';
 import { LAYER_TYPE_WATER, pcTerrainCellRef } from './convert.ts';
 import { TXD_ENTRY_TYPE, decodeTxd } from './txd.ts';
 import { planTerrainSlots } from './terrainblob.ts';
@@ -113,8 +113,11 @@ export const NATIVE_STEEP_KEEP: ReadonlySet<number> = new Set([621, 535]);
 /** Default steep gradient: a cell rising 0.84 cell widths per cell width (40 degrees) is a mountain face. */
 export const STEEP_GRADIENT = 0.84;
 
-/** Gradient (rise over run) of a terrain cell from its four corner heights. */
-export function cellGradient(L: TerrainLayer, cell: number): number {
+/** Greatest gradient (rise over run) among the cell's visible triangles. */
+export function cellGradient(
+    L: Pick<TerrainLayer, 'width' | 'heights' | 'cellFlags' | 'cellTexLeft' | 'cellTexRight'>,
+    cell: number,
+): number {
     const cx = cell % L.width;
     const cz = Math.floor(cell / L.width);
     const st = L.width + 1;
@@ -122,9 +125,13 @@ export function cellGradient(L: TerrainLayer, cell: number): number {
     const b = L.heights[cz * st + cx + 1]!;
     const c = L.heights[(cz + 1) * st + cx]!;
     const d = L.heights[(cz + 1) * st + cx + 1]!;
-    const gx = (b - a + (d - c)) / 2 / CELL_SIZE;
-    const gz = (c - a + (d - b)) / 2 / CELL_SIZE;
-    return Math.hypot(gx, gz);
+    const backslash = (L.cellFlags[cell]! & CELL_FLAG_BACKSLASH) !== 0;
+    const left = backslash ? Math.hypot(d - c, c - a) : Math.hypot(b - a, c - a);
+    const right = backslash ? Math.hypot(b - a, d - b) : Math.hypot(d - c, d - b);
+    return (
+        Math.max(L.cellTexLeft[cell]! < TEX_INVISIBLE ? left : 0, L.cellTexRight[cell]! < TEX_INVISIBLE ? right : 0) /
+        CELL_SIZE
+    );
 }
 
 /** Per-cell texture choice on top of the per-texture map: a ref for this cell, or undefined for the texture's own. */
@@ -324,9 +331,12 @@ export class TerrainTextureBuilder {
      * Convert every texture the level's terrain uses (most used first). Returns the synchronous `mapTexture` for
      * `ConvertOptions.mapTexture` (PC ref -> `db << 16 | id`, null when the texture could not be converted).
      */
-    async addLevel(
-        pc: PcLevel,
-    ): Promise<((pcRef: number, pc: PcLevel, layer?: TerrainLayer) => number | null) & { cell?: TerrainCellMap }> {
+    async addLevel(pc: PcLevel): Promise<
+        ((pcRef: number, pc: PcLevel, layer?: TerrainLayer) => number | null) & {
+            cell?: TerrainCellMap;
+            steepUnderlays?: ReadonlyMap<number, number>;
+        }
+    > {
         const opt = this.opt;
         const maxTextures = opt.maxTextures ?? env('DRAKAN_TERRAIN_TEX_COUNT') ?? Infinity;
         const maxSize = opt.maxSize ?? env('DRAKAN_TERRAIN_TEX_MAX') ?? 256;
@@ -364,6 +374,7 @@ export class TerrainTextureBuilder {
         /** Native refs of a steep-keep family: their OotF texture is converted too, for the steep cells. */
         const steepRefs: number[] = [];
         const steepLevel = new Map<number, number>();
+        const steepUnderlays = new Map<number, number>();
         const colors: { ref: number; mean: [number, number, number]; made: boolean }[] = [];
         let made = 0;
         for (const ref of order) {
@@ -468,7 +479,9 @@ export class TerrainTextureBuilder {
                 this.report.bytes += tex.body.length;
                 this.report.steepTextures = (this.report.steepTextures ?? 0) + 1;
             }
-            steepLevel.set(ref, ((this.db << 16) | id) >>> 0);
+            const steepRef = ((this.db << 16) | id) >>> 0;
+            steepLevel.set(ref, steepRef);
+            steepUnderlays.set(steepRef, level.get(ref)!);
         }
         // Reduction: textures past the cap take the nearest converted one of this level by mean colour.
         const have = colors.filter((d) => d.made);
@@ -496,7 +509,7 @@ export class TerrainTextureBuilder {
             const k = layer.type === LAYER_TYPE_WATER ? undefined : steepLevel.get(ref);
             return k === undefined || cellGradient(layer, c) < steepGradient ? undefined : k;
         };
-        return Object.assign(map, { cell });
+        return Object.assign(map, { cell, steepUnderlays });
     }
 
     /**

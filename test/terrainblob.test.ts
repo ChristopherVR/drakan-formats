@@ -1,6 +1,6 @@
 // Synthetic layers only; no game bytes.
 import { describe, expect, it } from 'vitest';
-import { TEX_HOLE, TEX_INVISIBLE } from '../src/terrain.ts';
+import { TEX_HOLE, TEX_INVISIBLE, splitPs2Terrain } from '../src/terrain.ts';
 import { readPs2Blob, writePs2Blob } from '../src/terrainwrite.ts';
 import type { TerrainLayer } from '../src/terrain.ts';
 import {
@@ -74,6 +74,22 @@ describe('ps2ChunkSplit', () => {
 });
 
 describe('buildPs2TerrainBlob', () => {
+    it('draws native rock under its restored texture without reordering the remaining passes', () => {
+        const refs = [101, 7, 102, 621, 103, 535, 104];
+        const L = layer(refs.length, 1, LAYER_FLAG_FLAT, (x) => refs[x]!);
+        const natural = readPs2Blob(buildPs2TerrainBlob(L)).chunks[0]!;
+        const underlays = new Map([
+            [101, 621],
+            [102, 535],
+            [103, 536],
+        ]);
+        const payload = writePs2Terrain([L], ps2BlobBuilder(0x18), underlays);
+        const { defEnd, blobEnd } = splitPs2Terrain(payload).layers[0]!;
+        const ordered = readPs2Blob(payload.subarray(defEnd, blobEnd)).chunks[0]!;
+        expect(ordered.refs).toEqual([621, 101, 7, 535, 102, 103, 104]);
+        expect(ordered.arrays).toEqual(ordered.refs.map((ref) => natural.arrays[natural.refs.indexOf(ref)]));
+    });
+
     it('writes the flat single-chunk layout', () => {
         const L = layer(4, 5, LAYER_FLAG_FLAT, () => 0x90219);
         const b = buildPs2TerrainBlob(L, { seq: 1, levelTag: 0x0c });

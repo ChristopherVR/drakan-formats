@@ -53,6 +53,8 @@ export interface TerrainBlobOptions {
     levelTag?: number;
     /** Sort key for the texture list of a chunk. The real order is a per-texture property that is not in the layer. */
     textureOrder?: (ref: number) => number;
+    /** A restored steep rock texture's native counterpart draws before it when both are present in a chunk. */
+    textureUnderlays?: ReadonlyMap<number, number>;
     /**
      * How cells outside the layer count toward a border vertex. `any` = they match every texture (what isolated layers
      * show), `none` = they never match (what flat layers show). Default: `none` for flat layers, `any` otherwise.
@@ -220,6 +222,16 @@ export function buildPs2TerrainBlob(layer: TerrainLayer, opts: TerrainBlobOption
             let refs = keptRefsOf(rect);
             const key = opts.textureOrder;
             if (key) refs = refs.sort((p, q) => key(p) - key(q));
+            if (opts.textureUnderlays) {
+                for (let i = 0; i < refs.length; i++) {
+                    const underlay = opts.textureUnderlays.get(refs[i]!);
+                    if (underlay === undefined) continue;
+                    const at = refs.indexOf(underlay, i + 1);
+                    if (at < 0) continue;
+                    refs.splice(at, 1);
+                    refs.splice(i, 0, underlay);
+                }
+            }
             const vw = x1 - x0 + 1;
             const vh = z1 - z0 + 1;
             o.u32(x0);

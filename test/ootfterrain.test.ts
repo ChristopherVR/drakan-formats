@@ -18,7 +18,7 @@ import {
     cellGradient,
 } from '../src/ootfterrain.ts';
 import { planTerrainSlots } from '../src/terrainblob.ts';
-import type { TerrainLayer } from '../src/terrain.ts';
+import { CELL_FLAG_BACKSLASH, CELL_SIZE, TEX_HOLE, TEX_INVISIBLE, type TerrainLayer } from '../src/terrain.ts';
 import type { PcFileSource, PcLevel } from '../src/pc.ts';
 
 const u32 = (n: number): number[] => [n & 255, (n >>> 8) & 255, (n >>> 16) & 255, (n >>> 24) & 255];
@@ -149,6 +149,7 @@ describe('terrain textures', () => {
             width: 3,
             height: 1,
             heights: Float32Array.from([...row, ...row]),
+            cellFlags: new Uint16Array(3),
             cellTexLeft: new Uint32Array([6, 6, 0xfffffffe]),
             cellTexRight: new Uint32Array([6, 6, 6]),
         } as unknown as TerrainLayer;
@@ -164,6 +165,7 @@ describe('terrain textures', () => {
         const steep = map.cell!(6, L, 2)!;
         expect(steep >>> 16).toBe(24);
         expect(steep & 0xffff).not.toBe(3);
+        expect(map.steepUnderlays).toEqual(new Map([[steep, (24 << 16) | 3]]));
         expect(b.report.steepCells).toBe(1);
         expect(b.report.steepTextures).toBe(1);
         // off with an empty set or gradient 0
@@ -171,6 +173,22 @@ describe('terrain textures', () => {
         expect((await off.addLevel(lvl)).cell).toBeUndefined();
         const off2 = await TerrainTextureBuilder.create(src, base, 24, { ...opts, steepGradient: 0 });
         expect((await off2.addLevel(lvl)).cell).toBeUndefined();
+    });
+
+    it.each([
+        [0, 6, Math.SQRT2 * 0.7],
+        [CELL_FLAG_BACKSLASH, 6, 0.7],
+        [0, TEX_HOLE, 0],
+        [0, TEX_INVISIBLE, 0],
+    ])('checks each visible triangle’s slope (flags %i, right texture %i)', (flags, right, gradient) => {
+        const cell = {
+            width: 1,
+            heights: new Float32Array([0, 0, 0, 0.7 * CELL_SIZE]),
+            cellFlags: new Uint16Array([flags]),
+            cellTexLeft: new Uint32Array([6]),
+            cellTexRight: new Uint32Array([right]),
+        };
+        expect(cellGradient(cell, 0)).toBeCloseTo(gradient);
     });
 
     /** Proc Textures style 32 bpp record: 4 x 4, header +16 alpha selector, +37 feature byte, +40 material. */

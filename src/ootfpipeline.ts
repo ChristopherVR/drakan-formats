@@ -4762,6 +4762,7 @@ export async function convertOotfLevels(
             ] ?? 0,
         );
         if (lf) parts.terrain = parts.terrain.map((L) => ({ ...L, flags: L.flags | lf }));
+        if (!opt.terrainDiscTextures && procMap?.steepUnderlays) parts.terrainTextureUnderlays = procMap.steepUnderlays;
         res.levels.push({
             pcPath: pc.path,
             title,
