@@ -20,6 +20,8 @@ describe('native generic-prop draw requirements', () => {
                     target(35, { id: 42, db: 0 }), // a mechanism: native ones all carry the draw list
                     target(19, { id: 45, db: 0 }), // a door
                     target(29, { id: 47, db: 0 }), // a native pressure plate: the disc's two carry the draw list
+                    target(95, { id: 48, db: 0 }), // the arrow in flight
+                    target(39, { id: 49, db: 0 }), // the quiver in the inventory
                     target(60, { id: 46, db: 0 }), // an effect (weapon blur): native ones have none
                     target(14, { id: 43, db: 0 }), // no weapon-class extension
                     target(17, null),
@@ -28,11 +30,12 @@ describe('native generic-prop draw requirements', () => {
             },
             resolve,
         );
-        expect(local.requireDisplayList.mock.calls).toEqual([[40], [42], [45], [47]]);
+        expect(local.requireDisplayList.mock.calls).toEqual([[40], [42], [45], [47], [48]]);
         expect(host.requireDisplayList.mock.calls).toEqual([[41]]);
         expect(resolve.mock.calls).toEqual([
             ['RESOURES.ODB', 0],
             ['NPCS.ODB', 1],
+            ['RESOURES.ODB', 0],
             ['RESOURES.ODB', 0],
             ['RESOURES.ODB', 0],
             ['RESOURES.ODB', 0],

@@ -12,10 +12,12 @@ interface ModelDrawOwner {
  * crystal (117) has one. A converted model without it draws nothing while its collision stays: Ruined Village's doors, swing
  * blades, waterfall rocks, keys and locks were invisible obstacles (journal 2026-11-08/ootf-ruined-village-ambush-props.md),
  * and the native pressure plates of the campaign were invisible tiles over the holes the floor models leave for them
- * (2026-11-14/ootf-ruined-crystal-plates.md). Effect classes whose native models have no list (blurs 60, lightning 58,
- * explosions 134, arrows 39, detectors and sound boxes) are left alone.
+ * (2026-11-14/ootf-ruined-crystal-plates.md). All 32 projectile classes (95) using local RESOURES models on the disc
+ * also have a draw list. Their trail effects (60) generate their own polygons, and quivers (39) are separate items.
  */
-export const DRAWN_RIGID_RFL: ReadonlySet<number> = new Set([10, 13, 16, 17, 19, 20, 29, 33, 34, 35, 45, 57, 73, 117]);
+export const DRAWN_RIGID_RFL: ReadonlySet<number> = new Set([
+    10, 13, 16, 17, 19, 20, 29, 33, 34, 35, 45, 57, 73, 95, 117,
+]);
 
 /** Native drawn props need this representation regardless of the source class selected for their conversion. */
 export function requireGenericPropDrawLists(

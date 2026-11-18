@@ -662,6 +662,22 @@ export function pcToNeutral(pc: PcModel, opt: PcToPs2Options = {}): { model: Neu
     };
     const textures: ModelTextureRef[] = [];
     const slot = new Map<number, number>(); // PC texture index -> PS2 index
+    function textureSlot(index: number): number {
+        const known = slot.get(index);
+        if (known !== undefined) return known;
+        const src = pc.textures[index];
+        const mapped = src ? (opt.mapTexture ? opt.mapTexture(src) : src) : null;
+        const idx = mapped ? textures.length : -1;
+        if (mapped) {
+            textures.push(mapped);
+            const frames = opt.textureFrames?.(mapped) ?? 1;
+            for (let k = 1; k < frames; k++) textures.push({ id: mapped.id + k, db: mapped.db });
+        }
+        slot.set(index, idx);
+        return idx;
+    }
+    // The engine builds trail polygons at runtime from a point model's own texture list.
+    if (pc.polygons.length === 0) pc.textures.forEach((_, i) => textureSlot(i));
     const nv = pc.positions.length / 3;
     const polygons: NeutralPoly[] = [];
     // PC polygon index -> the indices of what it became (none when dropped, two for a split quad), for the bounds lists.
@@ -674,18 +690,7 @@ export function pcToNeutral(pc: PcModel, opt: PcToPs2Options = {}): { model: Neu
             stats.polygonsDropped++;
             continue;
         }
-        let idx = slot.get(p.texture);
-        if (idx === undefined) {
-            const src = pc.textures[p.texture];
-            const mapped = src ? (opt.mapTexture ? opt.mapTexture(src) : src) : null;
-            if (mapped) {
-                idx = textures.length;
-                textures.push(mapped);
-                const frames = opt.textureFrames?.(mapped) ?? 1;
-                for (let k = 1; k < frames; k++) textures.push({ id: mapped.id + k, db: mapped.db });
-            } else idx = -1;
-            slot.set(p.texture, idx);
-        }
+        const idx = textureSlot(p.texture);
         if (idx < 0 || p.indices.some((i) => i >= nv)) {
             stats.polygonsDropped++;
             continue;

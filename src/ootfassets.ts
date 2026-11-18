@@ -659,7 +659,7 @@ export class OotfAssetBuilder {
         const map = new Map<string, ModelTextureRef | null>();
         const used = new Set(pc.polygons.map((p) => p.texture));
         for (const [ti, t] of pc.textures.entries()) {
-            if (!used.has(ti)) continue; // unused list entries are not converted
+            if (pc.polygons.length && !used.has(ti)) continue;
             const tc = this.resolveContainer(container, t.db);
             const nid = tc ? await this.addTexture(tc, t.id, !!skin) : null;
             if (nid !== null) this.useTexture(nid, key);

@@ -554,6 +554,23 @@ describe('containers and the asset builder', () => {
         expect(b.report.textures.converted).toBe(1);
     });
 
+    it('packs the texture of a trail whose polygons are generated during play', async () => {
+        const trail = model(5, [[8, 1]], false, 0, undefined, false);
+        const b = new OotfAssetBuilder({
+            ...src,
+            read: async (p) => (p.toLowerCase() === 'lvl/lvl.mod' ? trail : src.read(p)),
+        });
+        const id = await b.addModel('Lvl/Lvl', 5);
+        expect(id).not.toBeNull();
+        const { files } = b.build('files', 'trail');
+        const mod = await SrscReader.fromBytes(files['files/TRAIL.MOD']!);
+        const m = (await parseModel(mod, id!))!;
+        expect(m.indices).toHaveLength(0);
+        expect(m.textures).toEqual([{ id: 1, db: 0 }]);
+        const txd = await SrscReader.fromBytes(files['files/TRAIL.TXD']!);
+        expect(txd.find(0x40, 1)).toBeDefined();
+    });
+
     it('keeps the polygons, draw list and collision of an invisible wall and writes its texture wholly transparent', async () => {
         // The PC "invisiblewall" (Volcanic's Arrow Detect Object 2366) is a box whose only texture is fully transparent; the
         // arrow must still hit it, so only the texture form changes (black box in game with an 8 bpp flags-word-0 texture).
