@@ -103,6 +103,31 @@ describe('ootfclass', () => {
         expect(m.coverage).toBeCloseTo(2 / 3);
     });
 
+    it('preserves crank activation separately from switch motion', () => {
+        const pc = cls(
+            1,
+            'Meat',
+            13,
+            [
+                [T_ENUM, 'Switch Type'],
+                [T_ENUM, 'Switch Type'],
+            ],
+            [2, 0],
+        );
+        const ps2 = cls(
+            2,
+            'Lever',
+            13,
+            [
+                [T_ENUM, 'Switch Type'],
+                [T_ENUM, 'Activate Switch Message'],
+                [T_ENUM, 'Switch Type'],
+            ],
+            [0, 1, 1],
+        );
+        expect(mergeDefaults(pc, ps2).data).toEqual([2, 1, 0]);
+    });
+
     it('appends string payloads instead of overwriting the old one', () => {
         const pc = cls(1, 'x', 62, [[T_STR, 'Debug Text']], [(3 << 16) | 1, ...stringToWords('longer text')]);
         const m = mergeDefaults(pc, ps2Timer);

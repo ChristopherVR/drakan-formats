@@ -712,6 +712,15 @@ export function mergeDefaults(
     const out = [...(tpl.data ?? [])];
     const byName = new Map<string, number>();
     tf.forEach((f, i) => byName.set(f.name, i));
+    // The first switch enum controls activation (including Crank = 2); the later "Switch Type" selects Rotate or Push.
+    const copyCrankMode =
+        pc.rflClass === 13 &&
+        tpl.rflClass === 13 &&
+        pc.data?.[0] === 2 &&
+        pf[0]?.name === 'Switch Type' &&
+        pf[0].type === FIELD_ENUM &&
+        tf[0]?.name === 'Switch Type' &&
+        tf[0].type === FIELD_ENUM;
     const copied: string[] = [];
     const skipped: string[] = [];
     let valueFields = 0;
@@ -724,7 +733,7 @@ export function mergeDefaults(
         const isClassRef = fieldBase(f.type) === 3;
         const value = isValueField(f.type);
         if (value) valueFields++;
-        const j = byName.get(f.name);
+        const j = copyCrankMode && i === 0 ? 0 : byName.get(f.name);
         const t = j === undefined ? undefined : tf[j];
         if (j === undefined || !t || !sameType(f.type, t.type)) {
             skipped.push(f.name);
