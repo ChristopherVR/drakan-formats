@@ -181,4 +181,47 @@ describe('ootfdragon', () => {
         // the ear has no partner: a single key, its bind rotation
         expect(out.tracks[3]!.keys).toHaveLength(1);
     });
+
+    it('keeps folded wing joints as far from the body as the source pose allows', () => {
+        const src = rig(
+            ['Dragon', 'Rwing', 'Rwing2'],
+            [-1, 0, 1],
+            [
+                [0, 0, 0],
+                [0.4, 0, 0],
+                [1, 0, 0],
+            ],
+        );
+        const dst = rig(
+            ['Arokh', 'Rwing_a', 'Rwing_b'],
+            [-1, 0, 1],
+            [
+                [0, 0, 0],
+                [0.2, 0, 0],
+                [1, 0, 0],
+            ],
+        );
+        const clip: Ps2Anim = {
+            name: 'fold',
+            duration: 1,
+            flags: 1,
+            frames: 3,
+            channels: 1,
+            thresholds: { rotation: 0, scale: 0, translation: 0 },
+            tracks: [
+                { base: [0, 0, 0], hasPos: false, keys: [{ time: 0, q: yaw(25), pos: null }] },
+                { base: [0.4, 0, 0], hasPos: false, keys: [{ time: 0, q: yaw(80), pos: null }] },
+                { base: [1, 0, 0], hasPos: false, keys: [{ time: 0, q: yaw(0), pos: null }] },
+            ],
+        };
+        const converted = retargetDragonClip(clip, src, dst, dragonPartners(src.names, dst.names));
+        const originalPose = localToWorld(src, sampleClip(src, clip, 0));
+        const convertedPose = localToWorld(dst, sampleClip(dst, converted, 0));
+        const outFromBody = (pose: Float32Array) =>
+            (pose[33]! - pose[9]!) * pose[0]! + (pose[34]! - pose[10]!) * pose[1]! + (pose[35]! - pose[11]!) * pose[2]!;
+        expect(outFromBody(convertedPose)).toBeCloseTo(outFromBody(originalPose), 5);
+        expect(
+            Math.hypot(convertedPose[33]! - convertedPose[21]!, convertedPose[35]! - convertedPose[23]!),
+        ).toBeCloseTo(1, 5);
+    });
 });

@@ -15,7 +15,7 @@
 
 import type { Ps2Anim, Ps2Key, Ps2Track, Skeleton } from './ootfanim.ts';
 import { reduceQuatKeys } from './ootfcreature.ts';
-import { invertMat12, localToWorld, mat12ToQuat, mulMat12, type Rig } from './skeleton.ts';
+import { invertMat12, localToWorld, mat12ToQuat, mulMat12, quatToMat12, type Rig } from './skeleton.ts';
 import { sampleClip } from './anim.ts';
 import { classFieldDefault, type OdbClass } from './odb.ts';
 
@@ -176,6 +176,67 @@ export function dragonReadyClip(disc: Pick<OdbClass, 'fields' | 'data'>): number
 
 const rotationOnly = (m: ArrayLike<number>): Float32Array => Float32Array.from([...Array.from(m).slice(0, 9), 0, 0, 0]);
 
+type WingSegment = { sourceTip: number; discTip: number; side: number };
+
+function dragonWingSegments(disc: Rig, partners: readonly number[]): Map<number, WingSegment> {
+    const joints = new Map(disc.names.map((name, i) => [name.toLowerCase(), i]));
+    const segments = new Map<number, WingSegment>();
+    for (const side of ['r', 'l']) {
+        const chain: [string, string][] = [
+            [`${side}wing_a`, `${side}wing_b`],
+            [`${side}wing_b`, `nn_${side}wingwrist`],
+            [`${side}wing_c1_ref`, `${side}wing_d`],
+        ];
+        for (const [name, tip] of chain) {
+            const joint = joints.get(name);
+            const discTip = joints.get(tip);
+            if (joint === undefined || discTip === undefined || disc.parents[discTip] !== joint) continue;
+            const sourceTip = partners[discTip]!;
+            if (sourceTip >= 0) segments.set(joint, { sourceTip, discTip, side: side === 'r' ? 1 : -1 });
+        }
+    }
+    return segments;
+}
+
+const dot3 = (a: ArrayLike<number>, b: ArrayLike<number>): number => a[0]! * b[0]! + a[1]! * b[1]! + a[2]! * b[2]!;
+
+function relativeSide(world: Float32Array, joint: number, root: number, side: Float32Array): number {
+    return dot3(world.subarray(joint * 12 + 9), side) - dot3(world.subarray(root * 12 + 9), side);
+}
+
+// Preserve the disc bone's length and the direction of its offset in the body's vertical plane.
+function wingClearanceTurn(
+    pose: Float32Array,
+    childOffset: Float32Array,
+    side: Float32Array,
+    target: number,
+): Float32Array | undefined {
+    const [x, y, z] = childOffset;
+    const offset = [0, 1, 2].map((i) => x! * pose[i]! + y! * pose[i + 3]! + z! * pose[i + 6]!);
+    const current = dot3(offset, side);
+    if (current >= target) return;
+    const length = Math.hypot(...offset);
+    const transverse = offset.map((v, i) => v - current * side[i]!);
+    const span = Math.hypot(...transverse);
+    if (span < 1e-6) return;
+    const lateral = Math.min(target, length * 0.999);
+    if (current >= lateral) return;
+    const factor = Math.sqrt(length * length - lateral * lateral) / span;
+    const goal = transverse.map((v, i) => factor * v + lateral * side[i]!);
+    const turn = [
+        offset[1]! * goal[2]! - offset[2]! * goal[1]!,
+        offset[2]! * goal[0]! - offset[0]! * goal[2]!,
+        offset[0]! * goal[1]! - offset[1]! * goal[0]!,
+        length * length + dot3(offset, goal),
+    ];
+    const magnitude = Math.hypot(...turn);
+    if (magnitude < 1e-10) return;
+    return quatToMat12(
+        turn.map((v) => v / magnitude),
+        [0, 0, 0],
+    );
+}
+
 export interface DragonRetargetOptions {
     /** Root translation scale (disc rig size / PC rig size). Default 1. */
     scale?: number;
@@ -189,7 +250,9 @@ export interface DragonRetargetOptions {
  * A clip of the PC rig (already in PS2 form on that rig, `convertPcAnimToPs2`) on the disc rig: at every key time of the
  * source, each disc joint with a partner takes the partner's model-space rotation change from its bind pose
  * (W = Wbind_disc * inverse(Wbind_pc) * W_pc, row vectors), a joint without one keeps its bind rotation under its parent,
- * and the root's translation follows the PC root's change from its bind position. Keys are then reduced per track.
+ * and the root's translation follows the PC root's change from its bind position. When the different wing segment
+ * lengths put an elbow, wrist or wing tip closer to the body, swing that disc segment outward to the source clearance.
+ * Keys are then reduced per track.
  */
 export function retargetDragonClip(
     source: Ps2Anim,
@@ -217,41 +280,50 @@ export function retargetDragonClip(
     const srcRoot = src.parents.indexOf(-1);
     const dstRoot = dst.parents.indexOf(-1);
     const rootBind = [9, 10, 11].map((k) => src.bindLocal[srcRoot * 12 + k]!);
+    const wingSegments = dragonWingSegments(dst, partner);
+    const rootBindInverse = invertMat12(rotationOnly(srcBind.subarray(srcRoot * 12, srcRoot * 12 + 12)));
     const keys: { time: number; q: [number, number, number, number] }[][] = dst.names.map(() => []);
     const rootPos: [number, number, number][] = [];
     const world = new Float32Array(dst.jointCount * 12);
+    const wingTurns: (Float32Array | undefined)[] = [];
     // sampled as a clip that holds its last frame: a looping clip would wrap its last key time back to the first key
     const held: Ps2Anim = { ...source, flags: source.flags | 1 };
     for (const t of times) {
         const ws = localToWorld(src, sampleClip(src, held, t));
+        const sourceRoot = ws.subarray(srcRoot * 12, srcRoot * 12 + 12);
+        const root = rootBind.map((v, i) => dst.bindLocal[dstRoot * 12 + i + 9]! + (sourceRoot[i + 9]! - v) * scale);
+        const lateral = mulMat12(rootBindInverse, rotationOnly(sourceRoot)).subarray(0, 3);
         for (const d of dst.order) {
             const p = dst.parents[d]!;
             const s = partner[d]!;
             const w = world.subarray(d * 12, d * 12 + 12);
-            if (s >= 0) w.set(mulMat12(lead[d]!, rotationOnly(ws.subarray(s * 12, s * 12 + 12))));
-            else if (p >= 0)
-                w.set(
-                    mulMat12(
-                        rotationOnly(dst.bindLocal.subarray(d * 12, d * 12 + 12)),
-                        world.subarray(p * 12, p * 12 + 12),
-                    ),
-                );
-            else w.set(rotationOnly(dst.bindLocal.subarray(d * 12, d * 12 + 12)));
-            const local = p < 0 ? w : mulMat12(w, invertMat12(world.subarray(p * 12, p * 12 + 12)));
+            const bind = dst.bindLocal.subarray(d * 12, d * 12 + 12);
+            const parent = p < 0 ? null : world.subarray(p * 12, p * 12 + 12);
+            const inheritedTurn = wingTurns[p];
+            if (s >= 0) {
+                const rotation = mulMat12(lead[d]!, rotationOnly(ws.subarray(s * 12, s * 12 + 12)));
+                w.set(inheritedTurn ? mulMat12(rotation, inheritedTurn) : rotation);
+            } else w.set(parent ? mulMat12(rotationOnly(bind), parent) : rotationOnly(bind));
+            w.set(parent ? mulMat12(bind, parent).subarray(9) : root, 9);
+            const segment = wingSegments.get(d);
+            let turn: Float32Array | undefined;
+            if (segment) {
+                const side = lateral.map((v) => v * segment.side);
+                const clearance = relativeSide(ws, segment.sourceTip, srcRoot, side) * scale;
+                const target = clearance - relativeSide(world, d, dstRoot, side);
+                const tipOffset = dst.bindLocal.subarray(segment.discTip * 12 + 9, segment.discTip * 12 + 12);
+                turn = wingClearanceTurn(w, tipOffset, side, target);
+                if (turn) w.set(mulMat12(w, turn).subarray(0, 9));
+            }
+            wingTurns[d] = inheritedTurn && turn ? mulMat12(inheritedTurn, turn) : (turn ?? inheritedTurn);
+            const local = parent ? mulMat12(w, invertMat12(parent)) : w;
             const q = mat12ToQuat(local);
             const prev = keys[d]!.at(-1)?.q;
             const l = Math.hypot(...q) || 1;
             const sign = prev && prev[0] * q[0] + prev[1] * q[1] + prev[2] * q[2] + prev[3] * q[3] < 0 ? -1 : 1;
             keys[d]!.push({ time: t, q: q.map((v) => (v * sign) / l) as [number, number, number, number] });
         }
-        const r = ws.subarray(srcRoot * 12 + 9, srcRoot * 12 + 12);
-        rootPos.push(
-            [0, 1, 2].map((k) => dst.bindLocal[dstRoot * 12 + 9 + k]! + (r[k]! - rootBind[k]!) * scale) as [
-                number,
-                number,
-                number,
-            ],
-        );
+        rootPos.push([root[0]!, root[1]!, root[2]!]);
     }
     const srcRootMoves = !!source.tracks[srcRoot]?.hasPos;
     const tracks: Ps2Track[] = dst.names.map((_, d) => {
