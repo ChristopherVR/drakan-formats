@@ -35,6 +35,8 @@ export interface PcSound {
     volume: number;
     dropoff: number;
     priority: number;
+    /** Belongs to Rynn's Comments group or one of its gameplay line groups. */
+    playerComment?: boolean;
     /** Mono 16-bit samples (8-bit / stereo sources are converted on load). */
     pcm: Int16Array;
 }
@@ -76,11 +78,13 @@ export function pcmToMono16(raw: Uint8Array, channels: number, bits: number): In
 export async function parsePcSounds(data: ArrayBuffer | Uint8Array): Promise<PcSoundBank> {
     const r = await SrscReader.fromBytes(data);
     const bank: PcSoundBank = { sounds: [], groups: new Map(), warnings: [] };
+    const parents = new Map<number, number>();
     for (const e of r.entries) {
         const rec = await r.readRaw(e);
         if (e.type === 0x301) {
             const n = rec.length >= 2 ? view(rec).getUint16(0, true) : 0;
             bank.groups.set(e.id, cstring(rec, 2, n));
+            parents.set(e.id, e.sub);
             continue;
         }
         if (e.type !== 0x302) continue;
@@ -129,6 +133,14 @@ export async function parsePcSounds(data: ArrayBuffer | Uint8Array): Promise<PcS
         } catch (err) {
             bank.warnings.push(`sound ${e.id}: ${(err as Error).message}`);
         }
+    }
+    const commentGroups = new Set<number>();
+    for (const [id, name] of bank.groups) {
+        if (name.toLowerCase() === 'comments' && bank.groups.get(parents.get(id)!)?.toLowerCase() === 'rynn')
+            commentGroups.add(id);
+    }
+    for (const sound of bank.sounds) {
+        if (commentGroups.has(sound.group) || commentGroups.has(parents.get(sound.group)!)) sound.playerComment = true;
     }
     return bank;
 }
@@ -649,6 +661,18 @@ export interface SoundConversion {
     adpcmBytes: number;
 }
 
+// The disc's equivalent interaction lines play around -23 dBFS with their descriptor attenuation.
+// Adjust only the descriptor. This keeps peaks intact and the normal master and distance controls still apply.
+function gameplayVoiceVolume(pc: PcSound, pcm: Int16Array): number {
+    if (!pcm.length || pc.volume <= -6000) return pc.volume;
+    let energy = 0;
+    for (const sample of pcm) energy += sample * sample;
+    if (!energy) return pc.volume;
+    const level = 1000 * Math.log10(energy / pcm.length / (32768 * 32768)) + pc.volume;
+    const lift = Math.min(900, Math.max(0, Math.round(-2300 - level)));
+    return Math.min(0, pc.volume + lift);
+}
+
 /**
  * Convert PC sounds (one entry per PC database) into PS2 sounds with fresh ids starting at `firstId`, all in one new
  * group `groupId`. Identical (db, id) pairs convert once. The result feeds `writePs2Sdb` / `appendToPs2Sdb`, and
@@ -714,7 +738,10 @@ export function convertPcSounds(
                 name: pc.name || `sound ${pc.id}`,
                 flags,
                 rate,
-                volume: pc.volume,
+                volume:
+                    pc.playerComment && !loop && sdbKey(key) === 'common/system/system'
+                        ? gameplayVoiceVolume(pc, pcm)
+                        : pc.volume,
                 dropoff: Number.isFinite(pc.dropoff) ? pc.dropoff : 15,
                 priority: Math.min(10, pc.priority),
                 pcm,

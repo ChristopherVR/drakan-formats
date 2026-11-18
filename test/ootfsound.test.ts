@@ -179,6 +179,27 @@ describe('PS2 SDB writer', () => {
         return { pcm, conv, key };
     }
 
+    it('brings quiet Rynn interaction lines up to disc speech level while preserving other cues', async () => {
+        const pcm = new Int16Array(100).fill(8192); // -12 dBFS before descriptor attenuation
+        const bank = await parsePcSounds(
+            pcSrsc([
+                { type: 0x301, id: 1, sub: 0, data: str('Rynn') },
+                { type: 0x301, id: 2, sub: 1, data: str('Comments') },
+                { type: 0x301, id: 3, sub: 2, data: str('Inventory') },
+                { type: 0x301, id: 4, sub: 1, data: str('Sound FX') },
+                { type: 0x302, id: 10, sub: 3, data: pcSound('quiet', pcm, { vol: -1700 }) },
+                { type: 0x302, id: 11, sub: 2, data: pcSound('loud', pcm, { vol: -300 }) },
+                { type: 0x302, id: 12, sub: 4, data: pcSound('steps', pcm, { vol: -1700 }) },
+                { type: 0x302, id: 13, sub: 3, data: pcSound('loop', pcm, { vol: -1700, flags: 8 }) },
+                { type: 0x302, id: 14, sub: 3, data: pcSound('silent', pcm, { vol: -10000 }) },
+            ]),
+        );
+        const volumes = (key: string) =>
+            convertPcSounds(new Map([[key, bank]]), { firstId: 1, groupId: 1 }).sounds.map((s) => s.volume);
+        expect(volumes('Common/System/System')).toEqual([-1096, -300, -1700, -1700, -10000]);
+        expect(volumes('another/bank')).toEqual([-1700, -300, -1700, -1700, -10000]);
+    });
+
     it('hands out ids from a list and ships the sounds as new SDB entries', async () => {
         const { conv: _c, key } = await convertOne();
         const bank = await parsePcSounds(
