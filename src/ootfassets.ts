@@ -158,6 +158,34 @@ export interface DiscModelSource {
 }
 const DEFAULT_DISPLAY_LIST = /tree|birch/i;
 
+function separateRockArchFace(model: PcModel): PcModel {
+    const face = model.polygons[1];
+    const corners = [0, 3, 4, 7];
+    if (
+        model.name !== 'Arch Hall 2 Rock 01' ||
+        !face ||
+        model.textures[face.texture]?.id !== 3193 ||
+        face.indices.length !== corners.length ||
+        corners.some((vertex, i) => face.indices[i] !== vertex) ||
+        model.positions.length < 24
+    )
+        return model;
+
+    // The PC culls the rock face from the hall. The converted model draws both sides, so the rock
+    // and plaster fight over the same plane. Move only the rock face towards the cave.
+    const originalLength = model.positions.length;
+    const positions = new Float32Array(originalLength + corners.length * 3);
+    positions.set(model.positions);
+    corners.forEach((vertex, i) => {
+        const at = originalLength + i * 3;
+        positions.set(model.positions.subarray(vertex * 3, vertex * 3 + 3), at);
+        positions[at] = positions[at]! + 16 / 2048;
+    });
+    const polygons = model.polygons.slice();
+    polygons[1] = { ...face, indices: corners.map((_, i) => originalLength / 3 + i) };
+    return { ...model, positions, polygons };
+}
+
 /**
  * PC cage models (Cage01wPerson2, Cage02Empty, Cage02wPerson ...: hanging cages, some with a prisoner). The PC collides
  * them through a sphere or boxes listing the bar polygons; on the PS2 Rynn walks through a sphere and pushes 100 to 150
@@ -634,6 +662,7 @@ export class OotfAssetBuilder {
             return fail(e instanceof ModelError ? e.message : String(e));
         }
         if (!pc) return fail('no such model');
+        if (key === 'mountain world/ruined village/ruined village#3875') pc = separateRockArchFace(pc);
         const shift = this.modelShifts.get(key);
         if (shift && !pc.character)
             // the bounds are rebuilt from the moved vertices
