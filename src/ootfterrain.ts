@@ -289,13 +289,14 @@ export class TerrainTextureBuilder {
     /** Base entries `opaqueNative` has looked at. */
     private readonly opaqueChecked = new Set<number>();
 
-    private constructor(
-        private readonly src: PcFileSource,
-        /** Dependency index the new refs use. */
-        readonly db: number,
-        private readonly opt: TerrainTextureOptions,
-        firstFree: number,
-    ) {
+    private readonly src: PcFileSource;
+    /** Dependency index the new refs use. */
+    readonly db: number;
+    private readonly opt: TerrainTextureOptions;
+    private constructor(src: PcFileSource, db: number, opt: TerrainTextureOptions, firstFree: number) {
+        this.src = src;
+        this.db = db;
+        this.opt = opt;
         this.nextId = opt.firstId ?? Math.max(1000, firstFree);
     }
 

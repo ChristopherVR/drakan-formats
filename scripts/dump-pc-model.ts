@@ -1,8 +1,8 @@
 // Dump Drakan: Order of the Flame (PC) models to OBJ + PNG textures + a skeleton JSON, for reference in Blender.
 //
-//   node --experimental-transform-types --no-warnings scripts/dump-pc-model.ts \
+//   node --no-warnings scripts/dump-pc-model.ts \
 //        --ootf <OotF data dir> --container Common/NPC/NPCs --list
-//   node --experimental-transform-types --no-warnings scripts/dump-pc-model.ts \
+//   node --no-warnings scripts/dump-pc-model.ts \
 //        --ootf <OotF data dir> --container Common/NPC/NPCs --out <dir> "Delon(h)" 3727 ...
 //
 // <OotF data dir> holds Dragon.rrc and Common/ (an install, or analysis/scripts/ootf_cab.py output). A model is picked by id

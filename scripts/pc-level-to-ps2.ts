@@ -1,6 +1,6 @@
 // Convert one Drakan: Order of the Flame (PC) level to a Drakan: The Ancients' Gates (PS2) .LVL.
 //
-//   node --experimental-transform-types --no-warnings scripts/pc-level-to-ps2.ts \
+//   node --no-warnings scripts/pc-level-to-ps2.ts \
 //        --ootf <OotF install dir> --ps2 <dir with extracted PS2 LEVEL*.LVL and *.ODB> \
 //        --template LEVEL1NA --out out.LVL "Multiplayer/Ground/Relic/Relic.lvl"
 //

@@ -1,9 +1,9 @@
 // Dump Drakan: The Ancients' Gates (PS2) disc models to OBJ + PNG textures + a skeleton JSON, for reference in Blender.
 // The PS2 counterpart of dump-pc-model.ts, with the same output, so analysis/scripts/blender/import_pc_model.py opens it.
 //
-//   node --experimental-transform-types --no-warnings scripts/dump-ps2-model.ts \
+//   node --no-warnings scripts/dump-ps2-model.ts \
 //        --iso <disc image> --container ENGLISH/COMMON/NPC/NPCS --list
-//   node --experimental-transform-types --no-warnings scripts/dump-ps2-model.ts \
+//   node --no-warnings scripts/dump-ps2-model.ts \
 //        --iso <disc image> --container ENGLISH/COMMON/NPC/NPCS --out <dir> "Villager Female" 3727 ...
 //
 // --container is the disc path of a MOD without its extension (the TXD and ODB beside it are used when present). A model is

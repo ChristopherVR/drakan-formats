@@ -219,7 +219,10 @@ export function classIdPins(files: Readonly<Record<string, Uint8Array>>): ClassI
 export class ClassIdPinner {
     private readonly used = new Map<string, Set<number>>();
     private readonly count = new Map<string, number>();
-    constructor(private readonly pins?: ClassIdPins) {}
+    private readonly pins?: ClassIdPins;
+    constructor(pins?: ClassIdPins) {
+        this.pins = pins;
+    }
 
     /** Every pinned id of the file (upper or lower case name). */
     reserved(file: string): Set<number> {

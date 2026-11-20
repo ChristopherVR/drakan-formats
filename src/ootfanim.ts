@@ -80,7 +80,9 @@ export interface Skeleton {
 class Rd {
     readonly dv: DataView;
     o = 0;
-    constructor(readonly b: Uint8Array) {
+    readonly b: Uint8Array;
+    constructor(b: Uint8Array) {
+        this.b = b;
         this.dv = view(b);
     }
     chk(n: number): void {

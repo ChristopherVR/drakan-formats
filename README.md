@@ -38,7 +38,7 @@ import { loadPcLevel, convertPcLevel, buildPs2Lvl, ps2BlobFor } from '@drakan/fo
 
 ```sh
 npm install
-node --experimental-transform-types --no-warnings scripts/pc-level-to-ps2.ts \
+node --no-warnings scripts/pc-level-to-ps2.ts \
   --ootf "<OotF install>" --ps2 "<extracted PS2 files>" --template LEVEL1NA --out out.LVL "Multiplayer/Ground/Relic/Relic.lvl"
 ```
 

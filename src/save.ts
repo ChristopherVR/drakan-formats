@@ -72,12 +72,11 @@ export class SaveFormatError extends Error {}
 
 /** A well-formed edit request that the field table rejects (unknown field, out of range, unrecognised layout). */
 export class SaveFieldError extends Error {
-    constructor(
-        message: string,
-        /** True when the field is verified only for one entry id and this save has another (savetool `--force`). */
-        readonly needsForce = false,
-    ) {
+    /** True when the field is verified only for one entry id and this save has another (savetool `--force`). */
+    readonly needsForce: boolean;
+    constructor(message: string, needsForce = false) {
         super(message);
+        this.needsForce = needsForce;
     }
 }
 

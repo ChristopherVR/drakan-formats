@@ -626,7 +626,10 @@ export interface ConvertedSound {
 export class SoundMap {
     private readonly refs = new Map<string, number>();
     /** PS2 database index placed in the high half of a reference (0 = the level's own SDB). */
-    constructor(readonly ps2Db = 0) {}
+    readonly ps2Db: number;
+    constructor(ps2Db = 0) {
+        this.ps2Db = ps2Db;
+    }
 
     set(key: string, pcId: number, ps2Id: number): void {
         this.refs.set(`${key}#${pcId}`, ((this.ps2Db << 16) | ps2Id) >>> 0);

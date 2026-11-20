@@ -69,7 +69,9 @@ function textOf(raw: Uint8Array): string {
 class Cursor {
     readonly dv: DataView;
     o = 0;
-    constructor(readonly b: Uint8Array) {
+    readonly b: Uint8Array;
+    constructor(b: Uint8Array) {
+        this.b = b;
         this.dv = view(b);
     }
     need(n: number): void {

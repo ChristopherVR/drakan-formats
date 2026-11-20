@@ -30,20 +30,37 @@ export function looksLikeZlib(b: Uint8Array): boolean {
  * Layout reference: analysis/scripts/iop_srsc.py, docs/reference/iop-and-io.md section 5.4.
  */
 export class SrscReader {
+    readonly source: ByteSource;
+    /** `'pc'` for the 12-byte Order of the Flame header (version 0x0100), else `'ps2'`. */
+    readonly platform: 'ps2' | 'pc';
+    /** The header bytes verbatim (so re-serialising keeps the unknown pad bytes). */
+    readonly header: Uint8Array;
+    readonly version: number;
+    readonly indexOffset: number;
+    readonly entries: SrscEntry[];
+    /** Bytes after the last index entry (normally empty). */
+    readonly trailer: Uint8Array;
+    /** Problems that do not prevent reading (range overruns, trailing bytes). */
+    readonly warnings: string[];
     private constructor(
-        readonly source: ByteSource,
-        /** `'pc'` for the 12-byte Order of the Flame header (version 0x0100), else `'ps2'`. */
-        readonly platform: 'ps2' | 'pc',
-        /** The header bytes verbatim (so re-serialising keeps the unknown pad bytes). */
-        readonly header: Uint8Array,
-        readonly version: number,
-        readonly indexOffset: number,
-        readonly entries: SrscEntry[],
-        /** Bytes after the last index entry (normally empty). */
-        readonly trailer: Uint8Array,
-        /** Problems that do not prevent reading (range overruns, trailing bytes). */
-        readonly warnings: string[],
-    ) {}
+        source: ByteSource,
+        platform: 'ps2' | 'pc',
+        header: Uint8Array,
+        version: number,
+        indexOffset: number,
+        entries: SrscEntry[],
+        trailer: Uint8Array,
+        warnings: string[],
+    ) {
+        this.source = source;
+        this.platform = platform;
+        this.header = header;
+        this.version = version;
+        this.indexOffset = indexOffset;
+        this.entries = entries;
+        this.trailer = trailer;
+        this.warnings = warnings;
+    }
 
     static async open(source: ByteSource): Promise<SrscReader> {
         const head = await source.read(0, SRSC_HEADER_SIZE);

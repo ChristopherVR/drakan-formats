@@ -31,12 +31,16 @@ function splitPath(path: string): string[] {
 export class Iso9660 {
     private readonly dirCache = new Map<string, IsoEntry[]>();
 
-    private constructor(
-        readonly source: ByteSource,
-        readonly volumeId: string,
-        readonly root: IsoEntry,
-        readonly volumeSectors: number,
-    ) {}
+    readonly source: ByteSource;
+    readonly volumeId: string;
+    readonly root: IsoEntry;
+    readonly volumeSectors: number;
+    private constructor(source: ByteSource, volumeId: string, root: IsoEntry, volumeSectors: number) {
+        this.source = source;
+        this.volumeId = volumeId;
+        this.root = root;
+        this.volumeSectors = volumeSectors;
+    }
 
     static async open(source: ByteSource): Promise<Iso9660> {
         for (let lba = 16; lba < 16 + 32; lba++) {

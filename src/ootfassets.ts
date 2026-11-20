@@ -390,10 +390,11 @@ export class OotfAssetBuilder {
     private nextTex: number;
     private nextModel: number;
 
-    constructor(
-        readonly src: PcFileSource,
-        readonly options: AssetBuilderOptions = {},
-    ) {
+    readonly src: PcFileSource;
+    readonly options: AssetBuilderOptions;
+    constructor(src: PcFileSource, options: AssetBuilderOptions = {}) {
+        this.src = src;
+        this.options = options;
         this.nextTex = options.firstTextureId ?? 1;
         this.nextModel = options.firstModelId ?? 2;
         this.nextAnim = options.firstAnimId ?? 100;
