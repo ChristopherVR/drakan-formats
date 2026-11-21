@@ -44,6 +44,7 @@ export * from './ootfanim.ts';
 export * from './skeleton.ts';
 export * from './anim.ts';
 export * from './ootfpipeline.ts';
+export * from './ootfmp.ts';
 export * from './ootfcampaign.ts';
 export * from './ootftext.ts';
 export * from './ootfsource.ts';

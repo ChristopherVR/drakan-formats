@@ -257,6 +257,13 @@ export interface PcLevel {
     warnings: string[];
 }
 
+/** The PC engine reads the first Level Properties class in dependency order. */
+export function pcLevelProperties(pc: PcLevel): OdbClass | undefined {
+    for (const [, table] of [...pc.classes].sort(([a], [b]) => a - b))
+        for (const cls of table.values()) if (cls.rflClass === 54) return cls;
+    return undefined;
+}
+
 /** PC level display name: the `<0xNNNN>` localised-string prefix is dropped. */
 export function pcLevelName(h: LvlHeader): string {
     return h.name.text.replace(/^<0x[0-9a-fA-F]+>\s*/, '');

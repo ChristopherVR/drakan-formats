@@ -31,7 +31,7 @@ import {
     type ParamSpec,
     type Vec3,
 } from './lvl.ts';
-import type { PcLevel } from './pc.ts';
+import { pcLevelProperties, type PcLevel } from './pc.ts';
 
 // ---------------------------------------------------------------- PS2 tracks
 
@@ -464,9 +464,8 @@ function classNumber(
  * dependency order, the same class `ensureSingletons` copies the other level properties from. 0 = none.
  */
 export function pcInitialMusicId(pc: PcLevel): number {
-    for (const table of [...pc.classes].sort((a, b) => a[0] - b[0]).map((x) => x[1]))
-        for (const c of table.values()) if (c.rflClass === 54) return classNumber(c, F_INITIAL);
-    return 0;
+    const properties = pcLevelProperties(pc);
+    return properties ? classNumber(properties, F_INITIAL) : 0;
 }
 
 /** `Background Music ID` (title menu) and `Credits Music ID` of the PC `User Interface Properties` class, 0 when absent. */

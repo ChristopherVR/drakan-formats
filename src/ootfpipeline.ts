@@ -43,6 +43,17 @@ import {
 } from './lvl.ts';
 import { EMITTER_RFL, unswitchedEmitters } from './ootfpropremake.ts';
 import {
+    findOotfStartingWeapon,
+    ootfPickupDisplay,
+    ootfPickupItemRefs,
+    preloadOotfArenaItems,
+    readOotfArenaOrder,
+    readOotfArenaPickups,
+    readOotfNeutralDragon,
+    type OotfArenaPickup,
+    type OotfNeutralDragon,
+} from './ootfmp.ts';
+import {
     ODB_CLASS_TYPE,
     ODB_FIELDS_TYPE,
     buildOdbIndex,
@@ -626,6 +637,10 @@ export interface OotfLevelOut {
     title: string;
     /** A multiplayer arena (by the level's name id, else its `Multiplayer/` folder): see `isOotfArenaLevel`. */
     arena: boolean;
+    arenaPickups?: OotfArenaPickup[];
+    arenaOrder?: number;
+    arenaLoadout?: number[];
+    arenaDragon?: OotfNeutralDragon;
     parts: Ps2LevelParts;
     /** Per-level splat files to ship instead of the template's (`TXD` = template splat TXD plus the terrain textures). */
     splats: Record<string, Uint8Array>;
@@ -858,6 +873,7 @@ export async function convertOotfLevels(
     // pack converted separately collide on RESOURES/WORLDCON/PROCTEES and on the new class ids). The arenas stay out of
     // the campaign plan (no exits, default titles) and sort after the chapters in `levels`.
     const campaignPcs = pcs.filter((p) => !isOotfArenaLevel(p));
+    const arenaOrder = campaignPcs.length < pcs.length ? await readOotfArenaOrder(src) : new Map<string, number>();
     const campaignOn = opt.campaign !== false && campaignPcs.length > 1;
     // The install's language and the facts a localized install could break: fail here with the reasons instead of
     // writing a pack whose levels have lost classes or exits (docs/journal/2026-11-06/issue-3-localized-ootf.md).
@@ -958,6 +974,10 @@ export async function convertOotfLevels(
             const cls = pc.classes.get(o.dbIndex)?.get(o.classId);
             const key = `${pc.path}|${o.dbIndex}:${o.classId}`;
             if (cls && !used.has(key)) used.set(key, { db: o.dbIndex, id: o.classId, cls, pc });
+        }
+        if (isOotfArenaLevel(pc) && !isOotfAirArenaLevel(pc)) {
+            const starter = findOotfStartingWeapon(pc);
+            if (starter) used.set(`${pc.path}|${starter.db}:${starter.id}`, { ...starter, pc });
         }
     }
     const ownerOf = new Map<OdbClass, string>();
@@ -1216,6 +1236,34 @@ export async function convertOotfLevels(
                 ownerOf.set(c.cls, c.owner);
                 used.set(`reference|${ownedClassKey(c.owner, c.id)}`, { db: -1, id: c.id, cls: c.cls, pc: pcs[0]! });
             }
+    }
+    // Put the retail meshes on scenery classes so an authoritative pickup can hide and show them without native Use.
+    const arenaDisplays = new Map<string, OdbClass>();
+    const addArenaDisplay = (pc: PcLevel, source: OdbClass) => {
+        const ow = ownerOf.get(source);
+        if (!ow) return false;
+        const key = ownedClassKey(ow, source.id);
+        if (arenaDisplays.has(key)) return true;
+        const cls = ootfPickupDisplay(source);
+        if (!cls) return false;
+        arenaDisplays.set(key, cls);
+        ownerOf.set(cls, ow);
+        used.set(`arena-display|${key}`, { db: -1, id: source.id, cls, pc });
+        return true;
+    };
+    for (const pc of pcs.filter(isOotfArenaLevel)) {
+        for (const o of pc.list.objects) {
+            const cls = pc.classes.get(o.dbIndex)?.get(o.classId);
+            if (!cls || ![86, 120, 126, 138].includes(cls.rflClass ?? 0)) continue;
+            if (addArenaDisplay(pc, cls) || cls.rflClass !== 120) continue;
+            const ow = ownerOf.get(cls);
+            if (!ow) continue;
+            for (const ref of ootfPickupItemRefs(cls, o)) {
+                const container = builder.resolveContainer(ow, ref >>> 16);
+                const item = container && ownedClasses.get(ownedClassKey(container, ref & 0xffff));
+                if (item) addArenaDisplay(pc, item);
+            }
+        }
     }
     // Drakan 2 models for OotF enemies and weapons (ootfps2model.ts): weapon class name -> model of the host's own MOD.
     const modelSwap = planPs2Models(opt.ps2Models);
@@ -4763,10 +4811,45 @@ export async function convertOotfLevels(
         );
         if (lf) parts.terrain = parts.terrain.map((L) => ({ ...L, flags: L.flags | lf }));
         if (!opt.terrainDiscTextures && procMap?.steepUnderlays) parts.terrainTextureUnderlays = procMap.steepUnderlays;
+        const arena = isOotfArenaLevel(pc);
+        const resourceOf = (cls: OdbClass) => {
+            const key = planKey.get(sig(cls));
+            const mapped = key && plan?.resolve(key.db, key.id);
+            return mapped ? ((mapped.dbIndex << 16) | mapped.classId) >>> 0 : undefined;
+        };
+        const visualOf = (source: OdbClass) => {
+            const ow = ownerOf.get(source);
+            const display = ow && arenaDisplays.get(ownedClassKey(ow, source.id));
+            return display ? resourceOf(display) : undefined;
+        };
+        const resolveReward = (ow: string | null | undefined, ref: number) => {
+            const container = ow ? builder.resolveContainer(ow, ref >>> 16) : null;
+            const cls = container ? ownedClasses.get(ownedClassKey(container, ref & 0xffff)) : undefined;
+            return cls ? { cls, resource: resourceOf(cls), visual: visualOf(cls) } : undefined;
+        };
+        const arenaPickups = arena
+            ? readOotfArenaPickups(
+                  pc,
+                  (db, ref) => resolveReward(owner(pc, db), ref),
+                  (cls, ref) => resolveReward(ownerOf.get(cls), ref),
+                  visualOf,
+                  (warning) => res.warnings.push(`${title}: ${warning}`),
+              )
+            : undefined;
+        const start = arena && !isOotfAirArenaLevel(pc) ? findOotfStartingWeapon(pc) : undefined;
+        const nativeStarter = start && resolverFor(pc)?.(start.db, start.id);
+        const startResource = nativeStarter ? ((nativeStarter.dbIndex << 16) | nativeStarter.classId) >>> 0 : 0;
+        if (arenaPickups) preloadOotfArenaItems(parts.objects, arenaPickups, startResource);
         res.levels.push({
             pcPath: pc.path,
             title,
-            arena: isOotfArenaLevel(pc),
+            arena,
+            arenaPickups,
+            arenaOrder: arenaOrder.get(normalizeLevelRef(pc.path)),
+            arenaLoadout: startResource ? [startResource] : undefined,
+            arenaDragon: arena
+                ? readOotfNeutralDragon(pc, (cls, ref) => resolveReward(ownerOf.get(cls), ref))
+                : undefined,
             parts,
             // The level's own far textures (one per terrain group); the template's drew Surdana's colours and its magenta
             // filler on distant converted terrain (journal 2026-11-08/ootf-pink-textures.md).
@@ -5305,26 +5388,35 @@ function ensureSingletons(
         const t = tpl.find((o) => nameOf(o) === 'Procedural Sky');
         if (t) list.objects.push(cloneObject(t, nextId++));
     }
-    // Air arenas (Multiplayer/Air/*) are dragon fights: Rynn on foot has no floor. A Dragon object whose `Initial Mode` is 0
-    // (Ravenshold's, the level where Rynn starts mounted) is placed at her start. Test aid DRAKAN_DBG_DRAGON=0|1 forces it.
+    // Air matches link Rynn and the dragon in flight, including maps that already contain a parked Dragon object.
     const dbgDragon = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.[
         'DRAKAN_DBG_DRAGON'
     ];
-    if (
-        (isOotfAirArenaLevel(pc) || dbgDragon === '1') &&
-        dbgDragon !== '0' &&
-        !list.objects.some((o) => rflOf(o) === 28)
-    ) {
-        const t = tpl.find((o) => rflOf(o) === 28);
-        const rynn = list.objects.find((o) => rflOf(o) === 9);
-        if (t && rynn) {
-            const d = cloneObject(t, nextId++);
-            d.pos = [rynn.pos[0], rynn.pos[1], rynn.pos[2]];
-            d.rot = [...rynn.rot];
-            list.objects.push(d);
-            const specs = objectParamSpecs(d).map((s) => (/^Initial Mode/.test(s.name) ? { ...s, value: 0 } : s));
-            setObjectParams(list, d.id, specs);
-        }
+    const air = isOotfAirArenaLevel(pc);
+    let dragon = list.objects.find((o) => rflOf(o) === 28);
+    if (dbgDragon === '0' || (!air && (dbgDragon !== '1' || dragon))) return;
+    const rynn = list.objects.find((o) => rflOf(o) === 9);
+    if (!rynn) return;
+    if (!dragon) {
+        const templateDragon = tpl.find((o) => rflOf(o) === 28);
+        if (!templateDragon) return;
+        dragon = cloneObject(templateDragon, nextId);
+        list.objects.push(dragon);
+    }
+    const start = air ? pc.list.objects.find((o) => pc.classes.get(o.dbIndex)?.get(o.classId)?.rflClass === 127) : rynn;
+    if (start) {
+        rynn.pos = [...start.pos];
+        rynn.rot = [...start.rot];
+    }
+    dragon.pos = [...rynn.pos];
+    dragon.rot = [...rynn.rot];
+    const fields = classes.get(dragon.dbIndex)?.get(dragon.classId)?.fields;
+    const fieldIndex = fields?.findIndex((f) => /^Initial Mode/.test(f.name)) ?? -1;
+    const mode = fields?.[fieldIndex];
+    if (mode) {
+        const specs = objectParamSpecs(dragon).filter((s) => s.fieldIndex !== fieldIndex);
+        specs.push({ fieldIndex, type: mode.type, name: mode.name, value: 0 });
+        setObjectParams(list, dragon.id, specs);
     }
 }
 
